@@ -1,3 +1,10 @@
+## [1.0.7](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.6...v1.0.7) (2026-02-03)
+
+
+### Bug Fixes
+
+* use hypersec registry for hs-rustlib dependency ([9acd087](https://github.com/hypersec-io/dfe-archiver/commit/9acd087bcc1a0a8871f7100b63388e643cb5fb1b))
+
 ## [1.0.6](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.5...v1.0.6) (2026-02-03)
 
 
