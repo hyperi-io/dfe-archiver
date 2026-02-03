@@ -1,0 +1,182 @@
+# Project:   dfe-archiver
+# File:      Cargo.toml
+# Purpose:   Package manifest for high-volume Kafka-to-storage archiver
+# Language:  TOML
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+[package]
+name = "dfe-archiver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
+license = "LicenseRef-HyperSec-EULA"
+repository = "https://github.com/hypersec-io/dfe-archiver"
+authors = ["HyperSec <engineering@hypersec.io>"]
+
+[lib]
+name = "dfe_archiver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dfe-archiver"
+path = "src/main.rs"
+
+# =============================================================================
+# DEPENDENCIES
+# =============================================================================
+
+[dependencies]
+# HyperSec shared library - config, logging, metrics, transport
+# Using git dependency since registry auth isn't configured
+hs-rustlib = { git = "https://github.com/hypersec-io/hs-rustlib.git", features = [
+    "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",
+] }
+
+# Async runtime
+tokio = { version = ">=1.48", features = ["full", "parking_lot"] }
+tokio-util = { version = ">=0.7", features = ["time"] }
+
+# Serialization
+serde = { version = ">=1.0", features = ["derive"] }
+serde_json = ">=1.0"
+sonic-rs = ">=0.5"                    # SIMD JSON parsing
+
+# Error handling
+thiserror = ">=1.0"
+anyhow = ">=1.0"
+
+# Compression - multiple codec support
+zstd = ">=0.13"
+lz4_flex = ">=0.11"
+snap = ">=1.1"
+flate2 = ">=1.0"                      # gzip
+
+# Cloud storage backends
+object_store = { version = ">=0.11", features = ["aws", "gcp", "azure"] }
+aws-config = ">=1.5"
+aws-sdk-s3 = ">=1.65"
+
+# Utilities
+bytes = ">=1.0"
+chrono = { version = ">=0.4", features = ["serde"] }
+uuid = { version = ">=1.0", features = ["v4", "serde"] }
+parking_lot = ">=0.12"
+dashmap = ">=6.0"
+compact_str = ">=0.8"
+rustc-hash = ">=2.0"
+smallvec = { version = ">=1.13", features = ["union", "serde"] }
+fs2 = ">=0.4"                            # Disk space checking
+metrics = ">=0.24"                       # Prometheus metrics facade (used with hs-rustlib)
+
+# CLI
+clap = { version = ">=4.5", features = ["derive", "env"] }
+
+# Tracing (re-export from hs-rustlib, but also direct for macros)
+tracing = ">=0.1"
+tracing-subscriber = { version = ">=0.3", features = ["env-filter"] }
+
+# Async utilities
+async-trait = ">=0.1"
+futures = ">=0.3"
+
+# .env file loading
+dotenvy = ">=0.15"
+
+# YAML config parsing
+serde_yaml = ">=0.9"
+
+[dev-dependencies]
+tempfile = ">=3.0"
+criterion = { version = ">=0.5", features = ["html_reports", "async_tokio"] }
+proptest = ">=1.0"
+tokio-test = ">=0.4"
+test-log = { version = ">=0.2", features = ["trace"] }
+tracing-subscriber = { version = ">=0.3", features = ["env-filter"] }
+walkdir = ">=2.0"
+reqwest = ">=0.12"
+
+# Testcontainers for Docker-based integration tests (gated by feature)
+testcontainers = ">=0.23"
+testcontainers-modules = { version = ">=0.11", features = ["kafka"] }
+
+# =============================================================================
+# FEATURES
+# =============================================================================
+
+[features]
+default = ["jemalloc"]
+
+
+# Allocator selection
+jemalloc = ["tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
+
+# Integration tests with Docker containers (placeholder, containers always available in dev)
+testcontainers = []
+
+# Memory transport for unit tests (no external services)
+transport-memory = ["hs-rustlib/transport-memory"]
+
+# Full feature set
+full = ["jemalloc", "testcontainers"]
+
+[dependencies.tikv-jemallocator]
+version = ">=0.6"
+optional = true
+
+[dependencies.mimalloc]
+version = ">=0.1"
+optional = true
+
+# =============================================================================
+# PROFILES
+# =============================================================================
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# =============================================================================
+# LINTS
+# =============================================================================
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# =============================================================================
+# BENCHMARKS
+# =============================================================================
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false

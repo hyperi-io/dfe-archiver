@@ -1,0 +1,71 @@
+# Project:   dfe-archiver
+# File:      config.dev.yaml
+# Purpose:   Development configuration for local testing
+# Language:  YAML
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+#
+# Usage:
+#   ARCHIVER_CONFIG=config.dev.yaml cargo run
+#
+# Requires:
+#   docker compose -f docker-compose.dev.yaml up -d
+
+kafka:
+  brokers:
+    - "localhost:19092"
+  group_id: "dfe-archiver-dev"
+  topics:
+    - "test-events"
+  batch_size: 1000
+  # No SASL for local Redpanda
+
+archive:
+  # Local file destination for dev
+  destination: "file://./data/archive"
+  path_template: "{topic}/{year}/{month}/{day}/{hour}"
+  file_extension: "jsonl"
+  # Rolling triggers (on FINAL compressed file size)
+  roll_size_bytes: 1073741824    # 1GB final file size
+  roll_interval_secs: 3600       # 1 hour
+
+  # MinIO config (uncomment to test S3-compatible storage)
+  # destination: "minio://archive"
+  # minio:
+  #   endpoint: "http://localhost:9000"
+  #   access_key: "minioadmin"
+  #   secret_key: "minioadmin"
+  #   bucket: "archive"
+  #   use_ssl: false
+
+buffer:
+  # Smaller buffers for dev (faster feedback)
+  flush_bytes: 1048576           # 1MB
+  flush_age_secs: 5              # 5 seconds
+  flush_records: 1000
+  writer_parallelism: 2
+
+memory:
+  limit_bytes: 67108864          # 64MB
+  pressure_threshold: 0.8
+  tracking_enabled: true
+
+routing:
+  mode: "topic"
+  # Uncomment for expression-based routing:
+  # mode: "expression"
+  # expression_fields:
+  #   - "org_id"
+  #   - "event_type"
+  # default_segment: "unknown"
+
+compression:
+  codec: "zstd"
+  level: 3
+  enabled: true
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+  path: "/metrics"

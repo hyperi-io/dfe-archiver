@@ -1,0 +1,63 @@
+# Project:   dfe-archiver
+# File:      .cargo/config.toml
+# Purpose:   Cargo configuration for HyperSec registry and build settings
+# Language:  TOML
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+# =============================================================================
+# REGISTRIES
+# =============================================================================
+
+[registries]
+hypersec = { index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo/index/" }
+
+# =============================================================================
+# NET SETTINGS
+# =============================================================================
+
+[net]
+retry = 3
+git-fetch-with-cli = true
+
+# =============================================================================
+# BUILD SETTINGS
+# =============================================================================
+
+[build]
+# Use mold linker if available (significantly faster linking)
+# Uncomment if mold is installed:
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Number of parallel jobs (omit for auto-detect)
+
+# =============================================================================
+# TARGET-SPECIFIC SETTINGS
+# =============================================================================
+
+[target.x86_64-unknown-linux-gnu]
+# Enable frame pointers for profiling
+rustflags = ["-C", "force-frame-pointers=yes"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "force-frame-pointers=yes"]
+
+# =============================================================================
+# ALIAS
+# =============================================================================
+
+[alias]
+# Common workflows
+br = "build --release"
+tr = "test --release"
+lint = "clippy --all-targets --all-features -- -D warnings"
+bench-throughput = "bench --bench throughput"
+bench-compression = "bench --bench compression"
+
+# Integration tests (requires Docker or external Kafka)
+test-integration = "test --test '*' --features testcontainers"
+test-external = "test --test '*' -- --ignored"
+
+# Documentation
+doc-open = "doc --open --no-deps"

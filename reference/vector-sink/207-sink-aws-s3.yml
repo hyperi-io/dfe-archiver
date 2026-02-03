@@ -1,0 +1,42 @@
+# 
+# HyperSec XDR Vector Component Template
+# Purpose: AWS S3 Sink for HyperSec XDR Archive 
+# Deployment Types: AWS, SaaS
+# Release Date: 2025-02-17
+# CT Build: © HyperSec 2025
+#
+# Required environment variables:
+# - _207_SINK_AWS_S3_INPUT: name of input: remap or source
+# - ARCHIVE_S3_BUCKET: S3 bucket name
+# - AWS_DEFAULT_REGION:  AWS region of the target service.
+
+# Optional Environment Variables:
+# - _207_SINK_AWS_S3_BATCH_MAX_BYTES: settings for maximum size of a batch that is processed 
+# - _207_SINK_AWS_S3_BATCH_TIMEOUT_SECS: settings for maximum age of a batch before it is flushed
+# - VECTOR_BUFFER_SIZE: settings for maximum size of the buffer on disk
+
+sinks:
+  207_sink_aws_s3:
+    type: aws_s3
+    inputs: ${_207_SINK_AWS_S3_INPUT:?err}
+    batch:
+      max_bytes: ${_207_SINK_AWS_S3_BATCH_MAX_BYTES:-21474836480}
+      timeout_secs: ${_207_SINK_AWS_S3_BATCH_TIMEOUT_SECS:-3600}
+    bucket: ${ARCHIVE_S3_BUCKET:?err}
+    compression: gzip
+    content_encoding: gzip
+    content_type: application/gzip
+    encoding:
+      codec: json
+    filename_time_format: "%Y%m%d%H%M%S%f"
+    filename_append_uuid: false
+    healthcheck:
+      enabled: true
+    key_prefix: "{{ tags.event.org_id }}/{{ tags.event.category }}/year=%Y/month=%m/day=%d/hour=%H/{{ tags.event.category }}_"
+    region: ${AWS_DEFAULT_REGION:?err}
+    acknowledgements:
+      enabled: true
+    buffer:
+      max_size: ${VECTOR_BUFFER_SIZE:-19000000000}
+      type: disk
+      when_full: block
