@@ -14,7 +14,7 @@ pub use loader::load_config;
 pub use shared::SharedConfig;
 pub use types::*;
 
-use crate::{Error, Result};
+use crate::Result;
 
 impl Config {
     /// Load configuration from file with cascade: CLI → ENV → .env → file → defaults

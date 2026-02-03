@@ -7,7 +7,6 @@
 // Copyright: (c) 2026 HyperSec
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

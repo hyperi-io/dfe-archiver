@@ -114,7 +114,7 @@ impl Archiver {
 
             // Receive batch from Kafka
             let messages = {
-                let mut transport = self.transport.lock().await;
+                let transport = self.transport.lock().await;
                 match transport.recv(self.config.kafka.batch_size).await {
                     Ok(msgs) => msgs,
                     Err(e) => {
@@ -184,7 +184,7 @@ impl Archiver {
 
             // Commit processed offsets
             if !offsets_to_commit.is_empty() {
-                let mut transport = self.transport.lock().await;
+                let transport = self.transport.lock().await;
                 if let Err(e) = transport.commit(&offsets_to_commit).await {
                     error!(error = %e, "Failed to commit offsets");
                 }
@@ -310,7 +310,7 @@ impl Archiver {
         }
 
         // Close Kafka transport
-        let mut transport = self.transport.lock().await;
+        let transport = self.transport.lock().await;
         transport.close().await?;
 
         info!("Drain complete");
@@ -331,8 +331,6 @@ impl Archiver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Integration tests would go here but require running infrastructure
     // See tests/integration/ for full integration tests
 }

@@ -9,9 +9,8 @@
 use crate::compression::Compressor;
 use crate::config::ArchiveConfig;
 use crate::storage::StorageBackend;
-use crate::{Error, Result};
+use crate::Result;
 use chrono::{DateTime, Utc};
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
