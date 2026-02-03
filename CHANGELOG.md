@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.4...v1.0.5) (2026-02-03)
+
+
+### Bug Fixes
+
+* restore allocator dependency versions (final fix with updated CI) ([9e565b7](https://github.com/hypersec-io/dfe-archiver/commit/9e565b7f260d085155c5d469bdbaa5d7ee9792f9))
+
 ## [1.0.4](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.3...v1.0.4) (2026-02-03)
 
 
