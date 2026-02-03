@@ -30,8 +30,8 @@ path = "src/main.rs"
 
 [dependencies]
 # HyperSec shared library - config, logging, metrics, transport
-# Using git dependency since registry auth isn't configured
-hs-rustlib = { git = "https://github.com/hypersec-io/hs-rustlib.git", features = [
+# Published to hypersec-cargo-virtual registry in JFrog Artifactory
+hs-rustlib = { version = ">=1.3", registry = "hypersec", features = [
     "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",
 ] }
 
