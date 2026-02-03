@@ -1,3 +1,10 @@
+## [1.0.8](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.7...v1.0.8) (2026-02-03)
+
+
+### Bug Fixes
+
+* **ci:** add --allow-dirty flag to cargo publish ([ed003ac](https://github.com/hypersec-io/dfe-archiver/commit/ed003ac43c97cff6c92ac5d7895e8134e5dc6855))
+
 ## [1.0.7](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.6...v1.0.7) (2026-02-03)
 
 
