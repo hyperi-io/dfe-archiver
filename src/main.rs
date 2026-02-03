@@ -10,11 +10,16 @@
 #![deny(clippy::unwrap_used)]
 
 // Allocator selection (compile-time feature)
-#[cfg(feature = "jemalloc")]
+// jemalloc takes priority if both features are enabled (e.g., --all-features)
+#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
+#[global_allocator]
+static GLOBAL_JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
