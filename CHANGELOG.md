@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.1...v1.0.2) (2026-02-03)
+
+
+### Bug Fixes
+
+* **ci:** add GitHub App token authentication to release workflow ([2a8b250](https://github.com/hypersec-io/dfe-archiver/commit/2a8b25075ac432c78996357f1d9ee14d170c8d80))
+
 ## [1.0.1](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.0...v1.0.1) (2026-02-03)
 
 
