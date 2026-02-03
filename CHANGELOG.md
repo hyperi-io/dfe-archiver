@@ -1,3 +1,10 @@
+## [1.0.6](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.5...v1.0.6) (2026-02-03)
+
+
+### Bug Fixes
+
+* handle mutually exclusive allocator features with --all-features ([d3c9659](https://github.com/hypersec-io/dfe-archiver/commit/d3c96592d93ae2b06c65640c6cb1658abf120524))
+
 ## [1.0.5](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.4...v1.0.5) (2026-02-03)
 
 
