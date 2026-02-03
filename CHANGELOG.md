@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.8...v1.1.0) (2026-02-03)
+
+
+### Features
+
+* **ci:** configure feature matrix testing with nextest ([dca88b6](https://github.com/hypersec-io/dfe-archiver/commit/dca88b62878f81bdabc881c532a9fc998e5fe316))
+
 ## [1.0.8](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.7...v1.0.8) (2026-02-03)
 
 
