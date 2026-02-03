@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.3...v1.0.4) (2026-02-03)
+
+
+### Bug Fixes
+
+* update ci submodule with Cargo.toml version fix ([853580f](https://github.com/hypersec-io/dfe-archiver/commit/853580f911d4a97aa6ed7d89c0b5b11b65f4bda7))
+
 ## [1.0.3](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.2...v1.0.3) (2026-02-03)
 
 
