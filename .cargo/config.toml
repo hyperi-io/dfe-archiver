@@ -10,8 +10,8 @@
 # REGISTRIES
 # =============================================================================
 
-[registries]
-hypersec = { index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo/index/" }
+[registries.hypersec]
+index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
 
 # =============================================================================
 # NET SETTINGS
