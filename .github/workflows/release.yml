@@ -109,15 +109,19 @@ jobs:
             exit 1
           fi
 
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
+
       - name: Build
-        run: cargo build --all-features --release
+        # Use jemalloc for production builds (jemalloc and mimalloc are mutually exclusive)
+        run: cargo build --features default,jemalloc --release
 
       - name: Run tests
-        run: cargo test --all-features
+        # Use nextest for faster parallel test execution
+        run: cargo nextest run --features default,jemalloc
 
       - name: Run clippy
-        # Note: Using -W instead of -D to allow warnings without failing the build
-        run: cargo clippy --all-features 2>&1 || true
+        run: cargo clippy --features default,jemalloc -- -D warnings
 
       - name: Verify publish (dry-run)
         if: ${{ inputs.dry_run == true }}

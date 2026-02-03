@@ -18,18 +18,39 @@ language: rust
 # Quality checks
 quality:
   enabled: true
+  rust:
+    fmt: blocking           # Formatting check (cargo fmt --check)
+    clippy: blocking        # Linting (cargo clippy)
+    audit: warn             # Security audit (cargo audit) - warn only
+    deny: warn              # License/advisory check (cargo deny)
+    # Feature sets to test with clippy (jemalloc and mimalloc are mutually exclusive)
+    features:
+      - "default"
+      - "default,jemalloc"
+      - "default,mimalloc"
 
 # Testing
 test:
   enabled: true
   coverage: true
   # min_coverage: 80       # Fail if coverage below this percentage
+  rust:
+    tier: all               # "unit", "integration", "e2e", or "all"
+    # Feature sets to test (match quality.rust.features for consistency)
+    features:
+      - "default"
+      - "default,jemalloc"
+      - "default,mimalloc"
 
 # Building
 build:
   enabled: true
   strategies:
     - native
+  rust:
+    # Feature sets to build (production builds use jemalloc)
+    features:
+      - "default,jemalloc"
 
 # Publishing (on release)
 publish:
