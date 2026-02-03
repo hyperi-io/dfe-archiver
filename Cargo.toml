@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-archiver"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.75"
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
@@ -124,11 +124,11 @@ transport-memory = ["hs-rustlib/transport-memory"]
 full = ["jemalloc", "testcontainers"]
 
 [dependencies.tikv-jemallocator]
-version = ">=0.6"
+version = "1.0.1"
 optional = true
 
 [dependencies.mimalloc]
-version = ">=0.1"
+version = "1.0.1"
 optional = true
 
 # =============================================================================
