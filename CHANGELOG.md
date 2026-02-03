@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/hypersec-io/dfe-archiver/compare/v1.1.0...v1.1.1) (2026-02-03)
+
+
+### Bug Fixes
+
+* **ci:** allow clippy warnings in release workflow for now ([0bdd57a](https://github.com/hypersec-io/dfe-archiver/commit/0bdd57af2e3d65cef59312eee3112be5835b0621))
+
 # [1.1.0](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.8...v1.1.0) (2026-02-03)
 
 
