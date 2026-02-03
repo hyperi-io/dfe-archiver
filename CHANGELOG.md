@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.2...v1.0.3) (2026-02-03)
+
+
+### Bug Fixes
+
+* restore allocator dependency versions corrupted by semantic-release ([ab668d6](https://github.com/hypersec-io/dfe-archiver/commit/ab668d6c06a8a4a4a88f8c68ad0caa21ceb4b005))
+
 ## [1.0.2](https://github.com/hypersec-io/dfe-archiver/compare/v1.0.1...v1.0.2) (2026-02-03)
 
 
