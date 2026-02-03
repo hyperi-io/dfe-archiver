@@ -8,13 +8,10 @@
 
 use crate::config::BufferConfig;
 use crate::kafka::KafkaMessage;
-use crate::{Error, Result};
 use compact_str::CompactString;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, warn};
 
 /// Buffer for a single destination
 pub struct DestinationBuffer {

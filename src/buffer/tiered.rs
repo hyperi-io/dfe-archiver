@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Configuration for tiered buffer manager
 #[derive(Debug, Clone)]

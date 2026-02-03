@@ -29,28 +29,30 @@ impl ArchiverMetrics {
         let manager = MetricsManager::new("dfe_archiver");
 
         // Register standard metrics with descriptions
-        manager.counter("messages_received_total", "Total messages received from Kafka");
-        manager.counter("messages_archived_total", "Total messages successfully archived");
-        manager.counter("messages_dlq_total", "Total messages sent to DLQ");
-        manager.counter("files_created_total", "Total archive files created");
-        manager.counter("files_closed_total", "Total archive files closed (rolled)");
-        manager.counter("bytes_written_total", "Total bytes written (uncompressed)");
-        manager.counter("bytes_compressed_total", "Total bytes written (compressed)");
-        manager.counter("flush_operations_total", "Total flush operations");
-        manager.counter("archive_errors_total", "Total archive errors");
-        manager.counter("disk_pressure_events_total", "Total disk pressure backpressure events");
+        // Note: The returned handles are intentionally ignored as hs-rustlib
+        // registers metrics globally and we use the metrics crate macros directly
+        let _ = manager.counter("messages_received_total", "Total messages received from Kafka");
+        let _ = manager.counter("messages_archived_total", "Total messages successfully archived");
+        let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
+        let _ = manager.counter("files_created_total", "Total archive files created");
+        let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
+        let _ = manager.counter("bytes_written_total", "Total bytes written (uncompressed)");
+        let _ = manager.counter("bytes_compressed_total", "Total bytes written (compressed)");
+        let _ = manager.counter("flush_operations_total", "Total flush operations");
+        let _ = manager.counter("archive_errors_total", "Total archive errors");
+        let _ = manager.counter("disk_pressure_events_total", "Total disk pressure backpressure events");
 
         // Gauges for current state
-        manager.gauge("buffer_bytes", "Current buffer size in bytes");
-        manager.gauge("buffer_records", "Current buffer record count");
-        manager.gauge("kafka_lag", "Kafka consumer lag (sum across partitions)");
-        manager.gauge("hot_buffers_active", "Number of active hot buffers");
-        manager.gauge("hot_buffers_bytes", "Total bytes in hot buffers");
-        manager.gauge("spool_bytes", "Current spool size in bytes");
+        let _ = manager.gauge("buffer_bytes", "Current buffer size in bytes");
+        let _ = manager.gauge("buffer_records", "Current buffer record count");
+        let _ = manager.gauge("kafka_lag", "Kafka consumer lag (sum across partitions)");
+        let _ = manager.gauge("hot_buffers_active", "Number of active hot buffers");
+        let _ = manager.gauge("hot_buffers_bytes", "Total bytes in hot buffers");
+        let _ = manager.gauge("spool_bytes", "Current spool size in bytes");
 
         // Histograms for latency/size distribution
-        manager.histogram("batch_size_bytes", "Archive batch size in bytes");
-        manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
+        let _ = manager.histogram("batch_size_bytes", "Archive batch size in bytes");
+        let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
         // The manager is not stored - metrics crate uses a global registry
         // and hs-rustlib::metrics registers with it
