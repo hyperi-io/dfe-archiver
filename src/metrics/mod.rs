@@ -3,8 +3,8 @@
 // Purpose:   Prometheus metrics using hs-rustlib
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 use crate::config::MetricsConfig;
 use crate::Result;

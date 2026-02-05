@@ -1,10 +1,10 @@
-# Project:   dfe-archiver
-# File:      config.dev.yaml
-# Purpose:   Development configuration for local testing
-# Language:  YAML
+# Project:      dfe-archiver
+# File:         config.dev.yaml
+# Purpose:      Development configuration for local testing
+# Language:     YAML
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
 #
 # Usage:
 #   ARCHIVER_CONFIG=config.dev.yaml cargo run

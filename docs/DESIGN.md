@@ -1,3 +1,13 @@
+<!--
+  Project:      dfe-archiver
+  File:         docs/DESIGN.md
+  Purpose:      Architecture and design documentation
+  Language:     Markdown
+
+  License:      FSL-1.1-ALv2
+  Copyright:    (c) 2026 HyperI Pty Ltd
+-->
+
 # DFE Archiver Design Document
 
 High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
@@ -616,7 +626,7 @@ docker run -d \
 
 **Decision**: Use hs-rustlib for config, logging, metrics, and Kafka transport.
 
-**Rationale**: Consistency with other HyperSec projects, proven patterns, reduced boilerplate.
+**Rationale**: Consistency with other HyperI projects, proven patterns, reduced boilerplate.
 
 **Alternatives**: Direct rdkafka usage, custom config system.
 

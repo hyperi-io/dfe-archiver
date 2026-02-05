@@ -3,8 +3,8 @@
 // Purpose:   Integration tests for MinIO storage backend
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 //! Integration tests for MinIO/S3 storage backend.
 //!

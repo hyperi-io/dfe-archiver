@@ -3,8 +3,8 @@
 // Purpose:   Library root - high-volume Kafka-to-storage archiver
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

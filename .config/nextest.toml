@@ -1,10 +1,10 @@
-# Project:   dfe-archiver
-# File:      .config/nextest.toml
-# Purpose:   Configuration for cargo-nextest test runner
-# Language:  TOML
+# Project:      dfe-archiver
+# File:         .config/nextest.toml
+# Purpose:      Configuration for cargo-nextest test runner
+# Language:     TOML
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
 
 [profile.default]
 # Limit test parallelism to avoid overwhelming the system

@@ -1,3 +1,13 @@
+<!--
+  Project:      dfe-archiver
+  File:         README.md
+  Purpose:      Project overview and usage documentation
+  Language:     Markdown
+
+  License:      FSL-1.1-ALv2
+  Copyright:    (c) 2026 HyperI Pty Ltd
+-->
+
 # DFE Archiver
 
 High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
@@ -234,6 +244,7 @@ cargo build --release --features mimalloc
 
 ## License
 
-Proprietary - HyperSec EULA
+This software is licensed under the Functional Source License, Version 1.1,
+ALv2 Future License (FSL-1.1-ALv2). See [LICENSE](LICENSE) for details.
 
-Copyright (c) 2026 HyperSec
+Copyright (c) 2026 HyperI Pty Ltd
