@@ -30,7 +30,8 @@ git-fetch-with-cli = true
 # Uncomment if mold is installed:
 # rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
-# Number of parallel jobs (omit for auto-detect)
+# Limit parallel jobs to avoid overwhelming the system
+jobs = 2
 
 # =============================================================================
 # TARGET-SPECIFIC SETTINGS

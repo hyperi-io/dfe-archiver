@@ -1,0 +1,26 @@
+# Project:   dfe-archiver
+# File:      .config/nextest.toml
+# Purpose:   Configuration for cargo-nextest test runner
+# Language:  TOML
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+[profile.default]
+# Limit test parallelism to avoid overwhelming the system
+test-threads = 2
+
+# Retry failed tests once (helps with flaky integration tests)
+retries = 1
+
+# Slow test threshold (warn if tests take longer than this)
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# Fail fast - stop on first failure
+fail-fast = false
+
+[profile.ci]
+# CI profile - same parallelism limit
+test-threads = 2
+retries = 0
+fail-fast = true
