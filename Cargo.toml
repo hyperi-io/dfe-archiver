@@ -1,10 +1,10 @@
-# Project:   dfe-archiver
-# File:      Cargo.toml
-# Purpose:   Package manifest for high-volume Kafka-to-storage archiver
-# Language:  TOML
+# Project:      dfe-archiver
+# File:         Cargo.toml
+# Purpose:      Package manifest for high-volume Kafka-to-storage archiver
+# Language:     TOML
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
 
 [package]
 name = "dfe-archiver"
@@ -12,9 +12,9 @@ version = "1.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
-license = "LicenseRef-HyperSec-EULA"
+license = "FSL-1.1-ALv2"
 repository = "https://github.com/hypersec-io/dfe-archiver"
-authors = ["HyperSec <engineering@hypersec.io>"]
+authors = ["HyperI Pty Ltd <engineering@hypersec.io>"]
 
 [lib]
 name = "dfe_archiver"
@@ -29,7 +29,7 @@ path = "src/main.rs"
 # =============================================================================
 
 [dependencies]
-# HyperSec shared library - config, logging, metrics, transport
+# HyperI shared library - config, logging, metrics, transport
 # Published to hypersec-cargo-virtual registry in JFrog Artifactory
 hs-rustlib = { version = ">=1.3", registry = "hypersec", features = [
     "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",

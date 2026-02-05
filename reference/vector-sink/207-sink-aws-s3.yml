@@ -1,9 +1,13 @@
-# 
-# HyperSec XDR Vector Component Template
-# Purpose: AWS S3 Sink for HyperSec XDR Archive 
+# Project:      dfe-archiver
+# File:         reference/vector-sink/207-sink-aws-s3.yml
+# Purpose:      AWS S3 Sink for HyperI XDR Archive (reference template)
+# Language:     YAML
+#
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
+#
+# HyperI XDR Vector Component Template
 # Deployment Types: AWS, SaaS
-# Release Date: 2025-02-17
-# CT Build: © HyperSec 2025
 #
 # Required environment variables:
 # - _207_SINK_AWS_S3_INPUT: name of input: remap or source

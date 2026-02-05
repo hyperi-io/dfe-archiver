@@ -3,8 +3,8 @@
 // Purpose:   Tiered buffer manager for high destination cardinality
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 //! # Tiered Buffer Manager
 //!

@@ -1,10 +1,10 @@
-# Project:   dfe-archiver
-# File:      docker-compose.dev.yaml
-# Purpose:   Local development environment with Kafka, MinIO, and test storage
-# Language:  YAML
+# Project:      dfe-archiver
+# File:         docker-compose.dev.yaml
+# Purpose:      Local development environment with Kafka, MinIO, and test storage
+# Language:     YAML
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
 #
 # Usage:
 #   docker compose -f docker-compose.dev.yaml up -d

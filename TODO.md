@@ -1,3 +1,13 @@
+<!--
+  Project:      dfe-archiver
+  File:         TODO.md
+  Purpose:      Task tracking and project progress
+  Language:     Markdown
+
+  License:      FSL-1.1-ALv2
+  Copyright:    (c) 2026 HyperI Pty Ltd
+-->
+
 # TODO - DFE Archiver
 
 This is the **single source of truth** for all tasks and progress.

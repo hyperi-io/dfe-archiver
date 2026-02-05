@@ -1,3 +1,13 @@
+<!--
+  Project:      dfe-archiver
+  File:         STATE.md
+  Purpose:      Project state and implementation status
+  Language:     Markdown
+
+  License:      FSL-1.1-ALv2
+  Copyright:    (c) 2026 HyperI Pty Ltd
+-->
+
 # Project Context
 
 **Project:** DFE Archiver
@@ -69,7 +79,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 ### Use hs-rustlib for Core Infrastructure
 
 **Decision:** Use hs-rustlib for config, logging, metrics, and Kafka transport
-**Rationale:** Consistency with other HyperSec projects, proven patterns, reduces boilerplate
+**Rationale:** Consistency with other HyperI projects, proven patterns, reduces boilerplate
 **Alternatives considered:** Direct rdkafka usage, custom config system
 
 ### Compression Codec Selection
@@ -100,7 +110,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ## External Dependencies
 
-- **hs-rustlib** - Shared HyperSec library (Artifactory registry)
+- **hs-rustlib** - Shared HyperI library (Artifactory registry)
 - **Kafka** - AutoMQ or Strimzi deployment
 - **Object Storage** - S3/MinIO/GCS/Azure for production archives
 

@@ -3,8 +3,8 @@
 // Purpose:   Throughput benchmarks
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use dfe_archiver::compression::{create_compressor, Compressor};

@@ -3,8 +3,8 @@
 // Purpose:   CLI entry point for the archiver service
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
 
 #![warn(clippy::all)]
 #![deny(clippy::unwrap_used)]
