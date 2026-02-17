@@ -1,3 +1,10 @@
+## [1.1.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.2...v1.1.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* add typos config and fix spelling for CI quality checks ([c1ddb36](https://github.com/hyperi-io/dfe-archiver/commit/c1ddb363a174f7deec5bbb2ff095b9c5121d2a60))
+
 ## [1.1.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.1...v1.1.2) (2026-02-17)
 
 
