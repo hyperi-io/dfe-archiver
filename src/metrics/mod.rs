@@ -31,8 +31,14 @@ impl ArchiverMetrics {
         // Register standard metrics with descriptions
         // Note: The returned handles are intentionally ignored as hyperi-rustlib
         // registers metrics globally and we use the metrics crate macros directly
-        let _ = manager.counter("messages_received_total", "Total messages received from Kafka");
-        let _ = manager.counter("messages_archived_total", "Total messages successfully archived");
+        let _ = manager.counter(
+            "messages_received_total",
+            "Total messages received from Kafka",
+        );
+        let _ = manager.counter(
+            "messages_archived_total",
+            "Total messages successfully archived",
+        );
         let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
         let _ = manager.counter("files_created_total", "Total archive files created");
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
@@ -40,7 +46,10 @@ impl ArchiverMetrics {
         let _ = manager.counter("bytes_compressed_total", "Total bytes written (compressed)");
         let _ = manager.counter("flush_operations_total", "Total flush operations");
         let _ = manager.counter("archive_errors_total", "Total archive errors");
-        let _ = manager.counter("disk_pressure_events_total", "Total disk pressure backpressure events");
+        let _ = manager.counter(
+            "disk_pressure_events_total",
+            "Total disk pressure backpressure events",
+        );
 
         // Gauges for current state
         let _ = manager.gauge("buffer_bytes", "Current buffer size in bytes");

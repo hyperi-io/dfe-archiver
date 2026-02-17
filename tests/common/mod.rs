@@ -27,7 +27,9 @@ pub fn kafka_available() -> bool {
 
     // TCP connect check with timeout
     TcpStream::connect_timeout(
-        &first_broker.parse().unwrap_or_else(|_| "127.0.0.1:9092".parse().expect("valid addr")),
+        &first_broker
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:9092".parse().expect("valid addr")),
         Duration::from_secs(2),
     )
     .is_ok()
@@ -43,7 +45,8 @@ pub fn get_kafka_sasl() -> Option<KafkaSasl> {
     let mechanism = env::var("KAFKA_SASL_MECHANISM").ok()?;
     let username = env::var("KAFKA_SASL_USER").ok()?;
     let password = env::var("KAFKA_SASL_PASSWORD").ok()?;
-    let protocol = env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
+    let protocol =
+        env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
 
     Some(KafkaSasl {
         mechanism,

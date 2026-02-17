@@ -219,9 +219,7 @@ impl StorageBackend for S3Backend {
     async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
         let mut buffers = self.buffers.lock();
 
-        let buffer = buffers
-            .entry(path.to_string())
-            .or_insert_with(Vec::new);
+        let buffer = buffers.entry(path.to_string()).or_insert_with(Vec::new);
 
         buffer.extend_from_slice(data);
 
@@ -332,7 +330,10 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             minio_config.bucket = bucket.to_string();
         }
 
-        Ok(Box::new(S3Backend::new_minio(&minio_config, prefix.to_string())?))
+        Ok(Box::new(S3Backend::new_minio(
+            &minio_config,
+            prefix.to_string(),
+        )?))
     } else {
         // Default to file backend
         Ok(Box::new(FileBackend::new(dest)))

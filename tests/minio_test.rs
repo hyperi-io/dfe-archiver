@@ -29,7 +29,8 @@ use std::env;
 
 /// Check if MinIO is available (async version)
 async fn minio_available() -> bool {
-    let endpoint = env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
+    let endpoint =
+        env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
 
     // Try HTTP connection using async reqwest
     let client = reqwest::Client::builder()
@@ -51,7 +52,8 @@ async fn minio_available() -> bool {
 /// Get MinIO configuration from environment or defaults
 fn get_minio_config() -> MinioConfig {
     MinioConfig {
-        endpoint: env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string()),
+        endpoint: env::var("MINIO_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:9000".to_string()),
         access_key: env::var("MINIO_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
         secret_key: env::var("MINIO_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
         bucket: env::var("MINIO_BUCKET").unwrap_or_else(|_| "archive-test".to_string()),
@@ -70,8 +72,8 @@ async fn test_minio_basic_operations() {
     }
 
     let config = get_minio_config();
-    let backend = S3Backend::new_minio(&config, "test-prefix".to_string())
-        .expect("create MinIO backend");
+    let backend =
+        S3Backend::new_minio(&config, "test-prefix".to_string()).expect("create MinIO backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -155,8 +157,8 @@ async fn test_minio_large_file_upload() {
     }
 
     let config = get_minio_config();
-    let backend = S3Backend::new_minio(&config, "large-test".to_string())
-        .expect("create MinIO backend");
+    let backend =
+        S3Backend::new_minio(&config, "large-test".to_string()).expect("create MinIO backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -166,7 +168,10 @@ async fn test_minio_large_file_upload() {
     // Write 5MB in chunks
     let chunk = vec![b'X'; 1024 * 1024]; // 1MB chunk
     for i in 0..5 {
-        backend.append(&test_path, &chunk).await.expect(&format!("append chunk {}", i));
+        backend
+            .append(&test_path, &chunk)
+            .await
+            .expect(&format!("append chunk {}", i));
     }
 
     // Close (uploads 5MB file)

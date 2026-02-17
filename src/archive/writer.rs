@@ -29,7 +29,7 @@ impl Default for RollingPolicy {
     fn default() -> Self {
         Self {
             max_size_bytes: 1024 * 1024 * 1024, // 1GB final file size
-            max_age_secs: 3600,                  // 1 hour
+            max_age_secs: 3600,                 // 1 hour
         }
     }
 }

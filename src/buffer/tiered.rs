@@ -320,7 +320,9 @@ impl TieredBufferManager {
         // Check against max spool size limit
         let current_spool = self.stats.current_spool_bytes.load(Ordering::Relaxed);
         if current_spool + write_size > self.config.max_spool_bytes {
-            self.stats.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .disk_pressure_events
+                .fetch_add(1, Ordering::Relaxed);
             warn!(
                 current_spool,
                 write_size,
@@ -336,7 +338,9 @@ impl TieredBufferManager {
         // Check actual filesystem free space
         let available = get_available_disk_space(&self.config.spool_dir).unwrap_or(0);
         if available < self.config.min_free_disk_bytes + write_size {
-            self.stats.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .disk_pressure_events
+                .fetch_add(1, Ordering::Relaxed);
             warn!(
                 available,
                 write_size,
@@ -354,22 +358,22 @@ impl TieredBufferManager {
 
     /// Record bytes written to spool (for tracking)
     pub fn record_spool_write(&self, bytes: u64) {
-        self.stats.current_spool_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.stats
+            .current_spool_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Record bytes consumed from spool (for tracking)
     pub fn record_spool_drain(&self, bytes: u64) {
-        self.stats.current_spool_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        self.stats
+            .current_spool_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
     }
 
     /// Buffer a message for a destination
     ///
     /// Returns batches that should be written (evicted or ready to flush)
-    pub fn push(
-        &self,
-        destination: &str,
-        message: KafkaMessage,
-    ) -> Result<Vec<StagedBatch>> {
+    pub fn push(&self, destination: &str, message: KafkaMessage) -> Result<Vec<StagedBatch>> {
         let key = CompactString::from(destination);
         let offset = KafkaOffset::from(&message);
         let payload = message.payload;
@@ -390,20 +394,26 @@ impl TieredBufferManager {
                 if !buffer.is_empty() {
                     let (messages, offsets) = buffer.drain();
                     batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
-                    self.stats.hot_buffer_evictions.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .hot_buffer_evictions
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
 
         // Get or create hot buffer
         let mut entry = self.hot_buffers.entry(key.clone()).or_insert_with(|| {
-            self.stats.current_hot_buffers.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .current_hot_buffers
+                .fetch_add(1, Ordering::Relaxed);
             HotBuffer::new(key.clone())
         });
 
         let payload_size = payload.len();
         entry.push(payload, offset);
-        self.stats.current_hot_bytes.fetch_add(payload_size, Ordering::Relaxed);
+        self.stats
+            .current_hot_bytes
+            .fetch_add(payload_size, Ordering::Relaxed);
         self.stats.hot_buffer_hits.fetch_add(1, Ordering::Relaxed);
 
         // Check if buffer should flush (size or age)
@@ -590,7 +600,10 @@ mod tests {
 
         // Add message that exceeds buffer size
         let batches = manager
-            .push("dest1", make_message(b"this is a longer message", "topic", 0))
+            .push(
+                "dest1",
+                make_message(b"this is a longer message", "topic", 0),
+            )
             .expect("push");
 
         assert_eq!(batches.len(), 1, "should flush");
