@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      src/metrics/mod.rs
-// Purpose:   Prometheus metrics using hs-rustlib
+// Purpose:   Prometheus metrics using hyperi-rustlib
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
@@ -8,12 +8,12 @@
 
 use crate::config::MetricsConfig;
 use crate::Result;
-use hs_rustlib::metrics::MetricsManager;
+use hyperi_rustlib::metrics::MetricsManager;
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use tracing::info;
 
-/// Archiver metrics using hs-rustlib's Prometheus exporter
+/// Archiver metrics using hyperi-rustlib's Prometheus exporter
 ///
 /// This struct holds the metrics manager and provides methods for recording metrics.
 /// The actual MetricsManager should be started separately via `start_metrics_server`.
@@ -29,7 +29,7 @@ impl ArchiverMetrics {
         let manager = MetricsManager::new("dfe_archiver");
 
         // Register standard metrics with descriptions
-        // Note: The returned handles are intentionally ignored as hs-rustlib
+        // Note: The returned handles are intentionally ignored as hyperi-rustlib
         // registers metrics globally and we use the metrics crate macros directly
         let _ = manager.counter("messages_received_total", "Total messages received from Kafka");
         let _ = manager.counter("messages_archived_total", "Total messages successfully archived");
@@ -55,7 +55,7 @@ impl ArchiverMetrics {
         let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
         // The manager is not stored - metrics crate uses a global registry
-        // and hs-rustlib::metrics registers with it
+        // and hyperi-rustlib::metrics registers with it
         Arc::new(Self {
             _namespace: "dfe_archiver",
         })
@@ -177,7 +177,7 @@ impl MetricsSnapshot {
     }
 }
 
-/// Start metrics HTTP server using hs-rustlib
+/// Start metrics HTTP server using hyperi-rustlib
 ///
 /// This creates a new MetricsManager and starts the server.
 /// The server provides /metrics, /healthz, /readyz endpoints.
@@ -193,7 +193,7 @@ pub async fn start_metrics_server(config: &MetricsConfig) -> Result<MetricsManag
 
     let mut manager = MetricsManager::new("dfe_archiver");
 
-    // Start the hs-rustlib metrics server
+    // Start the hyperi-rustlib metrics server
     // This provides /metrics, /healthz, /readyz endpoints
     manager
         .start_server(&config.address)
@@ -203,7 +203,7 @@ pub async fn start_metrics_server(config: &MetricsConfig) -> Result<MetricsManag
     info!(
         address = %config.address,
         path = %config.path,
-        "Metrics server started (hs-rustlib)"
+        "Metrics server started (hyperi-rustlib)"
     );
 
     Ok(manager)

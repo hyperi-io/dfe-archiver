@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      src/kafka/mod.rs
-// Purpose:   Kafka transport abstraction using hs-rustlib
+// Purpose:   Kafka transport abstraction using hyperi-rustlib
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2

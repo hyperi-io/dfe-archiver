@@ -46,7 +46,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 |-----------|------------|
 | Language | Rust 2021 (MSRV 1.75) |
 | Async Runtime | Tokio |
-| Shared Library | hs-rustlib (config, logging, metrics, transport) |
+| Shared Library | hyperi-rustlib (config, logging, metrics, transport) |
 | JSON Parsing | sonic-rs (SIMD-accelerated) |
 | Compression | zstd, lz4_flex, snap, flate2 |
 | Cloud Storage | object_store (AWS, GCP, Azure) |
@@ -63,7 +63,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
                                               │
 ┌──────────────┐    ┌─────────────────────────▼───────────────────────────────┐
 │              │    │                                                          │
-│    KAFKA     │───▶│  Kafka Transport (hs-rustlib)                           │
+│    KAFKA     │───▶│  Kafka Transport (hyperi-rustlib)                           │
 │   (Strimzi/  │    │  - Batch consumption (10K messages)                      │
 │   AutoMQ)    │    │  - SASL/TLS authentication                              │
 │              │    │  - Consumer group coordination                          │
@@ -615,16 +615,16 @@ docker run -d \
   -e KAFKA_TOPICS=events \
   -e ARCHIVER_DESTINATION=s3://bucket/archive \
   -v /data/spool:/tmp/archiver-spool \
-  hypersec/dfe-archiver:latest
+  hyperi/dfe-archiver:latest
 ```
 
 ---
 
 ## Key Design Decisions
 
-### 1. Use hs-rustlib for Core Infrastructure
+### 1. Use hyperi-rustlib for Core Infrastructure
 
-**Decision**: Use hs-rustlib for config, logging, metrics, and Kafka transport.
+**Decision**: Use hyperi-rustlib for config, logging, metrics, and Kafka transport.
 
 **Rationale**: Consistency with other HyperI projects, proven patterns, reduced boilerplate.
 
@@ -666,8 +666,8 @@ docker run -d \
 
 ## References
 
-- [hs-rustlib](https://github.com/hypersec-io/hs-rustlib) - Shared Rust library
-- [dfe-loader](https://github.com/hypersec-io/dfe-loader) - Pattern reference
+- [hyperi-rustlib](https://github.com/hyperi-io/hyperi-rustlib) - Shared Rust library
+- [dfe-loader](https://github.com/hyperi-io/dfe-loader) - Pattern reference
 - [object_store docs](https://docs.rs/object_store/)
 - [KEDA ScaledObject](https://keda.sh/docs/concepts/scaling-deployments/)
 - [sonic-rs](https://github.com/cloudwego/sonic-rs) - SIMD JSON parser

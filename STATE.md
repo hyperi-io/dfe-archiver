@@ -55,7 +55,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ### Key Components
 
-1. **Kafka Transport** - Wraps hs-rustlib KafkaTransport for message consumption
+1. **Kafka Transport** - Wraps hyperi-rustlib KafkaTransport for message consumption
 2. **Buffer Manager** - Per-destination buffering with flush triggers (size/age/records)
 3. **Router** - Routes messages by topic or JSON field expressions
 4. **Compressor** - Pluggable compression codecs
@@ -66,7 +66,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 - **Language:** Rust (2021 edition, MSRV 1.75)
 - **Async Runtime:** Tokio
-- **Shared Library:** hs-rustlib (config, logging, metrics, transport)
+- **Shared Library:** hyperi-rustlib (config, logging, metrics, transport)
 - **JSON Parsing:** sonic-rs (SIMD-accelerated)
 - **Compression:** zstd, lz4_flex, snap, flate2
 - **Cloud Storage:** object_store (AWS, GCP, Azure)
@@ -76,9 +76,9 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ## Key Decisions
 
-### Use hs-rustlib for Core Infrastructure
+### Use hyperi-rustlib for Core Infrastructure
 
-**Decision:** Use hs-rustlib for config, logging, metrics, and Kafka transport
+**Decision:** Use hyperi-rustlib for config, logging, metrics, and Kafka transport
 **Rationale:** Consistency with other HyperI projects, proven patterns, reduces boilerplate
 **Alternatives considered:** Direct rdkafka usage, custom config system
 
@@ -110,7 +110,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ## External Dependencies
 
-- **hs-rustlib** - Shared HyperI library (Artifactory registry)
+- **hyperi-rustlib** - Shared HyperI library (Artifactory registry)
 - **Kafka** - AutoMQ or Strimzi deployment
 - **Object Storage** - S3/MinIO/GCS/Azure for production archives
 
@@ -125,8 +125,8 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 **Reference Projects:**
 
-- [dfe-loader](https://github.com/hypersec-io/dfe-loader) - Pattern reference for Kafka consumption
-- [hs-rustlib](https://github.com/hypersec-io/hs-rustlib) - Shared Rust library
+- [dfe-loader](https://github.com/hyperi-io/dfe-loader) - Pattern reference for Kafka consumption
+- [hyperi-rustlib](https://github.com/hyperi-io/hyperi-rustlib) - Shared Rust library
 
 **External Resources:**
 

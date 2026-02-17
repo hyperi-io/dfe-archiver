@@ -13,8 +13,8 @@ edition = "2021"
 rust-version = "1.75"
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
 license = "FSL-1.1-ALv2"
-repository = "https://github.com/hypersec-io/dfe-archiver"
-authors = ["HyperI Pty Ltd <engineering@hypersec.io>"]
+repository = "https://github.com/hyperi-io/dfe-archiver"
+authors = ["HyperI Pty Ltd <engineering@hyperi.io>"]
 
 [lib]
 name = "dfe_archiver"
@@ -30,8 +30,8 @@ path = "src/main.rs"
 
 [dependencies]
 # HyperI shared library - config, logging, metrics, transport
-# Published to hypersec-cargo-virtual registry in JFrog Artifactory
-hs-rustlib = { version = ">=1.3", registry = "hypersec", features = [
+# Published to hyperi-cargo-virtual registry in JFrog Artifactory
+hyperi-rustlib = { version = ">=1.3", registry = "hyperi", features = [
     "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",
 ] }
 
@@ -69,12 +69,12 @@ compact_str = ">=0.8"
 rustc-hash = ">=2.0"
 smallvec = { version = ">=1.13", features = ["union", "serde"] }
 fs2 = ">=0.4"                            # Disk space checking
-metrics = ">=0.24"                       # Prometheus metrics facade (used with hs-rustlib)
+metrics = ">=0.24"                       # Prometheus metrics facade (used with hyperi-rustlib)
 
 # CLI
 clap = { version = ">=4.5", features = ["derive", "env"] }
 
-# Tracing (re-export from hs-rustlib, but also direct for macros)
+# Tracing (re-export from hyperi-rustlib, but also direct for macros)
 tracing = ">=0.1"
 tracing-subscriber = { version = ">=0.3", features = ["env-filter"] }
 
@@ -118,7 +118,7 @@ mimalloc = ["dep:mimalloc"]
 testcontainers = []
 
 # Memory transport for unit tests (no external services)
-transport-memory = ["hs-rustlib/transport-memory"]
+transport-memory = ["hyperi-rustlib/transport-memory"]
 
 # Full feature set
 full = ["jemalloc", "testcontainers"]

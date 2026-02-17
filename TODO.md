@@ -18,7 +18,7 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-- [ ] Implement hs-rustlib KafkaTransport integration `[PENDING]`
+- [ ] Implement hyperi-rustlib KafkaTransport integration `[PENDING]`
 - [ ] Implement S3/MinIO storage backend with object_store `[PENDING]`
 - [ ] Add KEDA scaling metrics endpoint `[PENDING]`
 
@@ -30,7 +30,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 **Goal:** Establish working Kafka-to-file archive pipeline
 
-1. [x] Project structure and Cargo.toml with hs-rustlib
+1. [x] Project structure and Cargo.toml with hyperi-rustlib
 2. [x] Configuration cascade (CLI → ENV → .env → file → defaults)
 3. [x] Compression codecs (zstd, lz4, snappy, gzip)
 4. [x] Buffer manager with flush triggers
@@ -38,7 +38,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 6. [x] File storage backend
 7. [x] Archive writer with rolling
 8. [x] Integration test infrastructure
-9. [ ] Complete hs-rustlib KafkaTransport adapter
+9. [ ] Complete hyperi-rustlib KafkaTransport adapter
 10. [ ] Main pipeline orchestrator
 
 ### Phase 2: Cloud Storage
@@ -56,7 +56,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 **Goal:** Production-ready with observability
 
 1. [ ] KEDA-compatible scaling metrics
-2. [ ] Prometheus metrics via hs-rustlib
+2. [ ] Prometheus metrics via hyperi-rustlib
 3. [ ] Health endpoints (/healthz, /readyz)
 4. [ ] Graceful shutdown with buffer drain
 5. [ ] Memory pressure handling
@@ -77,7 +77,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 ## Completed (This Session)
 
 - [x] Created project structure
-- [x] Set up Cargo.toml with hs-rustlib dependency
+- [x] Set up Cargo.toml with hyperi-rustlib dependency
 - [x] Created .cargo/config.toml for Artifactory registry
 - [x] Implemented config module with cascade loading
 - [x] Implemented compression module (zstd, lz4, snappy, gzip)
@@ -95,7 +95,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 ### High Priority
 
-- [ ] Complete KafkaTransport integration with hs-rustlib
+- [ ] Complete KafkaTransport integration with hyperi-rustlib
 - [ ] S3 multipart upload support
 - [ ] At-least-once delivery with offset commit
 

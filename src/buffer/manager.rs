@@ -206,7 +206,7 @@ impl BufferManager {
 mod tests {
     use super::*;
     use crate::kafka::KafkaMessage;
-    use hs_rustlib::transport::KafkaToken;
+    use hyperi_rustlib::transport::KafkaToken;
     use std::sync::Arc;
 
     fn make_message(payload: &[u8]) -> KafkaMessage {
