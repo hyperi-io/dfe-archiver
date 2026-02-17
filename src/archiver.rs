@@ -136,7 +136,12 @@ impl Archiver {
             debug!(count = messages.len(), "Received batch from Kafka");
 
             // Process each message
+            //
+            // IMPORTANT: Offsets are ONLY committed via StagedBatch after successful
+            // archive write. The buffer tracks offsets alongside message data, so
+            // offsets are never committed until their data is safely on storage.
             let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
+            let mut backpressure = false;
 
             for message in messages {
                 // Route message to destination
@@ -148,8 +153,7 @@ impl Archiver {
                     }
                 };
 
-                // Buffer the message
-                let offset = KafkaOffset::from(&message);
+                // Buffer the message (buffer tracks offsets internally)
                 match self.buffer.push(&destination, message) {
                     Ok(staged_batches) => {
                         // Process any batches ready for archive
@@ -161,28 +165,44 @@ impl Archiver {
                                     "Failed to write batch"
                                 );
                                 self.metrics.record_error();
-                                // Don't commit these offsets
+                                // Don't commit these offsets — Kafka will re-deliver
                                 continue;
                             }
 
-                            // Batch written successfully, track offsets
+                            // Batch written successfully, track offsets for commit
                             offsets_to_commit.extend(batch.offsets);
                             self.metrics.record_archived(batch.record_count as u64);
                         }
                     }
                     Err(e) => {
-                        // Disk pressure - backpressure
+                        // Disk pressure — message payload consumed but not stored.
+                        // Break out so Kafka re-delivers from last committed offset.
                         warn!(error = %e, "Buffer push failed (backpressure)");
                         self.metrics.record_disk_pressure();
-                        // Sleep to allow disk to clear
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        backpressure = true;
+                        break;
                     }
                 }
-
-                offsets_to_commit.push(offset);
             }
 
-            // Commit processed offsets
+            // Check for aged buffers that need flushing
+            if !backpressure {
+                let aged_batches = self.buffer.flush_aged();
+                for batch in aged_batches {
+                    if let Err(e) = self.write_batch(&batch).await {
+                        error!(
+                            error = %e,
+                            destination = %batch.destination,
+                            "Failed to write aged batch"
+                        );
+                        self.metrics.record_error();
+                    } else {
+                        offsets_to_commit.extend(batch.offsets);
+                    }
+                }
+            }
+
+            // Commit offsets for all successfully written batches
             if !offsets_to_commit.is_empty() {
                 let transport = self.transport.lock().await;
                 if let Err(e) = transport.commit(&offsets_to_commit).await {
@@ -190,17 +210,9 @@ impl Archiver {
                 }
             }
 
-            // Check for aged buffers that need flushing
-            let aged_batches = self.buffer.flush_aged();
-            for batch in aged_batches {
-                if let Err(e) = self.write_batch(&batch).await {
-                    error!(
-                        error = %e,
-                        destination = %batch.destination,
-                        "Failed to write aged batch"
-                    );
-                    self.metrics.record_error();
-                }
+            // If backpressure was hit, sleep before next poll
+            if backpressure {
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
 
             // Update buffer metrics
@@ -331,6 +343,6 @@ impl Archiver {
 
 #[cfg(test)]
 mod tests {
-    // Integration tests would go here but require running infrastructure
-    // See tests/integration/ for full integration tests
+    // Integration tests require running infrastructure (Kafka, MinIO)
+    // See tests/ directory for integration test files
 }
