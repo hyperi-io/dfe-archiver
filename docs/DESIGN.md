@@ -430,29 +430,100 @@ archive:
   destination: file:///var/data/archive
 ```
 
-### MinIO / S3
+### AWS S3
+
+All cloud backends use `ObjectStoreBackend` with streaming multipart uploads via
+the `object_store` crate's `WriteMultipart`. Data is uploaded in configurable
+chunk sizes (default 8MB), keeping memory usage bounded to ~chunk_size per active
+file rather than buffering the entire file in memory.
+
+Credentials are resolved via `AmazonS3Builder::from_env()`, then config-level
+overrides are applied on top. This means standard AWS environment variables and
+instance metadata are picked up automatically.
+
+**Credential resolution order:**
+
+1. Config-level `access_key_id` / `secret_access_key` (highest priority)
+2. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars
+3. Web identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` — used by EKS IRSA)
+4. EC2/ECS instance metadata (IMDS)
+
+#### Deployment Scenarios
+
+| Scenario | Config Required | Credentials Source |
+|---|---|---|
+| EKS with IRSA | `bucket`, `region` | IAM role injected via service account |
+| EC2 with instance role | `bucket`, `region` | Instance metadata (IMDS) |
+| External (outside AWS) | `bucket`, `region`, `access_key_id`, `secret_access_key` | Explicit static credentials |
+| SSO / local dev | `bucket`, `region` + exported temp creds | `aws configure export-credentials --format env` |
+
+#### EKS with IRSA (IAM Roles for Service Accounts)
+
+No explicit credentials needed. EKS injects `AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE` into the pod via the service account annotation.
+The `object_store` crate resolves these automatically.
 
 ```yaml
 archive:
   destination: s3://bucket-name/prefix
   s3:
-    endpoint: http://minio:9000  # For MinIO
-    region: us-east-1
-    access_key_id: ${AWS_ACCESS_KEY_ID}
-    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    region: ap-southeast-2
+```
+
+#### External (Outside AWS)
+
+Requires explicit access keys:
+
+```yaml
+archive:
+  destination: s3://bucket-name/prefix
+  s3:
+    region: ap-southeast-2
+    access_key_id: ${S3_ACCESS_KEY_ID}
+    secret_access_key: ${S3_SECRET_ACCESS_KEY}
+```
+
+### MinIO (S3-Compatible)
+
+MinIO uses the S3 protocol with a custom endpoint. Always requires explicit
+credentials since there is no instance metadata to fall back to.
+
+```yaml
+archive:
+  destination: minio://bucket-name/prefix
+  minio:
+    endpoint: http://minio:9000
+    access_key: minioadmin
+    secret_key: minioadmin
+    bucket: archive
+    use_ssl: false
 ```
 
 ### Google Cloud Storage
+
+Credentials are resolved via `GoogleCloudStorageBuilder::from_env()`:
+
+1. Config-level `service_account_key` (inline JSON)
+2. Config-level `credentials_path` (path to service account JSON file)
+3. `GOOGLE_APPLICATION_CREDENTIALS` env var (Application Default Credentials)
+4. GCE instance metadata (when running on GCP)
 
 ```yaml
 archive:
   destination: gs://bucket-name/prefix
   gcs:
-    project_id: my-project
-    service_account_key: /path/to/key.json
+    bucket: my-bucket
+    credentials_path: /path/to/service-account.json
 ```
 
 ### Azure Blob Storage
+
+Credentials are resolved via `MicrosoftAzureBuilder::from_env()`:
+
+1. Config-level `account_key`
+2. Config-level `sas_token`
+3. `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` env vars
+4. Managed identity (when running on Azure)
 
 ```yaml
 archive:
@@ -461,6 +532,17 @@ archive:
     account_name: myaccount
     account_key: ${AZURE_STORAGE_KEY}
 ```
+
+### Multipart Upload Configuration
+
+All cloud backends stream data via multipart uploads with configurable chunk size:
+
+| Parameter | Default | Minimum | Description |
+|---|---|---|---|
+| `multipart_chunk_size` | 8MB | 5MB | Size of each upload part |
+
+The 5MB minimum is enforced by S3's multipart upload API. Larger chunk sizes
+reduce the number of HTTP requests but increase memory per active file.
 
 ---
 
@@ -488,6 +570,12 @@ Configuration follows a cascade (highest to lowest priority):
 | `KAFKA_SASL_PASSWORD` | SASL password | (none) |
 | `ARCHIVER_DESTINATION` | Output destination URL | `file:///var/data/archive` |
 | `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
+| `ARCHIVER_MULTIPART_CHUNK_SIZE` | Multipart upload chunk size | `8388608` (8MB) |
+| `S3_BUCKET` | S3 bucket name | (from config) |
+| `S3_REGION` | S3 region | (from config) |
+| `S3_ACCESS_KEY_ID` | S3 access key | (from env chain) |
+| `S3_SECRET_ACCESS_KEY` | S3 secret key | (from env chain) |
+| `S3_ENDPOINT` | S3 endpoint (for MinIO) | (none) |
 | `METRICS_ADDRESS` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
