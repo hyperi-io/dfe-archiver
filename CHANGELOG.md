@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.0...v1.2.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* use from_env() for cloud storage builders to resolve credentials from environment ([c0b2716](https://github.com/hyperi-io/dfe-archiver/commit/c0b27168374c323f4e6d52cbba8ef913f93baa35))
+
 # [1.2.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.5...v1.2.0) (2026-02-17)
 
 
