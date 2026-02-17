@@ -1,3 +1,10 @@
+## [1.1.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.1...v1.1.2) (2026-02-17)
+
+
+### Bug Fixes
+
+* update benchmarks for hyperi-rustlib API changes ([09c10eb](https://github.com/hyperi-io/dfe-archiver/commit/09c10eb04e457bfa898cabd11655ce8f16fac2a3))
+
 ## [1.1.1](https://github.com/hypersec-io/dfe-archiver/compare/v1.1.0...v1.1.1) (2026-02-03)
 
 
