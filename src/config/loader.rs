@@ -146,6 +146,56 @@ fn apply_env_overrides(config: &mut Config) {
             debug!("Override: memory.limit_bytes from env");
         }
     }
+
+    // Multipart chunk size
+    if let Ok(size) = std::env::var("ARCHIVER_MULTIPART_CHUNK_SIZE") {
+        if let Ok(size) = size.parse() {
+            config.archive.multipart_chunk_size = size;
+            debug!("Override: archive.multipart_chunk_size from env");
+        }
+    }
+
+    // S3 overrides
+    if let Ok(bucket) = std::env::var("S3_BUCKET") {
+        let s3 = config
+            .archive
+            .s3
+            .get_or_insert_with(crate::config::S3Config::default);
+        s3.bucket = bucket;
+        debug!("Override: s3.bucket from env");
+    }
+    if let Ok(region) = std::env::var("S3_REGION") {
+        let s3 = config
+            .archive
+            .s3
+            .get_or_insert_with(crate::config::S3Config::default);
+        s3.region = Some(region);
+        debug!("Override: s3.region from env");
+    }
+    if let Ok(key) = std::env::var("S3_ACCESS_KEY_ID") {
+        let s3 = config
+            .archive
+            .s3
+            .get_or_insert_with(crate::config::S3Config::default);
+        s3.access_key_id = Some(key);
+        debug!("Override: s3.access_key_id from env (redacted)");
+    }
+    if let Ok(secret) = std::env::var("S3_SECRET_ACCESS_KEY") {
+        let s3 = config
+            .archive
+            .s3
+            .get_or_insert_with(crate::config::S3Config::default);
+        s3.secret_access_key = Some(secret);
+        debug!("Override: s3.secret_access_key from env (redacted)");
+    }
+    if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
+        let s3 = config
+            .archive
+            .s3
+            .get_or_insert_with(crate::config::S3Config::default);
+        s3.endpoint = Some(endpoint);
+        debug!("Override: s3.endpoint from env");
+    }
 }
 
 /// Validate configuration
@@ -187,6 +237,15 @@ fn validate_config(config: &Config) -> Result<()> {
     if config.memory.pressure_threshold <= 0.0 || config.memory.pressure_threshold > 1.0 {
         return Err(Error::Config(
             "memory.pressure_threshold must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+
+    // Multipart chunk size validation (must be >= 5MB for S3 compatibility)
+    if config.archive.multipart_chunk_size > 0
+        && config.archive.multipart_chunk_size < 5 * 1024 * 1024
+    {
+        return Err(Error::Config(
+            "archive.multipart_chunk_size must be at least 5MB (5242880 bytes)".to_string(),
         ));
     }
 

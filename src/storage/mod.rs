@@ -8,4 +8,4 @@
 
 mod backend;
 
-pub use backend::{create_backend, FileBackend, S3Backend, StorageBackend};
+pub use backend::{create_backend, FileBackend, ObjectStoreBackend, StorageBackend};
