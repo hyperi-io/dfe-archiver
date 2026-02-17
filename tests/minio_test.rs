@@ -24,7 +24,7 @@
 mod common;
 
 use dfe_archiver::config::{ArchiveConfig, MinioConfig};
-use dfe_archiver::storage::{create_backend, S3Backend, StorageBackend};
+use dfe_archiver::storage::{create_backend, ObjectStoreBackend, StorageBackend};
 use std::env;
 
 /// Check if MinIO is available (async version)
@@ -73,7 +73,8 @@ async fn test_minio_basic_operations() {
 
     let config = get_minio_config();
     let backend =
-        S3Backend::new_minio(&config, "test-prefix".to_string()).expect("create MinIO backend");
+        ObjectStoreBackend::new_minio(&config, "test-prefix".to_string(), 8 * 1024 * 1024)
+            .expect("create MinIO backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -157,8 +158,8 @@ async fn test_minio_large_file_upload() {
     }
 
     let config = get_minio_config();
-    let backend =
-        S3Backend::new_minio(&config, "large-test".to_string()).expect("create MinIO backend");
+    let backend = ObjectStoreBackend::new_minio(&config, "large-test".to_string(), 8 * 1024 * 1024)
+        .expect("create MinIO backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -204,7 +205,7 @@ async fn test_create_backend_minio_url() {
     };
 
     let backend = create_backend(&archive_config).expect("create backend");
-    assert_eq!(backend.name(), "s3");
+    assert_eq!(backend.name(), "minio");
 
     println!("create_backend with minio:// URL test passed");
 }

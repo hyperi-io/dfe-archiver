@@ -119,6 +119,9 @@ pub struct ArchiveConfig {
     /// Rolling trigger: interval in seconds
     pub roll_interval_secs: u64,
 
+    /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
+    pub multipart_chunk_size: usize,
+
     /// S3-specific configuration
     pub s3: Option<S3Config>,
 
@@ -140,6 +143,7 @@ impl Default for ArchiveConfig {
             file_extension: "jsonl".to_string(),
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size
             roll_interval_secs: 3600,            // 1 hour
+            multipart_chunk_size: 8 * 1024 * 1024, // 8MB
             s3: None,
             gcs: None,
             azure: None,
@@ -163,6 +167,7 @@ pub struct S3Config {
 pub struct GcsConfig {
     pub project_id: Option<String>,
     pub service_account_key: Option<String>,
+    pub credentials_path: Option<String>,
     pub bucket: String,
 }
 
@@ -171,7 +176,10 @@ pub struct GcsConfig {
 pub struct AzureConfig {
     pub account_name: String,
     pub account_key: Option<String>,
+    pub sas_token: Option<String>,
     pub container: String,
+    pub use_emulator: bool,
+    pub endpoint: Option<String>,
 }
 
 /// MinIO configuration (S3-compatible)
