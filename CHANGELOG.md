@@ -1,3 +1,10 @@
+## [1.1.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.3...v1.1.4) (2026-02-17)
+
+
+### Bug Fixes
+
+* **ci:** use default runner for release workflow ([9d6072f](https://github.com/hyperi-io/dfe-archiver/commit/9d6072fcdf7a163c85f0587d8de99d57ae9be2c8))
+
 ## [1.1.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.2...v1.1.3) (2026-02-17)
 
 
