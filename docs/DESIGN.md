@@ -226,6 +226,7 @@ Messages are **never lost**. In failure scenarios, duplicates may occur (at-leas
 ### KafkaToken Tracking
 
 Each message carries a `KafkaToken` containing:
+
 - Topic name
 - Partition number
 - Offset
@@ -243,6 +244,7 @@ Tokens are accumulated during buffering and committed in batch after successful 
 ### Crash Recovery
 
 On restart:
+
 1. Kafka consumer rejoins group with last committed offset
 2. Re-processes any messages from uncommitted offset
 3. Duplicates may exist in archive (idempotent consumers downstream must handle)
@@ -261,6 +263,7 @@ Archives are rolled (closed and new file opened) when either condition is met:
 ### Important: Compressed File Size
 
 Rolling is based on **final compressed file size**, NOT:
+
 - Inbound data size
 - Uncompressed data size
 - Buffered data size
@@ -285,6 +288,7 @@ archive:
 ```
 
 Available variables:
+
 - `{topic}` - Kafka topic name
 - `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}` - Timestamp components
 - `{timestamp}` - Unix timestamp
@@ -356,6 +360,7 @@ routing:
 ```
 
 Example message:
+
 ```json
 {"org_id": "acme", "event_type": "login", "data": {...}}
 ```
