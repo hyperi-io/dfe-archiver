@@ -1,5 +1,5 @@
 // Project:   dfe-archiver
-// File:      tests/integration/archive_test.rs
+// File:      tests/archive_test.rs
 // Purpose:   Integration tests for archive writing
 // Language:  Rust
 //
@@ -11,9 +11,9 @@
 mod common;
 
 use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
-use dfe_archiver::compression::{create_compressor, ZstdCompressor};
+use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::ArchiveConfig;
-use dfe_archiver::storage::{create_backend, FileBackend};
+use dfe_archiver::storage::create_backend;
 use tempfile::TempDir;
 
 /// Test file archive with compression

@@ -18,7 +18,6 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-- [ ] Implement hyperi-rustlib KafkaTransport integration `[PENDING]`
 - [ ] Implement S3/MinIO storage backend with object_store `[PENDING]`
 - [ ] Add KEDA scaling metrics endpoint `[PENDING]`
 
@@ -38,8 +37,8 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 6. [x] File storage backend
 7. [x] Archive writer with rolling
 8. [x] Integration test infrastructure
-9. [ ] Complete hyperi-rustlib KafkaTransport adapter
-10. [ ] Main pipeline orchestrator
+9. [x] Complete hyperi-rustlib KafkaTransport adapter
+10. [x] Main pipeline orchestrator
 
 ### Phase 2: Cloud Storage
 
@@ -88,6 +87,10 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Implemented archive writer with rolling
 - [x] Created integration test infrastructure
 - [x] Created benchmark scaffolding
+- [x] Completed KafkaTransport adapter (hyperi-rustlib integration)
+- [x] Completed main pipeline orchestrator (src/archiver.rs)
+- [x] Fixed at-least-once delivery (offsets committed only after successful archive write)
+- [x] Restructured integration tests (moved from tests/integration/ to tests/)
 
 ---
 
@@ -95,9 +98,9 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 ### High Priority
 
-- [ ] Complete KafkaTransport integration with hyperi-rustlib
+- [x] Complete KafkaTransport integration with hyperi-rustlib
 - [ ] S3 multipart upload support
-- [ ] At-least-once delivery with offset commit
+- [x] At-least-once delivery with offset commit
 
 ### Medium Priority
 

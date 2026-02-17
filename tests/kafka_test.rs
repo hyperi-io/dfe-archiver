@@ -1,5 +1,5 @@
 // Project:   dfe-archiver
-// File:      tests/integration/kafka_test.rs
+// File:      tests/kafka_test.rs
 // Purpose:   Integration tests against real Kafka
 // Language:  Rust
 //
@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{kafka_available, get_kafka_brokers, get_kafka_sasl, test_topic_name, test_json_message};
+use common::{get_kafka_brokers, get_kafka_sasl, kafka_available};
 use dfe_archiver::config::KafkaConfig;
 use dfe_archiver::kafka::TransportAdapter;
 
@@ -49,11 +49,10 @@ async fn test_kafka_connection() {
         config.security_protocol = sasl.protocol;
     }
 
-    let mut transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config)
         .await
         .expect("create transport");
 
-    transport.connect().await.expect("connect");
     assert!(transport.is_healthy());
 
     transport.close().await.expect("close");
@@ -86,11 +85,9 @@ async fn test_kafka_consume() {
         config.security_protocol = sasl.protocol;
     }
 
-    let mut transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config)
         .await
         .expect("create transport");
-
-    transport.connect().await.expect("connect");
 
     // Try to receive messages (may be empty if topic is empty)
     let messages = transport.recv(100).await.expect("recv");
