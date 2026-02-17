@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.5...v1.2.0) (2026-02-17)
+
+
+### Features
+
+* replace S3Backend with ObjectStoreBackend for streaming multipart uploads ([57b97a8](https://github.com/hyperi-io/dfe-archiver/commit/57b97a88f3f1e76bcb13aa0bf7490b7d5abff95c))
+
 ## [1.1.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.4...v1.1.5) (2026-02-17)
 
 
