@@ -38,6 +38,22 @@ pub struct KafkaMessage {
     pub(crate) token: KafkaToken,
 }
 
+impl KafkaMessage {
+    /// Create a test message (for benchmarks and tests)
+    #[must_use]
+    pub fn for_test(payload: Vec<u8>, topic: &str, partition: i32, offset: i64) -> Self {
+        Self {
+            key: None,
+            payload,
+            topic: CompactString::from(topic),
+            partition,
+            offset,
+            timestamp_ms: None,
+            token: KafkaToken::new(Arc::from(topic), partition, offset),
+        }
+    }
+}
+
 /// Kafka offset for commit tracking (wraps hyperi-rustlib token)
 #[derive(Debug, Clone)]
 pub struct KafkaOffset {

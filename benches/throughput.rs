@@ -6,8 +6,9 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use dfe_archiver::compression::{create_compressor, Compressor};
+use std::hint::black_box;
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use dfe_archiver::compression::create_compressor;
 use dfe_archiver::routing::Router;
 use dfe_archiver::config::RoutingConfig;
 
@@ -70,20 +71,12 @@ fn bench_compression(c: &mut Criterion) {
 
 fn bench_routing(c: &mut Criterion) {
     use dfe_archiver::kafka::KafkaMessage;
-    use compact_str::CompactString;
 
     let data = generate_test_data(1000);
     let messages: Vec<KafkaMessage> = data
         .into_iter()
         .enumerate()
-        .map(|(i, payload)| KafkaMessage {
-            key: None,
-            payload,
-            topic: CompactString::from("benchmark-topic"),
-            partition: 0,
-            offset: i as i64,
-            timestamp_ms: None,
-        })
+        .map(|(i, payload)| KafkaMessage::for_test(payload, "benchmark-topic", 0, i as i64))
         .collect();
 
     let mut group = c.benchmark_group("routing");
