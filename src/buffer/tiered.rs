@@ -94,7 +94,7 @@ pub struct TieredBufferConfig {
     /// Default: 1GB
     pub min_free_disk_bytes: u64,
 
-    /// Enable compression for spooled data (uses zstd via hs-rustlib)
+    /// Enable compression for spooled data (uses zstd via hyperi-rustlib)
     pub spool_compression: bool,
 }
 
@@ -531,7 +531,7 @@ pub struct BufferStatsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hs_rustlib::transport::KafkaToken;
+    use hyperi_rustlib::transport::KafkaToken;
     use std::sync::Arc;
 
     fn make_message(payload: &[u8], topic: &str, offset: i64) -> KafkaMessage {

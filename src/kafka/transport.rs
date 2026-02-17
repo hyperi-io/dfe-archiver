@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      src/kafka/transport.rs
-// Purpose:   Kafka transport adapter wrapping hs-rustlib
+// Purpose:   Kafka transport adapter wrapping hyperi-rustlib
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
@@ -9,7 +9,7 @@
 use crate::config::KafkaConfig;
 use crate::{Error, Result};
 use compact_str::CompactString;
-use hs_rustlib::transport::{KafkaToken, KafkaTransport, Transport};
+use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, Transport};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -38,7 +38,7 @@ pub struct KafkaMessage {
     pub(crate) token: KafkaToken,
 }
 
-/// Kafka offset for commit tracking (wraps hs-rustlib token)
+/// Kafka offset for commit tracking (wraps hyperi-rustlib token)
 #[derive(Debug, Clone)]
 pub struct KafkaOffset {
     pub topic: CompactString,
@@ -58,7 +58,7 @@ impl From<&KafkaMessage> for KafkaOffset {
     }
 }
 
-/// Transport adapter wrapping hs-rustlib Kafka transport
+/// Transport adapter wrapping hyperi-rustlib Kafka transport
 pub struct TransportAdapter {
     transport: KafkaTransport,
 }
@@ -73,7 +73,7 @@ impl TransportAdapter {
             brokers = %config.brokers.join(","),
             group_id = %config.group_id,
             topics = ?config.topics,
-            "Creating Kafka transport via hs-rustlib"
+            "Creating Kafka transport via hyperi-rustlib"
         );
 
         let hs_config = convert_config(config);
@@ -97,7 +97,7 @@ impl TransportAdapter {
 
         debug!(count = messages.len(), "Received messages from Kafka");
 
-        // Convert hs-rustlib messages to local type
+        // Convert hyperi-rustlib messages to local type
         Ok(messages
             .into_iter()
             .map(|msg| KafkaMessage {
@@ -152,9 +152,9 @@ impl TransportAdapter {
     }
 }
 
-/// Convert local config to hs-rustlib transport config
-fn convert_config(config: &KafkaConfig) -> hs_rustlib::transport::KafkaConfig {
-    hs_rustlib::transport::KafkaConfig {
+/// Convert local config to hyperi-rustlib transport config
+fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfig {
+    hyperi_rustlib::transport::KafkaConfig {
         brokers: config.brokers.clone(),
         group: config.group_id.clone(),
         topics: config.topics.clone(),

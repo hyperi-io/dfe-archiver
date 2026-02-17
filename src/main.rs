@@ -70,8 +70,8 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let args = Args::parse();
 
-    // Initialise logging via hs-rustlib (auto-detects JSON/Text format)
-    hs_rustlib::logger::setup_default()
+    // Initialise logging via hyperi-rustlib (auto-detects JSON/Text format)
+    hyperi_rustlib::logger::setup_default()
         .map_err(|e| dfe_archiver::Error::Config(format!("logger init failed: {e}")))?;
 
     info!(

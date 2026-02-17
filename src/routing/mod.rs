@@ -93,7 +93,7 @@ fn extract_field(json: &sonic_rs::Value, path: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::kafka::KafkaMessage;
-    use hs_rustlib::transport::KafkaToken;
+    use hyperi_rustlib::transport::KafkaToken;
     use std::sync::Arc;
 
     fn make_message(topic: &str, payload: &str) -> KafkaMessage {
