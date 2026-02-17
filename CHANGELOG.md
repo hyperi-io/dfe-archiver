@@ -1,3 +1,10 @@
+## [1.1.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.4...v1.1.5) (2026-02-17)
+
+
+### Bug Fixes
+
+* complete Phase 1 with at-least-once delivery fix and test restructuring ([489510e](https://github.com/hyperi-io/dfe-archiver/commit/489510e859839cd9e3aae0d72695f000314dab6b))
+
 ## [1.1.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.1.3...v1.1.4) (2026-02-17)
 
 
