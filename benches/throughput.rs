@@ -6,11 +6,11 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use dfe_archiver::compression::create_compressor;
-use dfe_archiver::routing::Router;
 use dfe_archiver::config::RoutingConfig;
+use dfe_archiver::routing::Router;
+use std::hint::black_box;
 
 /// Generate test JSON data
 fn generate_test_data(count: usize) -> Vec<Vec<u8>> {
@@ -50,9 +50,7 @@ fn bench_compression(c: &mut Criterion) {
 
     // LZ4 compression
     let lz4 = create_compressor("lz4", 0).expect("lz4");
-    group.bench_function("lz4", |b| {
-        b.iter(|| lz4.compress(black_box(&combined)))
-    });
+    group.bench_function("lz4", |b| b.iter(|| lz4.compress(black_box(&combined))));
 
     // Snappy compression
     let snappy = create_compressor("snappy", 0).expect("snappy");

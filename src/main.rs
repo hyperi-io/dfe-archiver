@@ -74,10 +74,7 @@ async fn main() -> Result<()> {
     hyperi_rustlib::logger::setup_default()
         .map_err(|e| dfe_archiver::Error::Config(format!("logger init failed: {e}")))?;
 
-    info!(
-        version = dfe_archiver::VERSION,
-        "Starting dfe-archiver"
-    );
+    info!(version = dfe_archiver::VERSION, "Starting dfe-archiver");
 
     // Load configuration (CLI → ENV → .env → file → defaults)
     let config = Config::load(args.config.as_deref())?;

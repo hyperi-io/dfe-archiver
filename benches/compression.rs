@@ -6,9 +6,9 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use std::hint::black_box;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dfe_archiver::compression::create_compressor;
+use std::hint::black_box;
 
 /// Generate realistic JSON log data
 fn generate_log_data(size_kb: usize) -> Vec<u8> {
@@ -37,13 +37,9 @@ fn bench_compression_ratios(c: &mut Criterion) {
         for codec in codecs {
             let compressor = create_compressor(codec, 3).expect(codec);
 
-            group.bench_with_input(
-                BenchmarkId::new(codec, size),
-                &data,
-                |b, data| {
-                    b.iter(|| compressor.compress(black_box(data)))
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(codec, size), &data, |b, data| {
+                b.iter(|| compressor.compress(black_box(data)))
+            });
         }
 
         group.finish();
@@ -73,9 +69,7 @@ fn bench_decompression(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new(*codec, "1mb"),
             compressed_data,
-            |b, compressed| {
-                b.iter(|| compressor.decompress(black_box(compressed)))
-            },
+            |b, compressed| b.iter(|| compressor.decompress(black_box(compressed))),
         );
     }
 

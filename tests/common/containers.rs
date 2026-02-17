@@ -29,8 +29,8 @@ pub struct TestInfrastructure {
 impl TestInfrastructure {
     /// Create test infrastructure using external Kafka from .env
     pub async fn from_env() -> Self {
-        let kafka_brokers = std::env::var("KAFKA_BROKERS")
-            .unwrap_or_else(|_| "localhost:9092".to_string());
+        let kafka_brokers =
+            std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string());
 
         Self {
             #[cfg(feature = "testcontainers")]

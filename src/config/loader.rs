@@ -32,7 +32,11 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
         info!(path = %path, "Loaded configuration from ARCHIVER_CONFIG");
     } else {
         // Try default locations
-        for default_path in &["config.yaml", "config/settings.yaml", "/etc/dfe-archiver/config.yaml"] {
+        for default_path in &[
+            "config.yaml",
+            "config/settings.yaml",
+            "/etc/dfe-archiver/config.yaml",
+        ] {
             if Path::new(default_path).exists() {
                 config = load_from_file(default_path)?;
                 info!(path = %default_path, "Loaded configuration from default location");
