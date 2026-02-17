@@ -141,7 +141,7 @@ pub struct ObjectStoreBackend {
 impl ObjectStoreBackend {
     /// Create backend for AWS S3
     pub fn new_s3(config: &S3Config, prefix: String, chunk_size: usize) -> Result<Self> {
-        let mut builder = AmazonS3Builder::new()
+        let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&config.bucket)
             .with_allow_http(true);
 
@@ -220,7 +220,7 @@ impl ObjectStoreBackend {
     /// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (Application Default Credentials)
     /// 4. Instance metadata (when running on GCP)
     pub fn new_gcs(config: &GcsConfig, prefix: String, chunk_size: usize) -> Result<Self> {
-        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&config.bucket);
+        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&config.bucket);
 
         if let Some(ref key) = config.service_account_key {
             builder = builder.with_service_account_key(key);
@@ -247,7 +247,7 @@ impl ObjectStoreBackend {
 
     /// Create backend for Azure Blob Storage
     pub fn new_azure(config: &AzureConfig, prefix: String, chunk_size: usize) -> Result<Self> {
-        let mut builder = MicrosoftAzureBuilder::new()
+        let mut builder = MicrosoftAzureBuilder::from_env()
             .with_account(&config.account_name)
             .with_container_name(&config.container);
 
