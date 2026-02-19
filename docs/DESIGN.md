@@ -14,19 +14,111 @@ High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Data Flow](#data-flow)
-4. [Tiered Buffer Design](#tiered-buffer-design)
-5. [At-Least-Once Delivery](#at-least-once-delivery)
-6. [Rolling Policy](#rolling-policy)
-7. [Disk Protection](#disk-protection)
-8. [Routing](#routing)
-9. [Compression](#compression)
-10. [Storage Backends](#storage-backends)
-11. [Configuration](#configuration)
-12. [Metrics](#metrics)
-13. [Deployment](#deployment)
+1. [Building & Artifacts](#building--artifacts)
+2. [Overview](#overview)
+3. [Architecture](#architecture)
+4. [Data Flow](#data-flow)
+5. [Tiered Buffer Design](#tiered-buffer-design)
+6. [At-Least-Once Delivery](#at-least-once-delivery)
+7. [Rolling Policy](#rolling-policy)
+8. [Disk Protection](#disk-protection)
+9. [Routing](#routing)
+10. [Compression](#compression)
+11. [Storage Backends](#storage-backends)
+12. [Configuration](#configuration)
+13. [Metrics](#metrics)
+14. [Deployment](#deployment)
+
+---
+
+## Building & Artifacts
+
+### Local Build
+
+```bash
+# Debug build
+cargo build
+
+# Release build (production, with jemalloc)
+cargo build --features default,jemalloc --release
+```
+
+**Output location:**
+
+| Build Type | Path |
+|---|---|
+| Debug (native) | `target/debug/dfe-archiver` |
+| Release (native) | `target/release/dfe-archiver` |
+| Cross-compile (x86_64) | `target/x86_64-unknown-linux-gnu/release/dfe-archiver` |
+| Cross-compile (aarch64) | `target/aarch64-unknown-linux-gnu/release/dfe-archiver` |
+
+### CI/CD Pipeline
+
+CI is managed by the [HyperI CI](https://github.com/hyperi-io/ci) submodule (`ci/`).
+Configuration is in `.hyperi-ci.yaml`.
+
+**Pipeline stages:**
+
+```text
+Push to any branch
+  → CI workflow: Detect → Quality (fmt, clippy, audit) → Test (with coverage)
+
+GitHub Release created (via semantic-release)
+  → Publish workflow: Detect → Build (x86_64 + aarch64) → Publish
+```
+
+### Build Targets
+
+| Target | Architecture | Notes |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | AMD64 | Primary production target |
+| `aarch64-unknown-linux-gnu` | ARM64 | AWS Graviton, Apple Silicon Linux |
+
+Cross-compilation uses the CI cross-compilation toolchain (not vendored system
+libraries). `openssl` is vendored for portability; `rdkafka` uses `cmake-build`
+to compile `librdkafka` from source.
+
+### Artifact Destinations
+
+#### Crate (library)
+
+| Destination | URL |
+|---|---|
+| HyperI Cargo Registry | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/` |
+
+Published via `cargo publish --registry hyperi`. Used as a dependency:
+
+```toml
+dfe-archiver = { version = ">=1.2", registry = "hyperi" }
+```
+
+#### Binaries
+
+| Destination | Location |
+|---|---|
+| JFrog Artifactory | `https://hypersec.jfrog.io/artifactory/hyperi-binaries/dfe-archiver/{version}/` |
+| JFrog Artifactory (latest) | `https://hypersec.jfrog.io/artifactory/hyperi-binaries/dfe-archiver/latest/` |
+| GitHub Releases | `https://github.com/hyperi-io/dfe-archiver/releases/` |
+
+**Binary naming convention:**
+
+```text
+dfe-archiver-{version}-linux-amd64     # x86_64
+dfe-archiver-{version}-linux-arm64     # aarch64
+```
+
+**Checksums:** `SHA256SUMS` file published alongside binaries.
+
+### Release Profile
+
+```toml
+[profile.release]
+lto = "thin"          # Link-time optimization
+codegen-units = 1     # Single codegen unit for better optimization
+strip = true          # Remove debug symbols
+panic = "abort"       # Smaller binary, no unwinding overhead
+opt-level = 3         # Maximum optimization
+```
 
 ---
 
