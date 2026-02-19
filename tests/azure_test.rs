@@ -36,8 +36,7 @@ fn get_azure_config() -> Option<AzureConfig> {
         account_name,
         account_key: env::var("AZURE_STORAGE_KEY").ok(),
         sas_token: None,
-        container: env::var("AZURE_CONTAINER")
-            .unwrap_or_else(|_| "archive-test".to_string()),
+        container: env::var("AZURE_CONTAINER").unwrap_or_else(|_| "archive-test".to_string()),
         use_emulator: false,
         endpoint: None,
     })
@@ -55,9 +54,8 @@ async fn test_azure_basic_operations() {
         }
     };
 
-    let backend =
-        ObjectStoreBackend::new_azure(&config, "test-basic".to_string(), 8 * 1024 * 1024)
-            .expect("create Azure backend");
+    let backend = ObjectStoreBackend::new_azure(&config, "test-basic".to_string(), 8 * 1024 * 1024)
+        .expect("create Azure backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -170,6 +168,84 @@ async fn test_azure_archive_roundtrip() {
     writer.close().await.expect("close");
 
     println!("Azure archive roundtrip test passed");
+}
+
+/// Test Azure rolling by size — verifies ArchiveWriter creates multiple objects
+/// when the compressed file size exceeds the rolling threshold.
+#[tokio::test]
+#[ignore = "requires Azure credentials - run with --ignored"]
+async fn test_azure_rolling_by_size() {
+    use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
+    use dfe_archiver::compression::create_compressor;
+
+    let azure_config = match get_azure_config() {
+        Some(c) => c,
+        None => {
+            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+            return;
+        }
+    };
+
+    let test_prefix = format!("test-rolling-{}", std::process::id());
+
+    let archive_config = ArchiveConfig {
+        destination: format!("az://{}/{test_prefix}", azure_config.container),
+        path_template: "data/{timestamp}".to_string(),
+        file_extension: "jsonl".to_string(),
+        azure: Some(azure_config.clone()),
+        ..Default::default()
+    };
+
+    let policy = RollingPolicy {
+        max_size_bytes: 500,
+        max_age_secs: 3600,
+    };
+
+    let compressor = create_compressor("none", 0).expect("create compressor");
+    let storage = create_backend(&archive_config).expect("create storage");
+
+    let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
+
+    for batch in 0..10 {
+        for i in 0..5 {
+            let id = batch * 5 + i;
+            let record = common::test_json_message(id, "test-org", "test-event");
+            writer.write_record(&record).await.expect("write record");
+        }
+        writer.flush().await.expect("flush");
+    }
+
+    writer.close().await.expect("close");
+
+    // Verify multiple objects were created
+    let verify_backend =
+        ObjectStoreBackend::new_azure(&azure_config, test_prefix.clone(), 8 * 1024 * 1024)
+            .expect("create verify backend");
+
+    let objects = verify_backend
+        .list_prefix("data/")
+        .await
+        .expect("list objects");
+
+    assert!(
+        objects.len() >= 3,
+        "expected at least 3 rolled files, got {}",
+        objects.len()
+    );
+
+    println!(
+        "Azure rolling by size created {} files (500 byte threshold)",
+        objects.len()
+    );
+
+    // Cleanup
+    for obj in &objects {
+        let rel_path = obj.strip_prefix(&format!("{test_prefix}/")).unwrap_or(obj);
+        verify_backend
+            .delete(rel_path)
+            .await
+            .expect("delete object");
+    }
 }
 
 /// Test create_backend with az:// URL

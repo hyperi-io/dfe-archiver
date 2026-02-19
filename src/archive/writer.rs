@@ -61,6 +61,8 @@ pub struct ArchiveWriter {
     storage: Box<dyn StorageBackend + Send + Sync>,
     state: Option<ArchiveState>,
     buffer: Vec<u8>,
+    /// Sequence counter for unique file names within the same timestamp
+    file_seq: u64,
 }
 
 impl ArchiveWriter {
@@ -78,6 +80,7 @@ impl ArchiveWriter {
             storage,
             state: None,
             buffer: Vec::with_capacity(1024 * 1024), // 1MB initial buffer
+            file_seq: 0,
         }
     }
 
@@ -211,6 +214,7 @@ impl ArchiveWriter {
 
     /// Open a new archive file
     async fn open_new_file(&mut self) -> Result<()> {
+        self.file_seq += 1;
         let now = Utc::now();
         let path = self.generate_path(&now);
 
@@ -239,15 +243,16 @@ impl ArchiveWriter {
         path = path.replace("{hour}", &timestamp.format("%H").to_string());
         path = path.replace("{minute}", &timestamp.format("%M").to_string());
         path = path.replace("{timestamp}", &timestamp.timestamp().to_string());
+        path = path.replace("{seq}", &format!("{:04}", self.file_seq));
 
-        // Add extension
+        // Add extension with sequence suffix for uniqueness
         let ext = &self.config.file_extension;
         let compression_ext = self.compressor.extension();
 
         if compression_ext.is_empty() {
-            format!("{path}.{ext}")
+            format!("{path}-{:04}.{ext}", self.file_seq)
         } else {
-            format!("{path}.{ext}.{compression_ext}")
+            format!("{path}-{:04}.{ext}.{compression_ext}", self.file_seq)
         }
     }
 

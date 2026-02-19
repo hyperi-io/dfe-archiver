@@ -168,6 +168,86 @@ async fn test_s3_archive_roundtrip() {
     println!("S3 archive roundtrip test passed");
 }
 
+/// Test S3 rolling by size — verifies ArchiveWriter creates multiple objects
+/// when the compressed file size exceeds the rolling threshold.
+#[tokio::test]
+#[ignore = "requires AWS credentials - run with --ignored"]
+async fn test_s3_rolling_by_size() {
+    use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
+    use dfe_archiver::compression::create_compressor;
+
+    let s3_config = match get_s3_config() {
+        Some(c) => c,
+        None => {
+            eprintln!("Skipping: S3_BUCKET not set");
+            return;
+        }
+    };
+
+    let test_prefix = format!("test-rolling-{}", std::process::id());
+
+    let archive_config = ArchiveConfig {
+        destination: format!("s3://{}/{test_prefix}", s3_config.bucket),
+        path_template: "data/{timestamp}".to_string(),
+        file_extension: "jsonl".to_string(),
+        s3: Some(s3_config.clone()),
+        ..Default::default()
+    };
+
+    // Small roll size to force multiple files
+    let policy = RollingPolicy {
+        max_size_bytes: 500,
+        max_age_secs: 3600,
+    };
+
+    let compressor = create_compressor("none", 0).expect("create compressor");
+    let storage = create_backend(&archive_config).expect("create storage");
+
+    let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
+
+    // Write records in batches with flush to trigger rolling
+    for batch in 0..10 {
+        for i in 0..5 {
+            let id = batch * 5 + i;
+            let record = common::test_json_message(id, "test-org", "test-event");
+            writer.write_record(&record).await.expect("write record");
+        }
+        writer.flush().await.expect("flush");
+    }
+
+    writer.close().await.expect("close");
+
+    // Verify multiple objects were created
+    let verify_backend =
+        ObjectStoreBackend::new_s3(&s3_config, test_prefix.clone(), 8 * 1024 * 1024)
+            .expect("create verify backend");
+
+    let objects = verify_backend
+        .list_prefix("data/")
+        .await
+        .expect("list objects");
+
+    assert!(
+        objects.len() >= 3,
+        "expected at least 3 rolled files, got {}",
+        objects.len()
+    );
+
+    println!(
+        "S3 rolling by size created {} files (500 byte threshold)",
+        objects.len()
+    );
+
+    // Cleanup
+    for obj in &objects {
+        let rel_path = obj.strip_prefix(&format!("{test_prefix}/")).unwrap_or(obj);
+        verify_backend
+            .delete(rel_path)
+            .await
+            .expect("delete object");
+    }
+}
+
 /// Test create_backend with s3:// URL
 #[tokio::test]
 #[ignore = "requires AWS credentials - run with --ignored"]
