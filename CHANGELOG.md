@@ -1,3 +1,11 @@
+## [1.2.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.1...v1.2.2) (2026-02-19)
+
+
+### Bug Fixes
+
+* add binary app build CI with cross-compilation for x86_64 and aarch64 ([245f2a4](https://github.com/hyperi-io/dfe-archiver/commit/245f2a45cae5e5b4f4b5a4fab474beeca357f4c1))
+* add file sequence counter for rolling and list_prefix for storage backends ([b063f05](https://github.com/hyperi-io/dfe-archiver/commit/b063f05ebd4625161267b1ba61fca02e4bf649b0))
+
 ## [1.2.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.0...v1.2.1) (2026-02-17)
 
 
