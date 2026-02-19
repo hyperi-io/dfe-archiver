@@ -35,6 +35,12 @@ hyperi-rustlib = { version = ">=1.3", registry = "hyperi", features = [
     "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",
 ] }
 
+# Kafka (SASL/SCRAM required for auth) - vendored build for cross-compilation
+rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
+
+# OpenSSL vendored - builds OpenSSL from source for aarch64 cross-compilation
+openssl = { version = ">=0.10", features = ["vendored"] }
+
 # Async runtime
 tokio = { version = ">=1.48", features = ["full", "parking_lot"] }
 tokio-util = { version = ">=0.7", features = ["time"] }
