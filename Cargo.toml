@@ -32,7 +32,7 @@ path = "src/main.rs"
 # HyperI shared library - config, logging, metrics, transport
 # Published to hyperi-cargo-virtual registry in JFrog Artifactory
 hyperi-rustlib = { version = ">=1.3", registry = "hyperi", features = [
-    "config", "logger", "metrics", "transport-kafka", "http-server", "tiered-sink", "spool",
+    "config", "logger", "metrics", "transport-kafka", "transport-zenoh", "http-server", "tiered-sink", "spool",
 ] }
 
 # Kafka (SASL/SCRAM required for auth) - vendored build for cross-compilation
