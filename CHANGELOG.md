@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.2...v1.2.3) (2026-02-19)
+
+
+### Bug Fixes
+
+* add transport-zenoh support via hyperi-rustlib ([d691b30](https://github.com/hyperi-io/dfe-archiver/commit/d691b30fd41436cf3f73e0d41983b5f94ced46bc))
+
 ## [1.2.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.1...v1.2.2) (2026-02-19)
 
 
