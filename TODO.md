@@ -18,6 +18,13 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
+- [ ] Finalise hyperi-rustlib migration (kafka/, config/, metrics/ modules) `[PENDING]`
+  - kafka/, config/, metrics/ contain meaningful archiver-specific logic (NOT legacy stubs)
+  - Assess what (if anything) should migrate to hyperi-rustlib direct usage
+  - DO NOT push until this is resolved
+- [ ] Verify local release build passes `[PENDING]`
+  - Needs libsasl2-dev installed for sasl2-sys
+  - Cross-compilation deps provided by CI sysroot, not vendored locally
 - [ ] Add KEDA scaling metrics endpoint `[PENDING]`
 
 ---
@@ -45,9 +52,12 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 1. [x] S3 backend with multipart upload (ObjectStoreBackend with WriteMultipart streaming)
 2. [x] MinIO backend (S3-compatible, via ObjectStoreBackend)
-3. [x] GCS backend (ObjectStoreBackend constructor, untested — needs GCS credentials)
-4. [x] Azure Blob backend (ObjectStoreBackend constructor, untested — needs Azure credentials)
-5. [x] Integration tests for each backend (S3 + MinIO tests written, GCS/Azure pending credentials)
+3. [x] GCS backend (ObjectStoreBackend constructor, tested against real GCS)
+4. [x] Azure Blob backend (ObjectStoreBackend constructor, tested against real Azure)
+5. [x] Integration tests for each backend (S3, GCS, Azure tested with real credentials; MinIO needs Docker)
+6. [x] Rolling/rollover tests for all backends (size-based rolling verified on file, S3, GCS, Azure)
+7. [x] File sequence counter for unique rolling paths (prevents same-second collisions)
+8. [x] `list_prefix()` method on StorageBackend trait (for both FileBackend and ObjectStoreBackend)
 
 ### Phase 3: Production Hardening
 
@@ -95,6 +105,19 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Added multipart_chunk_size config, S3 env var overrides, chunk size validation
 - [x] Created S3 integration tests (tests/s3_test.rs)
 - [x] Updated MinIO integration tests for ObjectStoreBackend
+- [x] Created Azure integration tests (tests/azure_test.rs) — 5 tests including rolling
+- [x] Created GCS integration tests (tests/gcs_test.rs) — 5 tests including rolling
+- [x] Added rolling/rollover tests for all backends (file, S3, GCS, Azure, MinIO)
+- [x] Added file_seq counter to ArchiveWriter for unique file paths during rolling
+- [x] Added list_prefix() to StorageBackend trait (FileBackend + ObjectStoreBackend)
+- [x] Fixed test_rolling_by_size to properly trigger rolling (flush between batches)
+- [x] Added test_rolling_by_time (1-second threshold with sleep)
+- [x] Added binary app build CI config (.hyperi-ci.yaml, ci.yml, publish.yml)
+- [x] Replaced release.yml with publish.yml (matching dfe-loader CI pattern)
+- [x] Added rdkafka and openssl vendored deps to Cargo.toml
+- [x] Added Building & Artifacts documentation to DESIGN.md
+- [x] CI submodule updated to v1.58.18 (mac-friendly changes verified compatible)
+- [x] AI submodule updated
 
 ---
 
@@ -122,7 +145,8 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 ## Blocked
 
-(None currently)
+- All changes uncommitted — DO NOT push until hyperi-rustlib migration is finalised
+- 16 files changed (+692/-233 lines) spanning Phase 2 cloud storage + binary build CI
 
 ---
 
