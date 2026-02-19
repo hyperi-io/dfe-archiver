@@ -187,6 +187,82 @@ async fn test_minio_large_file_upload() {
     println!("MinIO large file test passed (5MB uploaded)");
 }
 
+/// Test MinIO rolling by size — verifies ArchiveWriter creates multiple objects
+/// when the compressed file size exceeds the rolling threshold.
+#[tokio::test]
+#[ignore = "requires running MinIO - run with --ignored"]
+async fn test_minio_rolling_by_size() {
+    use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
+    use dfe_archiver::compression::create_compressor;
+
+    if !minio_available().await {
+        eprintln!("Skipping: MinIO not available");
+        return;
+    }
+
+    let minio_config = get_minio_config();
+    let test_prefix = format!("test-rolling-{}", std::process::id());
+
+    let archive_config = ArchiveConfig {
+        destination: format!("minio://{}/{test_prefix}", minio_config.bucket),
+        path_template: "data/{timestamp}".to_string(),
+        file_extension: "jsonl".to_string(),
+        minio: Some(minio_config.clone()),
+        ..Default::default()
+    };
+
+    let policy = RollingPolicy {
+        max_size_bytes: 500,
+        max_age_secs: 3600,
+    };
+
+    let compressor = create_compressor("none", 0).expect("create compressor");
+    let storage = create_backend(&archive_config).expect("create storage");
+
+    let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
+
+    for batch in 0..10 {
+        for i in 0..5 {
+            let id = batch * 5 + i;
+            let record = common::test_json_message(id, "test-org", "test-event");
+            writer.write_record(&record).await.expect("write record");
+        }
+        writer.flush().await.expect("flush");
+    }
+
+    writer.close().await.expect("close");
+
+    // Verify multiple objects were created
+    let verify_backend =
+        ObjectStoreBackend::new_minio(&minio_config, test_prefix.clone(), 8 * 1024 * 1024)
+            .expect("create verify backend");
+
+    let objects = verify_backend
+        .list_prefix("data/")
+        .await
+        .expect("list objects");
+
+    assert!(
+        objects.len() >= 3,
+        "expected at least 3 rolled files, got {}",
+        objects.len()
+    );
+
+    println!(
+        "MinIO rolling by size created {} files (500 byte threshold)",
+        objects.len()
+    );
+
+    // Cleanup
+    for obj in &objects {
+        let rel_path = obj.strip_prefix(&format!("{test_prefix}/")).unwrap_or(obj);
+        verify_backend
+            .delete(rel_path)
+            .await
+            .expect("delete object");
+    }
+}
+
 /// Test create_backend with minio:// URL
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]

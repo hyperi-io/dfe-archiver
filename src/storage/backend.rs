@@ -9,6 +9,7 @@
 use crate::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConfig, S3Config};
 use crate::{Error, Result};
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -45,6 +46,9 @@ pub trait StorageBackend: Send + Sync {
 
     /// Delete file/object
     async fn delete(&self, path: &str) -> Result<()>;
+
+    /// List objects under a prefix
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>>;
 
     /// Get backend name
     fn name(&self) -> &'static str;
@@ -115,6 +119,39 @@ impl StorageBackend for FileBackend {
         let full_path = self.full_path(path);
         tokio::fs::remove_file(&full_path).await?;
         Ok(())
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let search_dir = self.full_path(prefix);
+        let base = &self.base_path;
+        let mut results = Vec::new();
+
+        // Find the directory to walk (prefix may be a dir or partial path)
+        let walk_dir = if search_dir.is_dir() {
+            search_dir.clone()
+        } else {
+            search_dir.parent().unwrap_or(&search_dir).to_path_buf()
+        };
+
+        if walk_dir.exists() {
+            let mut stack = vec![walk_dir];
+            while let Some(dir) = stack.pop() {
+                let mut entries = tokio::fs::read_dir(&dir).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Ok(rel) = path.strip_prefix(base) {
+                        let rel_str = rel.to_string_lossy().to_string();
+                        if rel_str.starts_with(prefix) {
+                            results.push(rel_str);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     fn name(&self) -> &'static str {
@@ -417,6 +454,28 @@ impl StorageBackend for ObjectStoreBackend {
         })?;
         debug!(path = %object_path, backend = self.backend_name, "Deleted object");
         Ok(())
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let object_prefix = self.object_path(prefix);
+        let list_prefix = Some(&object_prefix);
+
+        let objects: Vec<_> = self
+            .store
+            .list(list_prefix)
+            .try_collect()
+            .await
+            .map_err(|e| {
+                Error::Storage(format!(
+                    "{}: list failed for prefix {prefix}: {e}",
+                    self.backend_name
+                ))
+            })?;
+
+        Ok(objects
+            .into_iter()
+            .map(|meta| meta.location.to_string())
+            .collect())
     }
 
     fn name(&self) -> &'static str {
