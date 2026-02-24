@@ -1,3 +1,10 @@
+## [1.2.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.3...v1.2.4) (2026-02-24)
+
+
+### Bug Fixes
+
+* comment out empty gitleaks allowlist for 8.30.0 compat ([24548b2](https://github.com/hyperi-io/dfe-archiver/commit/24548b24ca5438543efe9a18cf736172b4594158))
+
 ## [1.2.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.2...v1.2.3) (2026-02-19)
 
 
