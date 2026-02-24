@@ -9,27 +9,13 @@
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Project-specific false positive allowlist"
-
-# Paths to exclude from scanning (regex patterns)
-# Uncomment and customise as needed
-paths = [
-    # Test files often contain fake tokens/secrets
-    # '''tests/.*\.py''',
-    # '''tests/fixtures/.*''',
-    # Example configuration files
-    # '''.env.example''',
-    # '''.env.sample''',
-]
-
-# Regex patterns for known false positives
-# regexes = [
-#     '''YOUR_.*_TOKEN''',
-#     '''your-.*-token''',
-#     '''test-token''',
-#     '''example\.com''',
+# Project-specific allowlist
+# Uncomment and add entries as needed to exclude false positives.
+# The [allowlist] section requires at least one active check (paths, regexes,
+# commits, or stopwords) — do not add it with only commented-out entries.
+#
+# [allowlist]
+# description = "Project-specific false positive allowlist"
+# paths = [
+#     '''tests/fixtures/.*''',
 # ]
-
-# Stopwords - findings containing these are likely false positives
-# stopwords = ["example", "sample", "test", "mock", "fake", "dummy", "placeholder"]
