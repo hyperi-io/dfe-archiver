@@ -19,7 +19,7 @@ language: rust
 
 # Runner settings (override GH_RUNNER_* variables)
 runners:
-  default: ubuntu-latest    # Default runner for all jobs (quality, test, build, publish)
+  default: arc-runner-16cpu    # Default runner for all jobs (quality, test, build, publish)
 
 # Quality checks
 quality:
