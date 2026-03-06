@@ -1,3 +1,10 @@
+## [1.2.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.4...v1.2.5) (2026-03-06)
+
+
+### Bug Fixes
+
+* exclude ai, ci, docs dirs from cargo publish package [skip ci] ([e0ba986](https://github.com/hyperi-io/dfe-archiver/commit/e0ba986899e7d95a8d9cb095761af5ccf84270b2))
+
 ## [1.2.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.3...v1.2.4) (2026-02-24)
 
 
