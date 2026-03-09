@@ -213,7 +213,7 @@ Health endpoints:
 
 ### Prerequisites
 
-- Rust 1.75+
+- Rust 1.94+
 - Docker (for local testing)
 
 ### Local Testing
@@ -223,7 +223,7 @@ Health endpoints:
 docker compose -f docker-compose.dev.yaml up -d
 
 # Run tests
-cargo test
+cargo nextest run
 
 # Run with local services
 cargo run -- --config config.dev.yaml
