@@ -1,0 +1,96 @@
+# Project:      dfe-archiver
+# File:         crates/archiver/Cargo.toml
+# Purpose:      Binary and orchestration for the archiver service
+# Language:     TOML
+#
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
+
+[package]
+name = "dfe-archiver"
+version = "1.2.5"
+description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+exclude = [".github/", "ci/", "docs/", "reference/"]
+
+[lib]
+name = "dfe_archiver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dfe-archiver"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dfe-archiver-core = { workspace = true }
+dfe-archiver-io = { workspace = true }
+hyperi-rustlib = { workspace = true, features = [
+    "config", "logger", "metrics", "transport-kafka", "transport-zenoh",
+    "http-server", "tiered-sink", "spool",
+] }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Config
+clap = { workspace = true }
+dotenvy = { workspace = true }
+serde_yaml_ng = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+compact_str = { workspace = true }
+metrics = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+proptest = { workspace = true }
+tokio-test = { workspace = true }
+test-log = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+reqwest = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
+transport-memory = ["dfe-archiver-core/transport-memory"]
+testcontainers = []
+full = ["jemalloc", "testcontainers"]
+
+[dependencies.tikv-jemallocator]
+workspace = true
+optional = true
+
+[dependencies.mimalloc]
+workspace = true
+optional = true
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false
