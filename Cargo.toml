@@ -1,146 +1,116 @@
 # Project:      dfe-archiver
 # File:         Cargo.toml
-# Purpose:      Package manifest for high-volume Kafka-to-storage archiver
+# Purpose:      Workspace root for high-volume Kafka-to-storage archiver
 # Language:     TOML
 #
 # License:      FSL-1.1-ALv2
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
-[package]
-name = "dfe-archiver"
-version = "1.2.5"
-edition = "2021"
-rust-version = "1.75"
-description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/io",
+    "crates/archiver",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-archiver"
 authors = ["HyperI Pty Ltd <engineering@hyperi.io>"]
-exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
-[lib]
-name = "dfe_archiver"
-path = "src/lib.rs"
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
-[[bin]]
-name = "dfe-archiver"
-path = "src/main.rs"
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 
-# =============================================================================
-# DEPENDENCIES
-# =============================================================================
+[workspace.dependencies]
+# Internal crates
+dfe-archiver-core = { path = "crates/core" }
+dfe-archiver-io = { path = "crates/io" }
 
-[dependencies]
-# HyperI shared library - config, logging, metrics, transport
-# Published to hyperi-cargo-virtual registry in JFrog Artifactory
-hyperi-rustlib = { version = ">=1.3", registry = "hyperi", features = [
-    "config", "logger", "metrics", "transport-kafka", "transport-zenoh", "http-server", "tiered-sink", "spool",
-] }
-
-# Kafka (SASL/SCRAM required for auth) - vendored build for cross-compilation
-rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
-
-# OpenSSL vendored - builds OpenSSL from source for aarch64 cross-compilation
-openssl = { version = ">=0.10", features = ["vendored"] }
+# HyperI shared library
+hyperi-rustlib = { version = ">=1.3", registry = "hyperi" }
 
 # Async runtime
-tokio = { version = ">=1.48", features = ["full", "parking_lot"] }
+tokio = { version = ">=1.50", features = ["full", "parking_lot"] }
 tokio-util = { version = ">=0.7", features = ["time"] }
 
 # Serialization
-serde = { version = ">=1.0", features = ["derive"] }
-serde_json = ">=1.0"
-sonic-rs = ">=0.5"                    # SIMD JSON parsing
+serde = { version = ">=1.0.228", features = ["derive"] }
+serde_json = ">=1.0.149"
+sonic-rs = ">=0.5.6"
 
 # Error handling
-thiserror = ">=1.0"
-anyhow = ">=1.0"
+thiserror = ">=2.0"
+anyhow = ">=1.0.100"
 
-# Compression - multiple codec support
+# Compression
 zstd = ">=0.13"
 lz4_flex = ">=0.11"
 snap = ">=1.1"
-flate2 = ">=1.0"                      # gzip
+flate2 = ">=1.1"
 
 # Cloud storage backends
-object_store = { version = ">=0.11", features = ["aws", "gcp", "azure"] }
-aws-config = ">=1.5"
-aws-sdk-s3 = ">=1.65"
+object_store = { version = ">=0.13", features = ["aws", "gcp", "azure"] }
+aws-config = ">=1.8"
+aws-sdk-s3 = ">=1.124"
+
+# Kafka
+rdkafka = { version = ">=0.39", features = ["cmake-build", "ssl", "sasl"] }
+openssl = { version = ">=0.10", features = ["vendored"] }
 
 # Utilities
-bytes = ">=1.0"
-chrono = { version = ">=0.4", features = ["serde"] }
-uuid = { version = ">=1.0", features = ["v4", "serde"] }
+bytes = ">=1.11"
+chrono = { version = ">=0.4.43", features = ["serde"] }
+uuid = { version = ">=1.18", features = ["v4", "serde"] }
 parking_lot = ">=0.12"
-dashmap = ">=6.0"
+dashmap = ">=6.1"
 compact_str = ">=0.8"
-rustc-hash = ">=2.0"
-smallvec = { version = ">=1.13", features = ["union", "serde"] }
-fs2 = ">=0.4"                            # Disk space checking
-metrics = ">=0.24"                       # Prometheus metrics facade (used with hyperi-rustlib)
+rustc-hash = ">=2.1"
+smallvec = { version = ">=1.15", features = ["union", "serde"] }
+fs2 = ">=0.4"
+metrics = ">=0.24"
 
 # CLI
-clap = { version = ">=4.5", features = ["derive", "env"] }
+clap = { version = ">=4.5.60", features = ["derive", "env"] }
 
-# Tracing (re-export from hyperi-rustlib, but also direct for macros)
-tracing = ">=0.1"
-tracing-subscriber = { version = ">=0.3", features = ["env-filter"] }
+# Tracing
+tracing = ">=0.1.44"
+tracing-subscriber = { version = ">=0.3.20", features = ["env-filter"] }
 
 # Async utilities
-async-trait = ">=0.1"
-futures = ">=0.3"
+async-trait = ">=0.1.89"
+futures = ">=0.3.31"
 
-# .env file loading
+# Config
 dotenvy = ">=0.15"
+serde_yaml_ng = ">=0.9"
 
-# YAML config parsing
-serde_yaml = ">=0.9"
+# Allocators
+tikv-jemallocator = ">=0.6"
+mimalloc = ">=0.1"
 
-[dev-dependencies]
-tempfile = ">=3.0"
-criterion = { version = ">=0.5", features = ["html_reports", "async_tokio"] }
-proptest = ">=1.0"
+# Dev dependencies
+tempfile = ">=3.20"
+criterion = { version = ">=0.8", features = ["html_reports", "async_tokio"] }
+proptest = ">=1.10"
 tokio-test = ">=0.4"
 test-log = { version = ">=0.2", features = ["trace"] }
-tracing-subscriber = { version = ">=0.3", features = ["env-filter"] }
-walkdir = ">=2.0"
-reqwest = ">=0.12"
-
-# Testcontainers for Docker-based integration tests (gated by feature)
-testcontainers = ">=0.23"
-testcontainers-modules = { version = ">=0.11", features = ["kafka"] }
-
-# =============================================================================
-# FEATURES
-# =============================================================================
-
-[features]
-default = ["jemalloc"]
-
-
-# Allocator selection
-jemalloc = ["tikv-jemallocator"]
-mimalloc = ["dep:mimalloc"]
-
-# Integration tests with Docker containers (placeholder, containers always available in dev)
-testcontainers = []
-
-# Memory transport for unit tests (no external services)
-transport-memory = ["hyperi-rustlib/transport-memory"]
-
-# Full feature set
-full = ["jemalloc", "testcontainers"]
-
-[dependencies.tikv-jemallocator]
-version = ">=0.6"
-optional = true
-
-[dependencies.mimalloc]
-version = ">=0.1"
-optional = true
-
-# =============================================================================
-# PROFILES
-# =============================================================================
+walkdir = ">=2.5"
+reqwest = ">=0.13"
+testcontainers = ">=0.26"
+testcontainers-modules = { version = ">=0.14", features = ["kafka"] }
 
 [profile.release]
 lto = "thin"
@@ -158,32 +128,3 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
-
-# =============================================================================
-# LINTS
-# =============================================================================
-
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "warn"
-panic = "warn"
-module_name_repetitions = "allow"
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-
-# =============================================================================
-# BENCHMARKS
-# =============================================================================
-
-[[bench]]
-name = "throughput"
-harness = false
-
-[[bench]]
-name = "compression"
-harness = false

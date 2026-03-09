@@ -1,0 +1,61 @@
+# Project:      dfe-archiver
+# File:         crates/core/Cargo.toml
+# Purpose:      Core library - types, compression, buffering, routing, archive logic
+# Language:     TOML
+#
+# License:      FSL-1.1-ALv2
+# Copyright:    (c) 2026 HyperI Pty Ltd
+
+[package]
+name = "dfe-archiver-core"
+version = "1.2.5"
+description = "Core library for dfe-archiver: types, compression, buffering, routing"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hyperi-rustlib = { workspace = true, features = ["transport-kafka"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Compression
+zstd = { workspace = true }
+lz4_flex = { workspace = true }
+snap = { workspace = true }
+flate2 = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+chrono = { workspace = true }
+compact_str = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+smallvec = { workspace = true }
+fs2 = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+
+[features]
+default = []
+transport-memory = ["hyperi-rustlib/transport-memory"]

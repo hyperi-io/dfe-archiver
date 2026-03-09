@@ -18,10 +18,6 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-- [ ] Finalise hyperi-rustlib migration (kafka/, config/, metrics/ modules) `[PENDING]`
-  - kafka/, config/, metrics/ contain meaningful archiver-specific logic (NOT legacy stubs)
-  - Assess what (if anything) should migrate to hyperi-rustlib direct usage
-  - DO NOT push until this is resolved
 - [ ] Verify local release build passes `[PENDING]`
   - Needs libsasl2-dev installed for sasl2-sys
   - Cross-compilation deps provided by CI sysroot, not vendored locally
@@ -118,6 +114,11 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Added Building & Artifacts documentation to DESIGN.md
 - [x] CI submodule updated to v1.58.18 (mac-friendly changes verified compatible)
 - [x] AI submodule updated
+- [x] Migrated to 3-crate Cargo workspace (core, io, archiver)
+- [x] Audited and updated all dependencies to latest versions
+- [x] Replaced deprecated serde_yaml with serde_yaml_ng
+- [x] Upgraded thiserror 1.x → 2.x
+- [x] Edition 2024, MSRV 1.94 (no pin until OSS)
 
 ---
 
@@ -145,8 +146,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 ## Blocked
 
-- All changes uncommitted — DO NOT push until hyperi-rustlib migration is finalised
-- 16 files changed (+692/-233 lines) spanning Phase 2 cloud storage + binary build CI
+- Changes staged, awaiting commit — verify local release build before pushing
 
 ---
 

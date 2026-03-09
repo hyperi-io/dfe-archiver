@@ -1,0 +1,518 @@
+// Project:   dfe-archiver
+// File:      crates/core/src/buffer/tiered.rs
+// Purpose:   Tiered buffer manager for high destination cardinality
+// Language:  Rust
+//
+// License:      FSL-1.1-ALv2
+// Copyright:    (c) 2026 HyperI Pty Ltd
+
+use crate::types::{KafkaMessage, KafkaOffset};
+use crate::{Error, Result};
+use compact_str::CompactString;
+use dashmap::DashMap;
+use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Semaphore;
+use tracing::{info, warn};
+
+/// Configuration for tiered buffer manager
+#[derive(Debug, Clone)]
+pub struct TieredBufferConfig {
+    /// Maximum hot buffers in Tier 1 (default: 64)
+    pub max_hot_buffers: usize,
+
+    /// Per-buffer size limit in Tier 1 (default: 1MB)
+    pub hot_buffer_size: usize,
+
+    /// Flush age for hot buffers (seconds)
+    pub hot_buffer_age_secs: u64,
+
+    /// Staging spool directory
+    pub spool_dir: PathBuf,
+
+    /// Maximum concurrent archive writers (default: 8)
+    pub max_writers: usize,
+
+    /// Staging batch size before archive write (bytes)
+    pub staging_batch_size: usize,
+
+    /// Maximum spool size in bytes (disk protection)
+    pub max_spool_bytes: u64,
+
+    /// Minimum free disk space to maintain (bytes)
+    pub min_free_disk_bytes: u64,
+
+    /// Enable compression for spooled data
+    pub spool_compression: bool,
+}
+
+impl Default for TieredBufferConfig {
+    fn default() -> Self {
+        Self {
+            max_hot_buffers: 64,
+            hot_buffer_size: 1024 * 1024,
+            hot_buffer_age_secs: 30,
+            spool_dir: PathBuf::from(".tmp/archiver-spool"),
+            max_writers: 8,
+            staging_batch_size: 64 * 1024 * 1024,
+            max_spool_bytes: 10 * 1024 * 1024 * 1024,
+            min_free_disk_bytes: 1024 * 1024 * 1024,
+            spool_compression: true,
+        }
+    }
+}
+
+/// Hot buffer for a single destination (Tier 1)
+struct HotBuffer {
+    messages: Vec<Vec<u8>>,
+    offsets: Vec<KafkaOffset>,
+    size: usize,
+    last_access: Instant,
+    created_at: Instant,
+}
+
+impl HotBuffer {
+    fn new(_key: CompactString) -> Self {
+        Self {
+            messages: Vec::with_capacity(1024),
+            offsets: Vec::with_capacity(1024),
+            size: 0,
+            last_access: Instant::now(),
+            created_at: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, payload: Vec<u8>, offset: KafkaOffset) {
+        self.size += payload.len();
+        self.messages.push(payload);
+        self.offsets.push(offset);
+        self.last_access = Instant::now();
+    }
+
+    fn drain(&mut self) -> (Vec<Vec<u8>>, Vec<KafkaOffset>) {
+        self.size = 0;
+        self.created_at = Instant::now();
+        (
+            std::mem::take(&mut self.messages),
+            std::mem::take(&mut self.offsets),
+        )
+    }
+
+    fn age_secs(&self) -> u64 {
+        self.created_at.elapsed().as_secs()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+/// LRU tracking for hot buffers
+struct LruTracker {
+    order: VecDeque<CompactString>,
+    capacity: usize,
+}
+
+impl LruTracker {
+    fn new(capacity: usize) -> Self {
+        Self {
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn access(&mut self, key: &CompactString) -> Option<CompactString> {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.clone());
+        if self.order.len() > self.capacity {
+            self.order.pop_front()
+        } else {
+            None
+        }
+    }
+
+    fn _remove(&mut self, key: &CompactString) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+    }
+}
+
+/// Staged batch ready for archive writing
+#[derive(Debug)]
+pub struct StagedBatch {
+    /// Destination key
+    pub destination: CompactString,
+
+    /// Serialized records (newline-delimited)
+    pub data: Vec<u8>,
+
+    /// Kafka offsets to commit after successful write
+    pub offsets: Vec<KafkaOffset>,
+
+    /// Record count
+    pub record_count: usize,
+}
+
+/// Tiered buffer manager
+pub struct TieredBufferManager {
+    config: TieredBufferConfig,
+    hot_buffers: DashMap<CompactString, HotBuffer>,
+    lru: Mutex<LruTracker>,
+    writer_semaphore: Arc<Semaphore>,
+    stats: BufferStats,
+}
+
+/// Buffer statistics
+#[derive(Default)]
+pub struct BufferStats {
+    pub messages_buffered: AtomicU64,
+    pub hot_buffer_hits: AtomicU64,
+    pub hot_buffer_evictions: AtomicU64,
+    pub staging_writes: AtomicU64,
+    pub archive_writes: AtomicU64,
+    pub current_hot_buffers: AtomicUsize,
+    pub current_hot_bytes: AtomicUsize,
+    pub current_spool_bytes: AtomicU64,
+    pub disk_pressure_events: AtomicU64,
+}
+
+/// Check available disk space on the volume containing the given path
+fn get_available_disk_space(path: &Path) -> std::io::Result<u64> {
+    use fs2::available_space;
+    available_space(path)
+}
+
+impl TieredBufferManager {
+    /// Create new tiered buffer manager
+    pub fn new(config: TieredBufferConfig) -> Result<Self> {
+        std::fs::create_dir_all(&config.spool_dir)?;
+
+        let available = get_available_disk_space(&config.spool_dir).unwrap_or(0);
+        if available < config.min_free_disk_bytes {
+            return Err(Error::Storage(format!(
+                "insufficient disk space: {} bytes available, {} required",
+                available, config.min_free_disk_bytes
+            )));
+        }
+
+        info!(
+            spool_dir = %config.spool_dir.display(),
+            max_spool_bytes = config.max_spool_bytes,
+            min_free_disk = config.min_free_disk_bytes,
+            available_disk = available,
+            "Tiered buffer manager initialized"
+        );
+
+        let writer_semaphore = Arc::new(Semaphore::new(config.max_writers));
+
+        Ok(Self {
+            lru: Mutex::new(LruTracker::new(config.max_hot_buffers)),
+            hot_buffers: DashMap::with_capacity(config.max_hot_buffers),
+            writer_semaphore,
+            config,
+            stats: BufferStats::default(),
+        })
+    }
+
+    /// Check if we have enough disk space for a spool write
+    pub fn check_disk_space(&self, write_size: u64) -> Result<()> {
+        let current_spool = self.stats.current_spool_bytes.load(Ordering::Relaxed);
+        if current_spool + write_size > self.config.max_spool_bytes {
+            self.stats
+                .disk_pressure_events
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                current_spool,
+                write_size,
+                max = self.config.max_spool_bytes,
+                "Spool size limit reached - backpressure"
+            );
+            return Err(Error::Storage(format!(
+                "spool full: {} + {} > {} bytes",
+                current_spool, write_size, self.config.max_spool_bytes
+            )));
+        }
+
+        let available = get_available_disk_space(&self.config.spool_dir).unwrap_or(0);
+        if available < self.config.min_free_disk_bytes + write_size {
+            self.stats
+                .disk_pressure_events
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                available,
+                write_size,
+                min_free = self.config.min_free_disk_bytes,
+                "Disk space low - backpressure"
+            );
+            return Err(Error::Storage(format!(
+                "disk full: {} available, need {} + {} reserved",
+                available, write_size, self.config.min_free_disk_bytes
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Record bytes written to spool (for tracking)
+    pub fn record_spool_write(&self, bytes: u64) {
+        self.stats
+            .current_spool_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record bytes consumed from spool (for tracking)
+    pub fn record_spool_drain(&self, bytes: u64) {
+        self.stats
+            .current_spool_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    /// Buffer a message for a destination
+    pub fn push(&self, destination: &str, message: KafkaMessage) -> Result<Vec<StagedBatch>> {
+        let key = CompactString::from(destination);
+        let offset = KafkaOffset::from(&message);
+        let payload = message.payload;
+
+        self.stats.messages_buffered.fetch_add(1, Ordering::Relaxed);
+
+        let mut batches_to_write = Vec::new();
+
+        let evict_key = {
+            let mut lru = self.lru.lock();
+            lru.access(&key)
+        };
+
+        if let Some(evict_key) = evict_key {
+            if let Some((_, mut buffer)) = self.hot_buffers.remove(&evict_key) {
+                if !buffer.is_empty() {
+                    let (messages, offsets) = buffer.drain();
+                    batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
+                    self.stats
+                        .hot_buffer_evictions
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let mut entry = self.hot_buffers.entry(key.clone()).or_insert_with(|| {
+            self.stats
+                .current_hot_buffers
+                .fetch_add(1, Ordering::Relaxed);
+            HotBuffer::new(key.clone())
+        });
+
+        let payload_size = payload.len();
+        entry.push(payload, offset);
+        self.stats
+            .current_hot_bytes
+            .fetch_add(payload_size, Ordering::Relaxed);
+        self.stats.hot_buffer_hits.fetch_add(1, Ordering::Relaxed);
+
+        if entry.size >= self.config.hot_buffer_size
+            || entry.age_secs() >= self.config.hot_buffer_age_secs
+        {
+            let (messages, offsets) = entry.drain();
+            self.stats.current_hot_bytes.fetch_sub(
+                messages.iter().map(|m| m.len()).sum::<usize>(),
+                Ordering::Relaxed,
+            );
+            batches_to_write.push(self.create_staged_batch(key, messages, offsets));
+        }
+
+        Ok(batches_to_write)
+    }
+
+    /// Flush all hot buffers (for shutdown or time-based flush)
+    pub fn flush_all(&self) -> Vec<StagedBatch> {
+        let mut batches = Vec::new();
+        let keys: Vec<_> = self.hot_buffers.iter().map(|e| e.key().clone()).collect();
+
+        for key in keys {
+            if let Some(mut entry) = self.hot_buffers.get_mut(&key) {
+                if !entry.is_empty() {
+                    let (messages, offsets) = entry.drain();
+                    batches.push(self.create_staged_batch(key.clone(), messages, offsets));
+                }
+            }
+        }
+
+        batches
+    }
+
+    /// Flush buffers older than max age
+    pub fn flush_aged(&self) -> Vec<StagedBatch> {
+        let mut batches = Vec::new();
+        let max_age = self.config.hot_buffer_age_secs;
+
+        for mut entry in self.hot_buffers.iter_mut() {
+            if entry.age_secs() >= max_age && !entry.is_empty() {
+                let key = entry.key().clone();
+                let (messages, offsets) = entry.drain();
+                batches.push(self.create_staged_batch(key, messages, offsets));
+            }
+        }
+
+        batches
+    }
+
+    /// Get writer permit (blocks if max concurrent writers reached)
+    pub async fn acquire_writer_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.writer_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed")
+    }
+
+    /// Create staged batch from buffered messages
+    fn create_staged_batch(
+        &self,
+        destination: CompactString,
+        messages: Vec<Vec<u8>>,
+        offsets: Vec<KafkaOffset>,
+    ) -> StagedBatch {
+        let record_count = messages.len();
+
+        let total_size: usize = messages.iter().map(|m| m.len() + 1).sum();
+        let mut data = Vec::with_capacity(total_size);
+
+        for msg in messages {
+            data.extend_from_slice(&msg);
+            data.push(b'\n');
+        }
+
+        self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+
+        StagedBatch {
+            destination,
+            data,
+            offsets,
+            record_count,
+        }
+    }
+
+    /// Get current stats snapshot
+    pub fn stats(&self) -> BufferStatsSnapshot {
+        BufferStatsSnapshot {
+            messages_buffered: self.stats.messages_buffered.load(Ordering::Relaxed),
+            hot_buffer_hits: self.stats.hot_buffer_hits.load(Ordering::Relaxed),
+            hot_buffer_evictions: self.stats.hot_buffer_evictions.load(Ordering::Relaxed),
+            staging_writes: self.stats.staging_writes.load(Ordering::Relaxed),
+            archive_writes: self.stats.archive_writes.load(Ordering::Relaxed),
+            current_hot_buffers: self.stats.current_hot_buffers.load(Ordering::Relaxed),
+            current_hot_bytes: self.stats.current_hot_bytes.load(Ordering::Relaxed),
+            current_spool_bytes: self.stats.current_spool_bytes.load(Ordering::Relaxed),
+            disk_pressure_events: self.stats.disk_pressure_events.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Get disk protection config for visibility
+    pub fn disk_protection_config(&self) -> (u64, u64) {
+        (self.config.max_spool_bytes, self.config.min_free_disk_bytes)
+    }
+}
+
+/// Snapshot of buffer statistics
+#[derive(Debug, Clone)]
+pub struct BufferStatsSnapshot {
+    pub messages_buffered: u64,
+    pub hot_buffer_hits: u64,
+    pub hot_buffer_evictions: u64,
+    pub staging_writes: u64,
+    pub archive_writes: u64,
+    pub current_hot_buffers: usize,
+    pub current_hot_bytes: usize,
+    pub current_spool_bytes: u64,
+    pub disk_pressure_events: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_message(payload: &[u8], topic: &str, offset: i64) -> KafkaMessage {
+        KafkaMessage::for_test(payload.to_vec(), topic, 0, offset)
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 2,
+            hot_buffer_size: 10000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+
+        let manager = TieredBufferManager::new(config).expect("create manager");
+
+        let batches = manager
+            .push("dest1", make_message(b"msg1", "topic", 0))
+            .expect("push");
+        assert!(batches.is_empty(), "no eviction yet");
+
+        let batches = manager
+            .push("dest2", make_message(b"msg2", "topic", 1))
+            .expect("push");
+        assert!(batches.is_empty(), "no eviction yet");
+
+        let batches = manager
+            .push("dest3", make_message(b"msg3", "topic", 2))
+            .expect("push");
+        assert_eq!(batches.len(), 1, "should evict one");
+        assert_eq!(batches[0].destination.as_str(), "dest1");
+    }
+
+    #[test]
+    fn test_size_based_flush() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 10,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+
+        let manager = TieredBufferManager::new(config).expect("create manager");
+
+        let batches = manager
+            .push(
+                "dest1",
+                make_message(b"this is a longer message", "topic", 0),
+            )
+            .expect("push");
+
+        assert_eq!(batches.len(), 1, "should flush");
+        assert_eq!(batches[0].destination.as_str(), "dest1");
+    }
+
+    #[test]
+    fn test_flush_all() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 10000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+
+        let manager = TieredBufferManager::new(config).expect("create manager");
+
+        manager
+            .push("dest1", make_message(b"msg1", "topic", 0))
+            .expect("push");
+        manager
+            .push("dest2", make_message(b"msg2", "topic", 1))
+            .expect("push");
+        manager
+            .push("dest3", make_message(b"msg3", "topic", 2))
+            .expect("push");
+
+        let batches = manager.flush_all();
+        assert_eq!(batches.len(), 3, "should flush all");
+    }
+}

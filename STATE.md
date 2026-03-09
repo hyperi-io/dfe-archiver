@@ -74,7 +74,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ### Tech Stack
 
-- **Language:** Rust (2021 edition, MSRV 1.75)
+- **Language:** Rust (2021 edition, MSRV 1.94)
 - **Async Runtime:** Tokio
 - **Shared Library:** hyperi-rustlib (config, logging, metrics, transport)
 - **JSON Parsing:** sonic-rs (SIMD-accelerated)
@@ -175,6 +175,10 @@ Priority (highest to lowest):
 ## Notes for AI Assistants
 
 This file contains **static project context only**.
+
+**Build host rules:**
+
+- **NEVER kill cargo processes** to free the build directory lock. Multiple projects share this host and run cargo concurrently. Wait for the lock to clear.
 
 **DO NOT add:**
 
