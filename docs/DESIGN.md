@@ -136,7 +136,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 
 | Component | Technology |
 |-----------|------------|
-| Language | Rust 2021 (MSRV 1.75) |
+| Language | Rust 2024 (MSRV 1.94) |
 | Async Runtime | Tokio |
 | Shared Library | hyperi-rustlib (config, logging, metrics, transport) |
 | JSON Parsing | sonic-rs (SIMD-accelerated) |
