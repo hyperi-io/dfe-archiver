@@ -1,6 +1,10 @@
 {
   "branches": [
-    "main"
+    {
+      "name": "main",
+      "prerelease": "dev"
+    },
+    "release"
   ],
   "tagFormat": "v${version}",
   "plugins": [
@@ -86,7 +90,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "./ci/scripts/core/update-version.sh ${nextRelease.version}"
+        "prepareCmd": "echo ${nextRelease.version} > VERSION && sed -i 's/^version = \"[^\"]*\"/version = \"${nextRelease.version}\"/' crates/core/Cargo.toml crates/io/Cargo.toml crates/archiver/Cargo.toml"
       }
     ],
     [
@@ -95,9 +99,7 @@
         "assets": [
           "CHANGELOG.md",
           "VERSION",
-          "pyproject.toml",
-          "package.json",
-          "Cargo.toml"
+          "crates/*/Cargo.toml"
         ],
         "message": "chore: version ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
