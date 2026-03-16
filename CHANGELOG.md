@@ -1,3 +1,13 @@
+## [1.2.6-dev.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.5...v1.2.6-dev.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* migrate to 3-crate workspace (core, io, archiver) [skip ci] ([6079398](https://github.com/hyperi-io/dfe-archiver/commit/6079398e38f09d8caabdf94c18e78108db37b37a))
+* migrate to hyperi-ci and fix clippy quality debt ([0aba816](https://github.com/hyperi-io/dfe-archiver/commit/0aba816f55db53afb625f9a128eae3175d5349cc))
+* migrate to hyperi-ci from legacy ci submodule ([a6b16c3](https://github.com/hyperi-io/dfe-archiver/commit/a6b16c310ec627e460f7fd3d818d8fc85161cf2a))
+* update bytes 1.11.1 (RUSTSEC-2026-0007), time 0.3.47 (RUSTSEC-2026-0009) [skip ci] ([fea31cb](https://github.com/hyperi-io/dfe-archiver/commit/fea31cb44bda84421368a213eda0ef7150a250d2))
+
 ## [1.2.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.4...v1.2.5) (2026-03-06)
 
 
