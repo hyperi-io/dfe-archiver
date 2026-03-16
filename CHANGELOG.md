@@ -1,3 +1,10 @@
+## [1.2.6-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6-dev.2...v1.2.6-dev.3) (2026-03-16)
+
+
+### Bug Fixes
+
+* remove cmake-build rdkafka, add tooling config, create Dockerfile ([3498dd3](https://github.com/hyperi-io/dfe-archiver/commit/3498dd33ff809b418ed831661b524424572b5b1b))
+
 ## [1.2.6-dev.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6-dev.1...v1.2.6-dev.2) (2026-03-16)
 
 
