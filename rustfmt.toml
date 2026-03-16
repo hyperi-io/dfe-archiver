@@ -1,0 +1,9 @@
+# Project:   dfe-archiver
+# File:      rustfmt.toml
+# Purpose:   Rust code formatting configuration
+#
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+
+edition = "2024"
+max_width = 100

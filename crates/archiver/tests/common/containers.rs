@@ -11,7 +11,7 @@
 //! Enable with `--features testcontainers`.
 //! These are used when external Kafka (from .env) is not available.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::expect_used, clippy::unused_async)]
 
 #[cfg(feature = "testcontainers")]
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};

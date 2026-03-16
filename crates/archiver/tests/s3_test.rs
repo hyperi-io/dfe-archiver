@@ -6,7 +6,7 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::manual_let_else)]
 
 //! Integration tests for AWS S3 storage backend.
 //!
