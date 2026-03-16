@@ -140,10 +140,11 @@ pub struct MemoryTransportAdapter {
 }
 
 #[cfg(any(test, feature = "transport-memory"))]
+#[allow(clippy::expect_used)]
 impl MemoryTransportAdapter {
     /// Create new memory transport
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             messages: std::sync::Mutex::new(Vec::new()),
             next_offset: std::sync::atomic::AtomicI64::new(0),
@@ -177,7 +178,7 @@ impl MemoryTransportAdapter {
     }
 
     /// Commit is a no-op for memory transport
-    pub fn commit(&self, _offsets: &[KafkaOffset]) {
+    pub const fn commit(&self, _offsets: &[KafkaOffset]) {
         // No-op
     }
 }

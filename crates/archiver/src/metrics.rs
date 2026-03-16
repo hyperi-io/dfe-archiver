@@ -6,8 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use dfe_archiver_core::config::MetricsConfig;
 use dfe_archiver_core::Result;
+use dfe_archiver_core::config::MetricsConfig;
 use hyperi_rustlib::metrics::MetricsManager;
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use tracing::info;
 /// Archiver metrics using hyperi-rustlib's Prometheus exporter
 ///
 /// This struct holds the metrics manager and provides methods for recording metrics.
-/// The actual MetricsManager should be started separately via `start_metrics_server`.
+/// The actual `MetricsManager` should be started separately via `start_metrics_server`.
 pub struct ArchiverMetrics {
     _namespace: &'static str,
 }
@@ -180,7 +180,7 @@ impl MetricsSnapshot {
 
 /// Start metrics HTTP server using hyperi-rustlib
 ///
-/// This creates a new MetricsManager and starts the server.
+/// This creates a new `MetricsManager` and starts the server.
 /// The server provides /metrics, /healthz, /readyz endpoints.
 ///
 /// # Errors

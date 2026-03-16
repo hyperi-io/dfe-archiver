@@ -8,27 +8,27 @@
 
 //! Integration tests for MinIO/S3 storage backend.
 //!
-//! These tests require a running MinIO instance. Start with:
+//! These tests require a running `MinIO` instance. Start with:
 //! ```bash
 //! docker compose -f docker-compose.dev.yaml up -d minio
 //! ```
 //!
 //! Default configuration:
-//! - Endpoint: http://localhost:9000
+//! - Endpoint: <http://localhost:9000>
 //! - Access Key: minioadmin
 //! - Secret Key: minioadmin
 //! - Bucket: archive-test
 //!
-//! Run with: cargo test --test minio_test -- --ignored
+//! Run with: cargo test --test `minio_test` -- --ignored
 
 mod common;
 
 use dfe_archiver::config::{ArchiveConfig, MinioConfig};
-use dfe_archiver::io::{create_backend, ObjectStoreBackend};
+use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Check if MinIO is available (async version)
+/// Check if `MinIO` is available (async version)
 async fn minio_available() -> bool {
     let endpoint =
         env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
@@ -39,7 +39,7 @@ async fn minio_available() -> bool {
         .ok();
 
     if let Some(client) = client {
-        let health_url = format!("{}/minio/health/live", endpoint);
+        let health_url = format!("{endpoint}/minio/health/live");
         if let Ok(resp) = client.get(&health_url).send().await {
             return resp.status().is_success();
         }
@@ -48,7 +48,7 @@ async fn minio_available() -> bool {
     false
 }
 
-/// Get MinIO configuration from environment or defaults
+/// Get `MinIO` configuration from environment or defaults
 fn get_minio_config() -> MinioConfig {
     MinioConfig {
         endpoint: env::var("MINIO_ENDPOINT")
@@ -60,7 +60,7 @@ fn get_minio_config() -> MinioConfig {
     }
 }
 
-/// Test MinIO backend basic operations
+/// Test `MinIO` backend basic operations
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_basic_operations() {
@@ -96,7 +96,7 @@ async fn test_minio_basic_operations() {
     println!("MinIO basic operations test passed");
 }
 
-/// Test MinIO backend with archive writer
+/// Test `MinIO` backend with archive writer
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_archive_roundtrip() {
@@ -138,7 +138,7 @@ async fn test_minio_archive_roundtrip() {
     println!("MinIO archive roundtrip test passed");
 }
 
-/// Test MinIO backend large file (rolling test)
+/// Test `MinIO` backend large file (rolling test)
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_large_file_upload() {
@@ -160,7 +160,7 @@ async fn test_minio_large_file_upload() {
         backend
             .append(&test_path, &chunk)
             .await
-            .expect(&format!("append chunk {}", i));
+            .unwrap_or_else(|_| panic!("append chunk {i}"));
     }
 
     backend.close(&test_path).await.expect("close");
@@ -172,7 +172,7 @@ async fn test_minio_large_file_upload() {
     println!("MinIO large file test passed (5MB uploaded)");
 }
 
-/// Test MinIO rolling by size
+/// Test `MinIO` rolling by size
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_rolling_by_size() {
@@ -245,7 +245,7 @@ async fn test_minio_rolling_by_size() {
     }
 }
 
-/// Test create_backend with minio:// URL
+/// Test `create_backend` with minio:// URL
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_create_backend_minio_url() {

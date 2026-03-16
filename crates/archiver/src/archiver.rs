@@ -25,11 +25,11 @@ use dfe_archiver_core::compression::create_compressor;
 use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
-use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::TransportAdapter;
+use dfe_archiver_io::storage::create_backend;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -205,10 +205,7 @@ impl Archiver {
     }
 
     /// Write a staged batch to archive storage
-    async fn write_batch(
-        &self,
-        batch: &dfe_archiver_core::buffer::StagedBatch,
-    ) -> Result<()> {
+    async fn write_batch(&self, batch: &dfe_archiver_core::buffer::StagedBatch) -> Result<()> {
         let start = std::time::Instant::now();
 
         let mut writers = self.writers.lock().await;

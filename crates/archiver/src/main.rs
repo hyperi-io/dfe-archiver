@@ -6,9 +6,6 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![warn(clippy::all)]
-#![deny(clippy::unwrap_used)]
-
 // Allocator selection (compile-time feature)
 // jemalloc takes priority if both features are enabled (e.g., --all-features)
 #[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
@@ -24,7 +21,7 @@ static GLOBAL_JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemallo
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use dfe_archiver::{config::load_config, metrics::start_metrics_server, Archiver, Result};
+use dfe_archiver::{Archiver, Result, config::load_config, metrics::start_metrics_server};
 use std::sync::Arc;
 use tracing::info;
 

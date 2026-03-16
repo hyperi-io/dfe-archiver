@@ -51,7 +51,7 @@ async fn test_file_archive_roundtrip() {
     // Verify files were created
     let entries: Vec<_> = walkdir::WalkDir::new(temp_dir.path())
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .collect();
 
@@ -109,7 +109,7 @@ async fn test_rolling_by_size() {
     // Count files created
     let file_count = walkdir::WalkDir::new(temp_dir.path())
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .count();
 
@@ -169,7 +169,7 @@ async fn test_rolling_by_time() {
     // Count files
     let file_count = walkdir::WalkDir::new(temp_dir.path())
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .count();
 

@@ -14,7 +14,7 @@
 #![allow(dead_code)]
 
 #[cfg(feature = "testcontainers")]
-use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 
 #[cfg(feature = "testcontainers")]
 use testcontainers_modules::kafka::Kafka;

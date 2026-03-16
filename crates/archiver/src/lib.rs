@@ -6,19 +6,13 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![deny(clippy::unwrap_used)]
-#![warn(clippy::expect_used)]
-#![forbid(unsafe_code)]
-
 //! # DFE Archiver
 //!
 //! High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 //!
 //! ## Features
 //!
-//! - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
+//! - **Multiple destinations**: File, `MinIO`, S3, GCS, Azure Blob
 //! - **Compression**: Zstd, LZ4, Snappy, Gzip (configurable)
 //! - **Smart routing**: By topic or JSON field expressions
 //! - **Rolling archives**: By size or time interval

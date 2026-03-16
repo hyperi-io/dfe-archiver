@@ -6,14 +6,11 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
-#![allow(clippy::module_name_repetitions)]
-
 pub mod kafka;
 pub mod storage;
 
 pub use kafka::TransportAdapter;
-pub use storage::{create_backend, FileBackend, ObjectStoreBackend};
+pub use storage::{FileBackend, ObjectStoreBackend, create_backend};
 
 #[cfg(any(test, feature = "transport-memory"))]
 pub use kafka::MemoryTransportAdapter;

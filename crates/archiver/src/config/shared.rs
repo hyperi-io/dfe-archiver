@@ -8,8 +8,8 @@
 
 use dfe_archiver_core::config::Config;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 
 /// Thread-safe shared configuration with version tracking
@@ -89,6 +89,7 @@ impl std::fmt::Debug for SharedConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

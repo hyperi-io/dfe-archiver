@@ -109,18 +109,18 @@ fn apply_env_overrides(config: &mut Config) {
         debug!("Override: compression.codec from env");
     }
 
-    if let Ok(bytes) = std::env::var("ARCHIVER_FLUSH_BYTES") {
-        if let Ok(bytes) = bytes.parse() {
-            config.buffer.flush_bytes = bytes;
-            debug!("Override: buffer.flush_bytes from env");
-        }
+    if let Ok(bytes) = std::env::var("ARCHIVER_FLUSH_BYTES")
+        && let Ok(bytes) = bytes.parse()
+    {
+        config.buffer.flush_bytes = bytes;
+        debug!("Override: buffer.flush_bytes from env");
     }
 
-    if let Ok(secs) = std::env::var("ARCHIVER_FLUSH_INTERVAL_SECS") {
-        if let Ok(secs) = secs.parse() {
-            config.buffer.flush_age_secs = secs;
-            debug!("Override: buffer.flush_age_secs from env");
-        }
+    if let Ok(secs) = std::env::var("ARCHIVER_FLUSH_INTERVAL_SECS")
+        && let Ok(secs) = secs.parse()
+    {
+        config.buffer.flush_age_secs = secs;
+        debug!("Override: buffer.flush_age_secs from env");
     }
 
     if let Ok(addr) = std::env::var("METRICS_ADDRESS") {
@@ -128,18 +128,18 @@ fn apply_env_overrides(config: &mut Config) {
         debug!("Override: metrics.address from env");
     }
 
-    if let Ok(limit) = std::env::var("ARCHIVER_MEMORY_LIMIT_BYTES") {
-        if let Ok(limit) = limit.parse() {
-            config.memory.limit_bytes = limit;
-            debug!("Override: memory.limit_bytes from env");
-        }
+    if let Ok(limit) = std::env::var("ARCHIVER_MEMORY_LIMIT_BYTES")
+        && let Ok(limit) = limit.parse()
+    {
+        config.memory.limit_bytes = limit;
+        debug!("Override: memory.limit_bytes from env");
     }
 
-    if let Ok(size) = std::env::var("ARCHIVER_MULTIPART_CHUNK_SIZE") {
-        if let Ok(size) = size.parse() {
-            config.archive.multipart_chunk_size = size;
-            debug!("Override: archive.multipart_chunk_size from env");
-        }
+    if let Ok(size) = std::env::var("ARCHIVER_MULTIPART_CHUNK_SIZE")
+        && let Ok(size) = size.parse()
+    {
+        config.archive.multipart_chunk_size = size;
+        debug!("Override: archive.multipart_chunk_size from env");
     }
 
     if let Ok(bucket) = std::env::var("S3_BUCKET") {
@@ -226,6 +226,7 @@ fn validate_config(config: &Config) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

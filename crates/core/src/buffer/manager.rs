@@ -122,7 +122,7 @@ impl BufferManager {
     pub fn check_flush(&self) -> Vec<(CompactString, FlushReason)> {
         let mut to_flush = Vec::new();
 
-        for entry in self.buffers.iter() {
+        for entry in &self.buffers {
             let buffer = entry.value();
 
             if buffer.size() >= self.config.flush_bytes {
@@ -195,6 +195,7 @@ impl BufferManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::KafkaMessage;

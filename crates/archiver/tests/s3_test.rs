@@ -6,6 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used)]
+
 //! Integration tests for AWS S3 storage backend.
 //!
 //! These tests require AWS credentials (via SSO, env vars, or instance profile).
@@ -26,7 +28,7 @@
 mod common;
 
 use dfe_archiver::config::{ArchiveConfig, S3Config};
-use dfe_archiver::io::{create_backend, ObjectStoreBackend};
+use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
@@ -48,12 +50,11 @@ fn get_s3_config() -> Option<S3Config> {
 #[tokio::test]
 #[ignore = "requires AWS credentials - run with --ignored"]
 async fn test_s3_basic_operations() {
-    let config = match get_s3_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: S3_BUCKET not set");
-            return;
-        }
+    let config = if let Some(c) = get_s3_config() {
+        c
+    } else {
+        eprintln!("Skipping: S3_BUCKET not set");
+        return;
     };
 
     let backend = ObjectStoreBackend::new_s3(&config, "test-basic".to_string(), 8 * 1024 * 1024)
@@ -88,12 +89,11 @@ async fn test_s3_basic_operations() {
 #[tokio::test]
 #[ignore = "requires AWS credentials - run with --ignored"]
 async fn test_s3_multipart_large_file() {
-    let config = match get_s3_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: S3_BUCKET not set");
-            return;
-        }
+    let config = if let Some(c) = get_s3_config() {
+        c
+    } else {
+        eprintln!("Skipping: S3_BUCKET not set");
+        return;
     };
 
     // Use 5MB chunk size (S3 minimum) to force multiple parts
@@ -131,12 +131,11 @@ async fn test_s3_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let s3_config = match get_s3_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: S3_BUCKET not set");
-            return;
-        }
+    let s3_config = if let Some(c) = get_s3_config() {
+        c
+    } else {
+        eprintln!("Skipping: S3_BUCKET not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {
@@ -169,7 +168,7 @@ async fn test_s3_archive_roundtrip() {
     println!("S3 archive roundtrip test passed");
 }
 
-/// Test S3 rolling by size — verifies ArchiveWriter creates multiple objects
+/// Test S3 rolling by size — verifies `ArchiveWriter` creates multiple objects
 /// when the compressed file size exceeds the rolling threshold.
 #[tokio::test]
 #[ignore = "requires AWS credentials - run with --ignored"]
@@ -177,12 +176,11 @@ async fn test_s3_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let s3_config = match get_s3_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: S3_BUCKET not set");
-            return;
-        }
+    let s3_config = if let Some(c) = get_s3_config() {
+        c
+    } else {
+        eprintln!("Skipping: S3_BUCKET not set");
+        return;
     };
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
@@ -249,16 +247,15 @@ async fn test_s3_rolling_by_size() {
     }
 }
 
-/// Test create_backend with s3:// URL
+/// Test `create_backend` with s3:// URL
 #[tokio::test]
 #[ignore = "requires AWS credentials - run with --ignored"]
 async fn test_create_backend_s3_url() {
-    let s3_config = match get_s3_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: S3_BUCKET not set");
-            return;
-        }
+    let s3_config = if let Some(c) = get_s3_config() {
+        c
+    } else {
+        eprintln!("Skipping: S3_BUCKET not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {
