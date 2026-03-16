@@ -136,12 +136,6 @@ impl LruTracker {
             None
         }
     }
-
-    fn _remove(&mut self, key: &CompactString) {
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
-        }
-    }
 }
 
 /// Staged batch ready for archive writing

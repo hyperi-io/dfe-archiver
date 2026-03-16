@@ -6,7 +6,7 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::expect_used)]
 
 use std::env;
 use std::net::TcpStream;

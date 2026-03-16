@@ -62,3 +62,10 @@ publish:
   enabled: true
   target: both
   binaries: both
+  container:
+    enabled: true
+    registry: ghcr
+    dockerfile: Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64

@@ -16,3 +16,6 @@ build/
 out/
 test-results/
 coverage/
+.tmp/
+target/
+docs/superpowers/

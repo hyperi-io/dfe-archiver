@@ -6,6 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used, clippy::panic, clippy::unused_async)]
+
 //! Integration tests for MinIO/S3 storage backend.
 //!
 //! These tests require a running `MinIO` instance. Start with:

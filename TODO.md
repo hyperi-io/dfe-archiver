@@ -18,52 +18,8 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-### Consume hyperi-rustlib v1.14.0 (Dynamic Linking)
-
-rustlib v1.14.0 switches rdkafka to dynamic-linking against system librdkafka
-(was compiling C++ from source — 30min build eliminated). All C dependencies
-except aws-lc-sys now link against system libraries via pkg-config.
-
-**CI (.hyperi-ci.yaml):** No changes needed — hyperi-ci v1.1.4+ auto-detects
-`rdkafka-sys` in `Cargo.lock` and installs `librdkafka-dev` (>= 2.12.1) from
-the Confluent APT repo. It also installs `libzstd-dev`, `libssl-dev`, etc.
-
-**Cargo.toml:**
-- [ ] Bump hyperi-rustlib from `>=1.3` to `>=1.14.0`
-- [ ] Remove `transport-zenoh` feature (Zenoh removed in rustlib v1.8.0)
-- [ ] Remove any vendored/cmake rdkafka features
-- [ ] `cargo update` + full test suite
-
-**Dockerfile:**
-- [ ] Create Dockerfile (currently missing) with runtime packages:
-  ```dockerfile
-  RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg \
-      && curl -fsSL https://packages.confluent.io/clients/deb/archive.key \
-         | gpg --dearmor -o /usr/share/keyrings/confluent-clients.gpg \
-      && echo "deb [signed-by=/usr/share/keyrings/confluent-clients.gpg] \
-         https://packages.confluent.io/clients/deb noble main" \
-         > /etc/apt/sources.list.d/confluent-clients.list \
-      && apt-get update && apt-get install -y --no-install-recommends \
-         librdkafka1 libssl3 libzstd1 zlib1g \
-      && rm -rf /var/lib/apt/lists/*
-  ```
-
-**Runtime packages by feature:**
-
-| Feature used | Runtime package | Shared object |
-|---|---|---|
-| `transport-kafka` | `librdkafka1` (Confluent repo) | `librdkafka.so.1` |
-| `spool`, `tiered-sink` | `libzstd1` | `libzstd.so.1` |
-| (transitive) | `libssl3` | `libssl.so.3` |
-| (transitive) | `zlib1g` | `libz.so.1` |
-
----
-
-- [ ] Verify local release build passes `[PENDING]`
-  - Needs libsasl2-dev installed for sasl2-sys
-  - Cross-compilation deps provided by CI sysroot, not vendored locally
 - [ ] Add KEDA scaling metrics endpoint `[PENDING]`
+- [ ] Full `DeploymentContract` integration (emit-dockerfile, emit-helm CLI flags) `[PENDING]`
 
 ---
 
@@ -120,47 +76,16 @@ the Confluent APT repo. It also installs `libzstd-dev`, `libssl-dev`, etc.
 
 ---
 
-## Completed (This Session)
+## Completed
 
-- [x] Created project structure
-- [x] Set up Cargo.toml with hyperi-rustlib dependency
-- [x] Created .cargo/config.toml for Artifactory registry
-- [x] Implemented config module with cascade loading
-- [x] Implemented compression module (zstd, lz4, snappy, gzip)
-- [x] Implemented buffer manager
-- [x] Implemented routing module
-- [x] Implemented metrics module
-- [x] Implemented storage backend (file)
-- [x] Implemented archive writer with rolling
-- [x] Created integration test infrastructure
-- [x] Created benchmark scaffolding
-- [x] Completed KafkaTransport adapter (hyperi-rustlib integration)
-- [x] Completed main pipeline orchestrator (src/archiver.rs)
-- [x] Fixed at-least-once delivery (offsets committed only after successful archive write)
-- [x] Restructured integration tests (moved from tests/integration/ to tests/)
-- [x] Replaced S3Backend with ObjectStoreBackend (streaming multipart uploads, ~8MB/writer vs ~1GB)
-- [x] Added S3, MinIO, GCS, Azure factory constructors on ObjectStoreBackend
-- [x] Added multipart_chunk_size config, S3 env var overrides, chunk size validation
-- [x] Created S3 integration tests (tests/s3_test.rs)
-- [x] Updated MinIO integration tests for ObjectStoreBackend
-- [x] Created Azure integration tests (tests/azure_test.rs) — 5 tests including rolling
-- [x] Created GCS integration tests (tests/gcs_test.rs) — 5 tests including rolling
-- [x] Added rolling/rollover tests for all backends (file, S3, GCS, Azure, MinIO)
-- [x] Added file_seq counter to ArchiveWriter for unique file paths during rolling
-- [x] Added list_prefix() to StorageBackend trait (FileBackend + ObjectStoreBackend)
-- [x] Fixed test_rolling_by_size to properly trigger rolling (flush between batches)
-- [x] Added test_rolling_by_time (1-second threshold with sleep)
-- [x] Added binary app build CI config (.hyperi-ci.yaml, ci.yml, publish.yml)
-- [x] Replaced release.yml with publish.yml (matching dfe-loader CI pattern)
-- [x] Added rdkafka and openssl vendored deps to Cargo.toml
-- [x] Added Building & Artifacts documentation to DESIGN.md
-- [x] CI submodule updated to v1.58.18 (mac-friendly changes verified compatible)
-- [x] AI submodule updated
-- [x] Migrated to 3-crate Cargo workspace (core, io, archiver)
-- [x] Audited and updated all dependencies to latest versions
-- [x] Replaced deprecated serde_yaml with serde_yaml_ng
-- [x] Upgraded thiserror 1.x → 2.x
-- [x] Edition 2024, MSRV 1.94 (no pin until OSS)
+- [x] Phase 1 complete: core infrastructure (config, compression, buffer, routing, storage, writer, pipeline)
+- [x] Phase 2 complete: cloud storage (S3, MinIO, GCS, Azure with multipart uploads)
+- [x] Migrated to 3-crate workspace (core, io, archiver)
+- [x] Migrated to hyperi-ci from legacy ci submodule
+- [x] Switched rdkafka to dynamic linking via hyperi-rustlib >=1.14
+- [x] Created Dockerfile following rustlib container contract
+- [x] Added Rust tooling config (rustfmt.toml, clippy.toml, deny.toml, rust-toolchain.toml)
+- [x] Edition 2024, MSRV 1.94
 
 ---
 
@@ -185,10 +110,6 @@ the Confluent APT repo. It also installs `libzstd-dev`, `libssl-dev`, etc.
 - [ ] Schema registry integration
 
 ---
-
-## Blocked
-
-- Changes staged, awaiting commit — verify local release build before pushing
 
 ---
 

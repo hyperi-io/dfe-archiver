@@ -1,0 +1,9 @@
+# Project:   dfe-archiver
+# File:      clippy.toml
+# Purpose:   Clippy linter configuration
+#
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+
+too-many-arguments-threshold = 7
+cognitive-complexity-threshold = 25
