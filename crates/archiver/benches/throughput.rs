@@ -6,7 +6,7 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::RoutingConfig;
 use dfe_archiver::routing::Router;
@@ -46,7 +46,7 @@ fn bench_compression(c: &mut Criterion) {
     // Zstd compression
     let zstd = create_compressor("zstd", 3).expect("zstd");
     group.bench_function("zstd_level3", |b| {
-        b.iter(|| zstd.compress(black_box(&combined)))
+        b.iter(|| zstd.compress(black_box(&combined)));
     });
 
     // LZ4 compression
@@ -56,13 +56,13 @@ fn bench_compression(c: &mut Criterion) {
     // Snappy compression
     let snappy = create_compressor("snappy", 0).expect("snappy");
     group.bench_function("snappy", |b| {
-        b.iter(|| snappy.compress(black_box(&combined)))
+        b.iter(|| snappy.compress(black_box(&combined)));
     });
 
     // Gzip compression
     let gzip = create_compressor("gzip", 6).expect("gzip");
     group.bench_function("gzip_level6", |b| {
-        b.iter(|| gzip.compress(black_box(&combined)))
+        b.iter(|| gzip.compress(black_box(&combined)));
     });
 
     group.finish();
@@ -90,7 +90,7 @@ fn bench_routing(c: &mut Criterion) {
             for msg in &messages {
                 black_box(topic_router.route(msg).expect("route"));
             }
-        })
+        });
     });
 
     // Expression-based routing
@@ -105,7 +105,7 @@ fn bench_routing(c: &mut Criterion) {
             for msg in &messages {
                 black_box(expr_router.route(msg).expect("route"));
             }
-        })
+        });
     });
 
     group.finish();

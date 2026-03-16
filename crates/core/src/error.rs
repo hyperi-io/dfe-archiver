@@ -72,10 +72,12 @@ impl Error {
     pub fn category(&self) -> ErrorCategory {
         match self {
             // Transient - retry
-            Self::Kafka(_) | Self::Storage(_) | Self::Runtime(_) => ErrorCategory::Transient,
+            Self::Kafka(_) | Self::Storage(_) | Self::Runtime(_) | Self::BufferOverflow { .. } => {
+                ErrorCategory::Transient
+            }
 
             // Data - DLQ
-            Self::Serialization(_) | Self::Routing(_) => ErrorCategory::Data,
+            Self::Serialization(_) | Self::Routing(_) | Self::Compression(_) => ErrorCategory::Data,
 
             // Fatal - fail
             Self::Config(_) | Self::Shutdown => ErrorCategory::Fatal,
@@ -90,8 +92,6 @@ impl Error {
                     ErrorCategory::Transient
                 }
             }
-            Self::Compression(_) => ErrorCategory::Data,
-            Self::BufferOverflow { .. } => ErrorCategory::Transient,
         }
     }
 

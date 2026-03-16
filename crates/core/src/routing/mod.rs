@@ -27,14 +27,13 @@ impl Router {
     /// Route message to destination path
     pub fn route(&self, message: &KafkaMessage) -> Result<CompactString> {
         match self.config.mode.as_str() {
-            "topic" => Ok(self.route_by_topic(message)),
             "expression" => self.route_by_expression(message),
-            _ => Ok(self.route_by_topic(message)),
+            _ => Ok(Self::route_by_topic(message)),
         }
     }
 
     /// Route by Kafka topic name
-    fn route_by_topic(&self, message: &KafkaMessage) -> CompactString {
+    fn route_by_topic(message: &KafkaMessage) -> CompactString {
         message.topic.clone()
     }
 
@@ -71,19 +70,16 @@ fn extract_field(json: &sonic_rs::Value, path: &str) -> Option<String> {
             Some(n.to_string())
         } else if let Some(n) = current.as_u64() {
             Some(n.to_string())
-        } else if let Some(n) = current.as_f64() {
-            Some(n.to_string())
         } else {
-            None
+            current.as_f64().map(|n| n.to_string())
         }
-    } else if let Some(b) = current.as_bool() {
-        Some(b.to_string())
     } else {
-        None
+        current.as_bool().map(|b| b.to_string())
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

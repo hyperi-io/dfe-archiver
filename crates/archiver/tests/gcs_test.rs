@@ -25,12 +25,12 @@
 mod common;
 
 use dfe_archiver::config::{ArchiveConfig, GcsConfig};
-use dfe_archiver::io::{create_backend, ObjectStoreBackend};
+use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
 /// Get GCS configuration from environment.
-/// Prefers GCS_SERVICE_ACCOUNT_KEY (inline JSON) over GOOGLE_APPLICATION_CREDENTIALS (file path).
+/// Prefers `GCS_SERVICE_ACCOUNT_KEY` (inline JSON) over `GOOGLE_APPLICATION_CREDENTIALS` (file path).
 fn get_gcs_config() -> Option<GcsConfig> {
     let bucket = env::var("GCS_BUCKET").ok()?;
     Some(GcsConfig {
@@ -45,12 +45,11 @@ fn get_gcs_config() -> Option<GcsConfig> {
 #[tokio::test]
 #[ignore = "requires GCS credentials - run with --ignored"]
 async fn test_gcs_basic_operations() {
-    let config = match get_gcs_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: GCS_BUCKET not set");
-            return;
-        }
+    let config = if let Some(c) = get_gcs_config() {
+        c
+    } else {
+        eprintln!("Skipping: GCS_BUCKET not set");
+        return;
     };
 
     let backend = ObjectStoreBackend::new_gcs(&config, "test-basic".to_string(), 8 * 1024 * 1024)
@@ -78,12 +77,11 @@ async fn test_gcs_basic_operations() {
 #[tokio::test]
 #[ignore = "requires GCS credentials - run with --ignored"]
 async fn test_gcs_multipart_large_file() {
-    let config = match get_gcs_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: GCS_BUCKET not set");
-            return;
-        }
+    let config = if let Some(c) = get_gcs_config() {
+        c
+    } else {
+        eprintln!("Skipping: GCS_BUCKET not set");
+        return;
     };
 
     let backend =
@@ -115,12 +113,11 @@ async fn test_gcs_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let gcs_config = match get_gcs_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: GCS_BUCKET not set");
-            return;
-        }
+    let gcs_config = if let Some(c) = get_gcs_config() {
+        c
+    } else {
+        eprintln!("Skipping: GCS_BUCKET not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {
@@ -158,12 +155,11 @@ async fn test_gcs_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let gcs_config = match get_gcs_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: GCS_BUCKET not set");
-            return;
-        }
+    let gcs_config = if let Some(c) = get_gcs_config() {
+        c
+    } else {
+        eprintln!("Skipping: GCS_BUCKET not set");
+        return;
     };
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
@@ -226,16 +222,15 @@ async fn test_gcs_rolling_by_size() {
     }
 }
 
-/// Test create_backend with gs:// URL
+/// Test `create_backend` with gs:// URL
 #[tokio::test]
 #[ignore = "requires GCS credentials - run with --ignored"]
 async fn test_create_backend_gcs_url() {
-    let gcs_config = match get_gcs_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: GCS_BUCKET not set");
-            return;
-        }
+    let gcs_config = if let Some(c) = get_gcs_config() {
+        c
+    } else {
+        eprintln!("Skipping: GCS_BUCKET not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {

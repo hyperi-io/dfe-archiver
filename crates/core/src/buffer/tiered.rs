@@ -13,8 +13,8 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
@@ -289,16 +289,15 @@ impl TieredBufferManager {
             lru.access(&key)
         };
 
-        if let Some(evict_key) = evict_key {
-            if let Some((_, mut buffer)) = self.hot_buffers.remove(&evict_key) {
-                if !buffer.is_empty() {
-                    let (messages, offsets) = buffer.drain();
-                    batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
-                    self.stats
-                        .hot_buffer_evictions
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
+        if let Some(evict_key) = evict_key
+            && let Some((_, mut buffer)) = self.hot_buffers.remove(&evict_key)
+            && !buffer.is_empty()
+        {
+            let (messages, offsets) = buffer.drain();
+            batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
+            self.stats
+                .hot_buffer_evictions
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         let mut entry = self.hot_buffers.entry(key.clone()).or_insert_with(|| {
@@ -320,7 +319,7 @@ impl TieredBufferManager {
         {
             let (messages, offsets) = entry.drain();
             self.stats.current_hot_bytes.fetch_sub(
-                messages.iter().map(|m| m.len()).sum::<usize>(),
+                messages.iter().map(std::vec::Vec::len).sum::<usize>(),
                 Ordering::Relaxed,
             );
             batches_to_write.push(self.create_staged_batch(key, messages, offsets));
@@ -335,11 +334,11 @@ impl TieredBufferManager {
         let keys: Vec<_> = self.hot_buffers.iter().map(|e| e.key().clone()).collect();
 
         for key in keys {
-            if let Some(mut entry) = self.hot_buffers.get_mut(&key) {
-                if !entry.is_empty() {
-                    let (messages, offsets) = entry.drain();
-                    batches.push(self.create_staged_batch(key.clone(), messages, offsets));
-                }
+            if let Some(mut entry) = self.hot_buffers.get_mut(&key)
+                && !entry.is_empty()
+            {
+                let (messages, offsets) = entry.drain();
+                batches.push(self.create_staged_batch(key.clone(), messages, offsets));
             }
         }
 
@@ -363,6 +362,7 @@ impl TieredBufferManager {
     }
 
     /// Get writer permit (blocks if max concurrent writers reached)
+    #[allow(clippy::expect_used)]
     pub async fn acquire_writer_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
         self.writer_semaphore
             .clone()
@@ -434,6 +434,7 @@ pub struct BufferStatsSnapshot {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

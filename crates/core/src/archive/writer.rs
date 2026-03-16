@@ -6,10 +6,10 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use crate::Result;
 use crate::compression::Compressor;
 use crate::config::ArchiveConfig;
 use crate::storage::StorageBackend;
-use crate::Result;
 use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
@@ -149,6 +149,7 @@ impl ArchiveWriter {
         }
 
         let age = Utc::now().signed_duration_since(state.created_at);
+        #[allow(clippy::cast_possible_wrap)]
         if age.num_seconds() >= self.policy.max_age_secs as i64 {
             debug!(
                 age_secs = age.num_seconds(),

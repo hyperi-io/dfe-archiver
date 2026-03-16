@@ -133,17 +133,17 @@ impl StorageBackend for FileBackend {
 
 /// Cloud object store backend using multipart uploads
 ///
-/// Supports S3, MinIO, GCS, and Azure Blob via the `object_store` crate.
+/// Supports S3, `MinIO`, GCS, and Azure Blob via the `object_store` crate.
 /// Uses `WriteMultipart` for streaming uploads — data is uploaded in
 /// configurable chunk sizes (default 8MB), keeping memory usage bounded
-/// to ~chunk_size per active file rather than buffering the entire file.
+/// to ~`chunk_size` per active file rather than buffering the entire file.
 pub struct ObjectStoreBackend {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     backend_name: &'static str,
     chunk_size: usize,
     max_concurrency: usize,
-    /// Active multipart uploads (path -> WriteMultipart)
+    /// Active multipart uploads (path -> `WriteMultipart`)
     uploads: Mutex<HashMap<String, WriteMultipart>>,
 }
 
@@ -183,7 +183,7 @@ impl ObjectStoreBackend {
         })
     }
 
-    /// Create backend for MinIO (S3-compatible)
+    /// Create backend for `MinIO` (S3-compatible)
     pub fn new_minio(config: &MinioConfig, prefix: String, chunk_size: usize) -> Result<Self> {
         let scheme = if config.use_ssl { "https" } else { "http" };
         let endpoint = if config.endpoint.starts_with("http") {
@@ -545,6 +545,7 @@ fn parse_bucket_prefix(path: &str) -> (&str, &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

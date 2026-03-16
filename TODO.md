@@ -18,6 +18,48 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
+### Consume hyperi-rustlib v1.14.0 (Dynamic Linking)
+
+rustlib v1.14.0 switches rdkafka to dynamic-linking against system librdkafka
+(was compiling C++ from source — 30min build eliminated). All C dependencies
+except aws-lc-sys now link against system libraries via pkg-config.
+
+**CI (.hyperi-ci.yaml):** No changes needed — hyperi-ci v1.1.4+ auto-detects
+`rdkafka-sys` in `Cargo.lock` and installs `librdkafka-dev` (>= 2.12.1) from
+the Confluent APT repo. It also installs `libzstd-dev`, `libssl-dev`, etc.
+
+**Cargo.toml:**
+- [ ] Bump hyperi-rustlib from `>=1.3` to `>=1.14.0`
+- [ ] Remove `transport-zenoh` feature (Zenoh removed in rustlib v1.8.0)
+- [ ] Remove any vendored/cmake rdkafka features
+- [ ] `cargo update` + full test suite
+
+**Dockerfile:**
+- [ ] Create Dockerfile (currently missing) with runtime packages:
+  ```dockerfile
+  RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg \
+      && curl -fsSL https://packages.confluent.io/clients/deb/archive.key \
+         | gpg --dearmor -o /usr/share/keyrings/confluent-clients.gpg \
+      && echo "deb [signed-by=/usr/share/keyrings/confluent-clients.gpg] \
+         https://packages.confluent.io/clients/deb noble main" \
+         > /etc/apt/sources.list.d/confluent-clients.list \
+      && apt-get update && apt-get install -y --no-install-recommends \
+         librdkafka1 libssl3 libzstd1 zlib1g \
+      && rm -rf /var/lib/apt/lists/*
+  ```
+
+**Runtime packages by feature:**
+
+| Feature used | Runtime package | Shared object |
+|---|---|---|
+| `transport-kafka` | `librdkafka1` (Confluent repo) | `librdkafka.so.1` |
+| `spool`, `tiered-sink` | `libzstd1` | `libzstd.so.1` |
+| (transitive) | `libssl3` | `libssl.so.3` |
+| (transitive) | `zlib1g` | `libz.so.1` |
+
+---
+
 - [ ] Verify local release build passes `[PENDING]`
   - Needs libsasl2-dev installed for sasl2-sys
   - Cross-compilation deps provided by CI sysroot, not vendored locally

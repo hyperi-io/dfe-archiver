@@ -26,7 +26,7 @@
 mod common;
 
 use dfe_archiver::config::{ArchiveConfig, AzureConfig};
-use dfe_archiver::io::{create_backend, ObjectStoreBackend};
+use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
@@ -47,12 +47,11 @@ fn get_azure_config() -> Option<AzureConfig> {
 #[tokio::test]
 #[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_basic_operations() {
-    let config = match get_azure_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-            return;
-        }
+    let config = if let Some(c) = get_azure_config() {
+        c
+    } else {
+        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        return;
     };
 
     let backend = ObjectStoreBackend::new_azure(&config, "test-basic".to_string(), 8 * 1024 * 1024)
@@ -83,12 +82,11 @@ async fn test_azure_basic_operations() {
 #[tokio::test]
 #[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_multipart_large_file() {
-    let config = match get_azure_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-            return;
-        }
+    let config = if let Some(c) = get_azure_config() {
+        c
+    } else {
+        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        return;
     };
 
     let backend =
@@ -120,12 +118,11 @@ async fn test_azure_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = match get_azure_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-            return;
-        }
+    let azure_config = if let Some(c) = get_azure_config() {
+        c
+    } else {
+        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {
@@ -163,12 +160,11 @@ async fn test_azure_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = match get_azure_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-            return;
-        }
+    let azure_config = if let Some(c) = get_azure_config() {
+        c
+    } else {
+        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        return;
     };
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
@@ -231,16 +227,15 @@ async fn test_azure_rolling_by_size() {
     }
 }
 
-/// Test create_backend with az:// URL
+/// Test `create_backend` with az:// URL
 #[tokio::test]
 #[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_create_backend_azure_url() {
-    let azure_config = match get_azure_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-            return;
-        }
+    let azure_config = if let Some(c) = get_azure_config() {
+        c
+    } else {
+        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        return;
     };
 
     let archive_config = ArchiveConfig {

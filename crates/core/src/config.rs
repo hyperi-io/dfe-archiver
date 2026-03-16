@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     /// Kafka consumer configuration
     pub kafka: KafkaConfig,
@@ -34,20 +35,6 @@ pub struct Config {
     pub compression: CompressionConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            kafka: KafkaConfig::default(),
-            archive: ArchiveConfig::default(),
-            buffer: BufferConfig::default(),
-            memory: MemoryConfig::default(),
-            routing: RoutingConfig::default(),
-            metrics: MetricsConfig::default(),
-            compression: CompressionConfig::default(),
-        }
-    }
-}
-
 /// Kafka consumer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,7 +51,7 @@ pub struct KafkaConfig {
     /// SASL mechanism (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)
     pub sasl_mechanism: Option<String>,
 
-    /// Security protocol (PLAINTEXT, SASL_PLAINTEXT, SSL, SASL_SSL)
+    /// Security protocol (PLAINTEXT, `SASL_PLAINTEXT`, SSL, `SASL_SSL`)
     pub security_protocol: String,
 
     /// SASL username
@@ -73,7 +60,7 @@ pub struct KafkaConfig {
     /// SASL password
     pub sasl_password: Option<String>,
 
-    /// Batch size for recv()
+    /// Batch size for `recv()`
     pub batch_size: usize,
 
     /// Maximum poll interval (ms)
@@ -182,7 +169,7 @@ pub struct AzureConfig {
     pub endpoint: Option<String>,
 }
 
-/// MinIO configuration (S3-compatible)
+/// `MinIO` configuration (S3-compatible)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MinioConfig {
     pub endpoint: String,
@@ -252,7 +239,7 @@ pub struct RoutingConfig {
     pub mode: String,
 
     /// Field paths for expression-based routing (dot notation)
-    /// e.g., ["org_id", "tags.event_type"]
+    /// e.g., [`org_id`, `tags.event_type`]
     pub expression_fields: Vec<String>,
 
     /// Default path segment when field not found

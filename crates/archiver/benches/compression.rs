@@ -6,7 +6,7 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dfe_archiver::compression::create_compressor;
 use std::hint::black_box;
 
@@ -31,14 +31,14 @@ fn bench_compression_ratios(c: &mut Criterion) {
     for size in sizes {
         let data = generate_log_data(size);
 
-        let mut group = c.benchmark_group(format!("compress_{}kb", size));
+        let mut group = c.benchmark_group(format!("compress_{size}kb"));
         group.throughput(Throughput::Bytes(data.len() as u64));
 
         for codec in codecs {
             let compressor = create_compressor(codec, 3).expect(codec);
 
             group.bench_with_input(BenchmarkId::new(codec, size), &data, |b, data| {
-                b.iter(|| compressor.compress(black_box(data)))
+                b.iter(|| compressor.compress(black_box(data)));
             });
         }
 

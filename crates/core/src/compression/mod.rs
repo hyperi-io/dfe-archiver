@@ -157,8 +157,8 @@ impl Default for GzipCompressor {
 
 impl Compressor for GzipCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::new(self.level));
@@ -198,12 +198,13 @@ pub fn create_compressor(codec: &str, level: i32) -> Result<Box<dyn Compressor +
         "zstd" => Ok(Box::new(ZstdCompressor::new(level))),
         "lz4" => Ok(Box::new(Lz4Compressor)),
         "snappy" => Ok(Box::new(SnappyCompressor)),
-        "gzip" | "gz" => Ok(Box::new(GzipCompressor::new(level as u32))),
+        "gzip" | "gz" => Ok(Box::new(GzipCompressor::new(level.unsigned_abs()))),
         _ => Err(Error::Compression(format!("unknown codec: {codec}"))),
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

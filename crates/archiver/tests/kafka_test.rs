@@ -9,13 +9,13 @@
 //! Integration tests for Kafka transport.
 //!
 //! These tests require a running Kafka instance. Configure via .env:
-//! - KAFKA_BROKERS=k8s.tyrell.com.au:30092
+//! - `KAFKA_BROKERS=k8s.tyrell.com.au:30092`
 //! - KAFKA_SASL_MECHANISM=SCRAM-SHA-512
-//! - KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
-//! - KAFKA_SASL_USER=loader
-//! - KAFKA_SASL_PASSWORD=TyrellPOC2024
+//! - `KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT`
+//! - `KAFKA_SASL_USER=loader`
+//! - `KAFKA_SASL_PASSWORD=TyrellPOC2024`
 //!
-//! Run with: cargo test --test kafka_test -- --ignored
+//! Run with: cargo test --test `kafka_test` -- --ignored
 
 mod common;
 
@@ -95,7 +95,7 @@ async fn test_kafka_consume() {
 
     // Commit if we got any
     if !messages.is_empty() {
-        let offsets: Vec<_> = messages.iter().map(|m| m.into()).collect();
+        let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
         transport.commit(&offsets).await.expect("commit");
     }
 
