@@ -6,16 +6,18 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used, clippy::doc_markdown)]
+
 //! Integration tests for Kafka transport.
 //!
 //! These tests require a running Kafka instance. Configure via .env:
-//! - `KAFKA_BROKERS=k8s.tyrell.com.au:30092`
-//! - KAFKA_SASL_MECHANISM=SCRAM-SHA-512
-//! - `KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT`
-//! - `KAFKA_SASL_USER=loader`
-//! - `KAFKA_SASL_PASSWORD=TyrellPOC2024`
+//! - `KAFKA_BROKERS` — broker address(es)
+//! - `KAFKA_SASL_MECHANISM` — e.g. SCRAM-SHA-512
+//! - `KAFKA_SECURITY_PROTOCOL` — e.g. SASL_PLAINTEXT
+//! - `KAFKA_SASL_USER` — SASL username
+//! - `KAFKA_SASL_PASSWORD` — SASL password
 //!
-//! Run with: cargo test --test `kafka_test` -- --ignored
+//! Run with: `cargo test --test kafka_test -- --ignored`
 
 mod common;
 

@@ -6,6 +6,13 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::manual_let_else,
+    clippy::unused_async
+)]
+
 //! Integration tests for Azure Blob storage backend.
 //!
 //! These tests require Azure credentials via env vars or .env file.
