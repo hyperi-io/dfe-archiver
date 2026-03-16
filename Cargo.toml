@@ -22,7 +22,7 @@ repository = "https://github.com/hyperi-io/dfe-archiver"
 authors = ["HyperI Pty Ltd <engineering@hyperi.io>"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
