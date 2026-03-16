@@ -6,6 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used, clippy::panic, clippy::manual_let_else)]
+
 //! Integration tests for Google Cloud Storage backend.
 //!
 //! These tests require GCS credentials via service account key or ADC.

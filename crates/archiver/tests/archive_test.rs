@@ -6,6 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used)]
+
 //! Integration tests for archive file writing and rolling.
 
 mod common;

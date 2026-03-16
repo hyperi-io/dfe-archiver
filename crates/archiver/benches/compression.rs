@@ -6,6 +6,8 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+#![allow(clippy::expect_used)]
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dfe_archiver::compression::create_compressor;
 use std::hint::black_box;
