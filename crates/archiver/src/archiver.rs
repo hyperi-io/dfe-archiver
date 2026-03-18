@@ -30,10 +30,10 @@ use dfe_archiver_io::storage::create_backend;
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, instrument, warn};
 
 /// Main archiver pipeline
 pub struct Archiver {
@@ -44,8 +44,8 @@ pub struct Archiver {
     metrics: Arc<ArchiverMetrics>,
     /// Active archive writers per destination
     writers: Mutex<HashMap<String, ArchiveWriter>>,
-    /// Shutdown flag
-    shutdown: AtomicBool,
+    /// Cancellation token for graceful shutdown
+    cancel: CancellationToken,
     /// KEDA scaling pressure calculator
     scaling: ScalingPressure,
 }
@@ -95,7 +95,7 @@ impl Archiver {
             buffer,
             metrics,
             writers: Mutex::new(HashMap::new()),
-            shutdown: AtomicBool::new(false),
+            cancel: CancellationToken::new(),
             scaling,
         })
     }
@@ -112,25 +112,30 @@ impl Archiver {
 
     /// Run the main archiver loop
     ///
-    /// This runs until shutdown is signaled.
+    /// This runs until shutdown is signaled via the cancellation token.
+    #[instrument(skip(self))]
     pub async fn run(&self) -> Result<()> {
         info!("Starting archiver main loop");
 
         loop {
-            if self.shutdown.load(Ordering::Relaxed) {
-                info!("Shutdown requested, exiting main loop");
-                break;
-            }
-
-            let messages = {
-                let transport = self.transport.lock().await;
-                match transport.recv(self.config.kafka.batch_size).await {
-                    Ok(msgs) => msgs,
-                    Err(e) => {
-                        error!(error = %e, "Failed to receive from Kafka");
-                        self.metrics.record_error();
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
+            // Race recv against cancellation — exit immediately on shutdown
+            let messages = tokio::select! {
+                () = self.cancel.cancelled() => {
+                    info!("Shutdown requested, exiting main loop");
+                    return Ok(());
+                }
+                result = async {
+                    let transport = self.transport.lock().await;
+                    transport.recv(self.config.kafka.batch_size).await
+                } => {
+                    match result {
+                        Ok(msgs) => msgs,
+                        Err(e) => {
+                            error!(error = %e, "Failed to receive from Kafka");
+                            self.metrics.record_error();
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
                     }
                 }
             };
@@ -140,94 +145,102 @@ impl Archiver {
                 continue;
             }
 
-            self.metrics.record_received(messages.len() as u64);
-            debug!(count = messages.len(), "Received batch from Kafka");
+            self.process_messages(messages).await;
+        }
+    }
 
-            let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
-            let mut backpressure = false;
+    /// Process a batch of messages: route, buffer, write, commit offsets, update metrics
+    async fn process_messages(&self, messages: Vec<dfe_archiver_core::KafkaMessage>) {
+        let batch_len = messages.len();
+        self.metrics.record_received(batch_len as u64);
+        debug!(count = batch_len, "Received batch from Kafka");
 
-            for message in messages {
-                let destination = match self.router.route(&message) {
-                    Ok(dest) => dest,
-                    Err(e) => {
-                        warn!(error = %e, "Routing failed, using topic as destination");
-                        message.topic.clone()
-                    }
-                };
+        // Update kafka_lag scaling component — full batches indicate lag
+        self.scaling.set_component("kafka_lag", batch_len as f64);
 
-                match self.buffer.push(&destination, message) {
-                    Ok(staged_batches) => {
-                        for batch in staged_batches {
-                            if let Err(e) = self.write_batch(&batch).await {
-                                error!(
-                                    error = %e,
-                                    destination = %batch.destination,
-                                    "Failed to write batch"
-                                );
-                                self.metrics.record_error();
-                                continue;
-                            }
+        let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
+        let mut backpressure = false;
 
-                            offsets_to_commit.extend(batch.offsets);
-                            self.metrics.record_archived(batch.record_count as u64);
+        for message in messages {
+            let destination = match self.router.route(&message) {
+                Ok(dest) => dest,
+                Err(e) => {
+                    warn!(error = %e, "Routing failed, using topic as destination");
+                    message.topic.clone()
+                }
+            };
+
+            match self.buffer.push(&destination, message) {
+                Ok(staged_batches) => {
+                    for batch in staged_batches {
+                        if let Err(e) = self.write_batch(&batch).await {
+                            error!(
+                                error = %e,
+                                destination = %batch.destination,
+                                "Failed to write batch"
+                            );
+                            self.metrics.record_error();
+                            continue;
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Buffer push failed (backpressure)");
-                        self.metrics.record_disk_pressure();
-                        backpressure = true;
-                        break;
-                    }
-                }
-            }
 
-            if !backpressure {
-                let aged_batches = self.buffer.flush_aged();
-                for batch in aged_batches {
-                    if let Err(e) = self.write_batch(&batch).await {
-                        error!(
-                            error = %e,
-                            destination = %batch.destination,
-                            "Failed to write aged batch"
-                        );
-                        self.metrics.record_error();
-                    } else {
                         offsets_to_commit.extend(batch.offsets);
+                        self.metrics.record_archived(batch.record_count as u64);
                     }
                 }
-            }
-
-            if !offsets_to_commit.is_empty() {
-                let transport = self.transport.lock().await;
-                if let Err(e) = transport.commit(&offsets_to_commit).await {
-                    error!(error = %e, "Failed to commit offsets");
+                Err(e) => {
+                    warn!(error = %e, "Buffer push failed (backpressure)");
+                    self.metrics.record_disk_pressure();
+                    backpressure = true;
+                    break;
                 }
             }
-
-            if backpressure {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-
-            let stats = self.buffer.stats();
-            self.metrics
-                .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
-            self.metrics.set_spool_bytes(stats.current_spool_bytes);
-
-            // Update scaling pressure components
-            self.scaling
-                .set_component("buffer_depth", stats.current_hot_buffers as f64);
-            self.scaling.set_component(
-                "memory",
-                stats.current_hot_bytes as f64 / self.config.memory.limit_bytes as f64,
-            );
-            let pressure = self.scaling.calculate();
-            self.metrics.set_scaling_pressure(pressure);
         }
 
-        Ok(())
+        if !backpressure {
+            let aged_batches = self.buffer.flush_aged();
+            for batch in aged_batches {
+                if let Err(e) = self.write_batch(&batch).await {
+                    error!(
+                        error = %e,
+                        destination = %batch.destination,
+                        "Failed to write aged batch"
+                    );
+                    self.metrics.record_error();
+                } else {
+                    offsets_to_commit.extend(batch.offsets);
+                }
+            }
+        }
+
+        if !offsets_to_commit.is_empty() {
+            let transport = self.transport.lock().await;
+            if let Err(e) = transport.commit(&offsets_to_commit).await {
+                error!(error = %e, "Failed to commit offsets");
+            }
+        }
+
+        if backpressure {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
+        let stats = self.buffer.stats();
+        self.metrics
+            .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
+        self.metrics.set_spool_bytes(stats.current_spool_bytes);
+
+        // Update scaling pressure components
+        self.scaling
+            .set_component("buffer_depth", stats.current_hot_buffers as f64);
+        self.scaling.set_component(
+            "memory",
+            stats.current_hot_bytes as f64 / self.config.memory.limit_bytes as f64,
+        );
+        let pressure = self.scaling.calculate();
+        self.metrics.set_scaling_pressure(pressure);
     }
 
     /// Write a staged batch to archive storage
+    #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
     async fn write_batch(&self, batch: &dfe_archiver_core::buffer::StagedBatch) -> Result<()> {
         let start = std::time::Instant::now();
 
@@ -248,8 +261,7 @@ impl Archiver {
         let duration = start.elapsed();
         self.metrics.record_flush();
         self.metrics.record_flush_duration(duration.as_secs_f64());
-        self.metrics
-            .record_bytes(batch.data.len() as u64, batch.data.len() as u64);
+        self.metrics.record_bytes_written(batch.data.len() as u64);
         self.metrics.record_batch_size(batch.data.len() as u64);
 
         debug!(
@@ -292,10 +304,11 @@ impl Archiver {
     /// Request graceful shutdown
     pub fn shutdown(&self) {
         info!("Shutdown requested");
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 
     /// Drain all buffers and close writers (for shutdown)
+    #[instrument(skip(self))]
     pub async fn drain(&self) -> Result<()> {
         info!("Draining buffers...");
 

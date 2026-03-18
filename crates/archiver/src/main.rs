@@ -128,10 +128,14 @@ impl DfeApp for App {
             }
         });
 
-        // Wait for shutdown signal
-        tokio::signal::ctrl_c()
-            .await
-            .map_err(|e| CliError::Service(format!("signal handler failed: {e}")))?;
+        // Wait for SIGTERM (K8s) or SIGINT (Ctrl+C)
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| CliError::Service(format!("SIGTERM handler failed: {e}")))?;
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
 
         info!("Shutdown signal received");
 
