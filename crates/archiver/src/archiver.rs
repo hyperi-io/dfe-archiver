@@ -17,7 +17,7 @@
 //!   (10K msgs)    routing     buffering      rolling       File/etc
 //! ```
 
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::metrics::ArchiverMetrics;
 use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver_core::buffer::TieredBufferManager;
@@ -37,7 +37,10 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// Main archiver pipeline
 pub struct Archiver {
-    config: Config,
+    /// Startup config snapshot (for restart-required fields: transport, archive, routing, etc.)
+    startup_config: Config,
+    /// Shared config for hot-reloadable fields (buffer, memory, scaling tunables)
+    shared_config: SharedConfig<Config>,
     transport: Mutex<TransportAdapter>,
     router: Router,
     buffer: TieredBufferManager,
@@ -51,8 +54,13 @@ pub struct Archiver {
 }
 
 impl Archiver {
-    /// Create new archiver from configuration
-    pub async fn new(config: Config) -> Result<Self> {
+    /// Create new archiver from shared configuration.
+    ///
+    /// Takes a snapshot of the config for startup-bound fields (transport,
+    /// archive, routing, compression). Hot-reloadable fields (buffer thresholds,
+    /// memory limits, scaling tunables) are read from `shared_config` each iteration.
+    pub async fn new(shared_config: SharedConfig<Config>) -> Result<Self> {
+        let config = shared_config.get();
         let transport = TransportAdapter::new(&config.kafka).await?;
 
         let router = Router::new(config.routing.clone());
@@ -89,7 +97,8 @@ impl Archiver {
         );
 
         Ok(Self {
-            config,
+            startup_config: config,
+            shared_config,
             transport: Mutex::new(transport),
             router,
             buffer,
@@ -125,8 +134,9 @@ impl Archiver {
                     return Ok(());
                 }
                 result = async {
+                    let batch_size = self.shared_config.with(|c| c.kafka.batch_size);
                     let transport = self.transport.lock().await;
-                    transport.recv(self.config.kafka.batch_size).await
+                    transport.recv(batch_size).await
                 } => {
                     match result {
                         Ok(msgs) => msgs,
@@ -228,12 +238,13 @@ impl Archiver {
             .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
         self.metrics.set_spool_bytes(stats.current_spool_bytes);
 
-        // Update scaling pressure components
+        // Update scaling pressure components (read tunables from shared config)
+        let memory_limit = self.shared_config.with(|c| c.memory.limit_bytes);
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
         self.scaling.set_component(
             "memory",
-            stats.current_hot_bytes as f64 / self.config.memory.limit_bytes as f64,
+            stats.current_hot_bytes as f64 / memory_limit as f64,
         );
         let pressure = self.scaling.calculate();
         self.metrics.set_scaling_pressure(pressure);
@@ -275,21 +286,25 @@ impl Archiver {
         Ok(())
     }
 
-    /// Create a new archive writer for a destination
+    /// Create a new archive writer for a destination.
+    ///
+    /// Uses `startup_config` for archive/compression settings (restart-required).
     fn create_writer(&self, destination: &str) -> Result<ArchiveWriter> {
         let policy = RollingPolicy {
-            max_size_bytes: self.config.archive.roll_size_bytes,
-            max_age_secs: self.config.archive.roll_interval_secs,
+            max_size_bytes: self.startup_config.archive.roll_size_bytes,
+            max_age_secs: self.startup_config.archive.roll_interval_secs,
         };
 
         let compressor = create_compressor(
-            &self.config.compression.codec,
-            self.config.compression.level,
+            &self.startup_config.compression.codec,
+            self.startup_config.compression.level,
         )?;
 
-        let mut archive_config = self.config.archive.clone();
-        archive_config.path_template =
-            format!("{}/{}", destination, self.config.archive.path_template);
+        let mut archive_config = self.startup_config.archive.clone();
+        archive_config.path_template = format!(
+            "{}/{}",
+            destination, self.startup_config.archive.path_template
+        );
 
         let storage = create_backend(&archive_config)?;
 
