@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use hyperi_rustlib::scaling::ScalingPressureConfig;
+
 /// Root configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -33,6 +35,9 @@ pub struct Config {
 
     /// Compression configuration
     pub compression: CompressionConfig,
+
+    /// Scaling pressure configuration for KEDA autoscaling
+    pub scaling: ScalingPressureConfig,
 }
 
 /// Kafka consumer configuration

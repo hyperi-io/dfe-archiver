@@ -27,6 +27,7 @@ use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::TransportAdapter;
 use dfe_archiver_io::storage::create_backend;
+use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +46,8 @@ pub struct Archiver {
     writers: Mutex<HashMap<String, ArchiveWriter>>,
     /// Shutdown flag
     shutdown: AtomicBool,
+    /// KEDA scaling pressure calculator
+    scaling: ScalingPressure,
 }
 
 impl Archiver {
@@ -69,6 +72,15 @@ impl Archiver {
 
         let metrics = ArchiverMetrics::new();
 
+        let scaling = ScalingPressure::new(
+            config.scaling.clone(),
+            vec![
+                ScalingComponent::new("kafka_lag", 0.40, 100_000.0),
+                ScalingComponent::new("buffer_depth", 0.30, 10_000.0),
+                ScalingComponent::new("memory", 0.30, 1.0),
+            ],
+        );
+
         info!(
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
@@ -84,6 +96,7 @@ impl Archiver {
             metrics,
             writers: Mutex::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
+            scaling,
         })
     }
 
@@ -199,6 +212,16 @@ impl Archiver {
             self.metrics
                 .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
             self.metrics.set_spool_bytes(stats.current_spool_bytes);
+
+            // Update scaling pressure components
+            self.scaling
+                .set_component("buffer_depth", stats.current_hot_buffers as f64);
+            self.scaling.set_component(
+                "memory",
+                stats.current_hot_bytes as f64 / self.config.memory.limit_bytes as f64,
+            );
+            let pressure = self.scaling.calculate();
+            self.metrics.set_scaling_pressure(pressure);
         }
 
         Ok(())

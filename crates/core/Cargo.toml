@@ -20,7 +20,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-hyperi-rustlib = { workspace = true, features = ["transport-kafka"] }
+hyperi-rustlib = { workspace = true, features = ["transport-kafka", "scaling"] }
 
 # Serialization
 serde = { workspace = true }
