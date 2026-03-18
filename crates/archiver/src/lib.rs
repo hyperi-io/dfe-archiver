@@ -48,15 +48,3 @@ pub use dfe_archiver_core::config::{
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Default batch size for Kafka consumption
-pub const DEFAULT_BATCH_SIZE: usize = 10_000;
-
-/// Default buffer flush threshold (bytes)
-pub const DEFAULT_FLUSH_BYTES: usize = 64 * 1024 * 1024; // 64MB
-
-/// Default buffer flush interval (seconds)
-pub const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 60;
-
-/// Default rolling file size (final compressed size, not inbound data)
-pub const DEFAULT_ROLL_SIZE_BYTES: u64 = 1024 * 1024 * 1024; // 1GB

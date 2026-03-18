@@ -17,9 +17,7 @@ use tracing::info;
 ///
 /// This struct holds the metrics manager and provides methods for recording metrics.
 /// The actual `MetricsManager` should be started separately via `start_metrics_server`.
-pub struct ArchiverMetrics {
-    _namespace: &'static str,
-}
+pub struct ArchiverMetrics;
 
 impl ArchiverMetrics {
     /// Create new metrics instance and register all metrics
@@ -38,8 +36,10 @@ impl ArchiverMetrics {
         let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
         let _ = manager.counter("files_created_total", "Total archive files created");
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
-        let _ = manager.counter("bytes_written_total", "Total bytes written (uncompressed)");
-        let _ = manager.counter("bytes_compressed_total", "Total bytes written (compressed)");
+        let _ = manager.counter(
+            "bytes_written_total",
+            "Total bytes written (uncompressed input)",
+        );
         let _ = manager.counter("flush_operations_total", "Total flush operations");
         let _ = manager.counter("archive_errors_total", "Total archive errors");
         let _ = manager.counter(
@@ -59,9 +59,7 @@ impl ArchiverMetrics {
 
         let _ = manager.gauge("scaling_pressure", "KEDA scaling pressure (0-100)");
 
-        Arc::new(Self {
-            _namespace: "dfe_archiver",
-        })
+        Arc::new(Self)
     }
 
     /// Record messages received
@@ -89,10 +87,9 @@ impl ArchiverMetrics {
         counter!("dfe_archiver_files_closed_total").increment(1);
     }
 
-    /// Record bytes written
-    pub fn record_bytes(&self, uncompressed: u64, compressed: u64) {
-        counter!("dfe_archiver_bytes_written_total").increment(uncompressed);
-        counter!("dfe_archiver_bytes_compressed_total").increment(compressed);
+    /// Record bytes written (uncompressed input to writer)
+    pub fn record_bytes_written(&self, bytes: u64) {
+        counter!("dfe_archiver_bytes_written_total").increment(bytes);
     }
 
     /// Update buffer stats
@@ -145,43 +142,6 @@ impl ArchiverMetrics {
     /// Update KEDA scaling pressure gauge
     pub fn set_scaling_pressure(&self, value: f64) {
         gauge!("dfe_archiver_scaling_pressure").set(value);
-    }
-}
-
-impl Default for ArchiverMetrics {
-    fn default() -> Self {
-        Self {
-            _namespace: "dfe_archiver",
-        }
-    }
-}
-
-/// Snapshot of metrics for reporting (computed from Prometheus metrics)
-#[derive(Debug, Clone, Default)]
-pub struct MetricsSnapshot {
-    pub messages_received: u64,
-    pub messages_archived: u64,
-    pub messages_dlq: u64,
-    pub files_created: u64,
-    pub files_closed: u64,
-    pub bytes_written: u64,
-    pub bytes_compressed: u64,
-    pub buffer_bytes: u64,
-    pub buffer_records: u64,
-    pub kafka_lag: u64,
-    pub flush_count: u64,
-    pub archive_errors: u64,
-}
-
-impl MetricsSnapshot {
-    /// Get compression ratio
-    #[must_use]
-    pub fn compression_ratio(&self) -> f64 {
-        if self.bytes_written == 0 {
-            1.0
-        } else {
-            self.bytes_compressed as f64 / self.bytes_written as f64
-        }
     }
 }
 
