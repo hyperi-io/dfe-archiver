@@ -30,6 +30,7 @@
 
 mod archiver;
 pub mod config;
+pub mod contract;
 pub mod metrics;
 
 pub use archiver::Archiver;

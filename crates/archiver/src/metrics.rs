@@ -57,6 +57,8 @@ impl ArchiverMetrics {
         let _ = manager.histogram("batch_size_bytes", "Archive batch size in bytes");
         let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
+        let _ = manager.gauge("scaling_pressure", "KEDA scaling pressure (0-100)");
+
         Arc::new(Self {
             _namespace: "dfe_archiver",
         })
@@ -138,6 +140,11 @@ impl ArchiverMetrics {
     /// Record flush duration for histogram
     pub fn record_flush_duration(&self, duration_secs: f64) {
         histogram!("dfe_archiver_flush_duration_seconds").record(duration_secs);
+    }
+
+    /// Update KEDA scaling pressure gauge
+    pub fn set_scaling_pressure(&self, value: f64) {
+        gauge!("dfe_archiver_scaling_pressure").set(value);
     }
 }
 
