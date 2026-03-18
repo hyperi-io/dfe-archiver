@@ -10,7 +10,23 @@ use serde::{Deserialize, Serialize};
 
 pub use hyperi_rustlib::scaling::ScalingPressureConfig;
 
-/// Root configuration
+/// Root configuration for dfe-archiver.
+///
+/// ## Hot-reload behavior
+///
+/// **Hot-reloaded (takes effect on next batch):**
+/// - `kafka.batch_size`
+/// - `buffer.flush_bytes` / `flush_age_secs` / `flush_records`
+/// - `memory.limit_bytes` / `pressure_threshold` / `tracking_enabled`
+/// - `scaling.enabled` / `memory_gate_threshold`
+///
+/// **Requires pod restart:**
+/// - `kafka.*` (except `batch_size`) — transport connection established at startup
+/// - `archive.*` — storage backend and rolling policy bound at startup
+/// - `routing.*` — archive path structure, must be atomic
+/// - `compression.*` — file format consistency across rolling set
+/// - `metrics.*` — HTTP server binds at startup
+/// - `buffer.writer_parallelism` — structural buffer manager config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]

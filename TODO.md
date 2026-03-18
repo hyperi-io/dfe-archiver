@@ -59,7 +59,7 @@ _No active tasks._
 1. [x] KEDA-compatible scaling metrics
 2. [x] Prometheus metrics via hyperi-rustlib
 3. [x] Health endpoints (/healthz, /readyz)
-4. [ ] Graceful shutdown with buffer drain
+4. [x] Graceful shutdown with buffer drain
 5. [ ] Memory pressure handling
 6. [ ] DLQ support for failed messages
 
@@ -88,6 +88,7 @@ _No active tasks._
 - [x] KEDA scaling metrics endpoint (ScalingPressure via hyperi-rustlib)
 - [x] DeploymentContract integration (emit-dockerfile, emit-helm, emit-contract CLI)
 - [x] Migrated CLI to DfeApp pattern (hyperi-rustlib cli feature)
+- [x] Hot-reload config via rustlib SharedConfig + ConfigReloader (SIGHUP + file polling)
 
 ---
 
@@ -101,7 +102,7 @@ _No active tasks._
 
 ### Medium Priority
 
-- [ ] Hot-reload config watcher
+- [x] Hot-reload config watcher
 - [ ] DLQ producer for failed records
 - [ ] Rate limiting/backpressure
 

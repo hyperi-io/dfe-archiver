@@ -170,7 +170,9 @@ fn apply_env_overrides(config: &mut Config) {
 }
 
 /// Validate configuration
-fn validate_config(config: &Config) -> Result<()> {
+///
+/// Called by `load_config` and by the `ConfigReloader` on hot-reload.
+pub fn validate_config(config: &Config) -> Result<()> {
     if config.kafka.brokers.is_empty() {
         return Err(Error::Config("kafka.brokers cannot be empty".to_string()));
     }
@@ -197,6 +199,12 @@ fn validate_config(config: &Config) -> Result<()> {
     if config.buffer.flush_bytes == 0 {
         return Err(Error::Config(
             "buffer.flush_bytes must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.memory.limit_bytes == 0 {
+        return Err(Error::Config(
+            "memory.limit_bytes must be greater than 0".to_string(),
         ));
     }
 

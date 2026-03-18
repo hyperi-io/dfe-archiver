@@ -21,11 +21,15 @@ static GLOBAL_JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemallo
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
+use dfe_archiver::config::{
+    ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
+};
 use dfe_archiver::contract::deployment_contract;
-use dfe_archiver::{Archiver, config::load_config, metrics::start_metrics_server};
+use dfe_archiver::{Archiver, metrics::start_metrics_server};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 /// DFE Archiver - High-volume Kafka-to-storage archiver
@@ -105,9 +109,33 @@ impl DfeApp for App {
             .await
             .map_err(|e| CliError::Service(format!("metrics server failed: {e}")))?;
 
+        // Wrap config in SharedConfig for hot-reload
+        let shared_config = SharedConfig::new(config);
+
+        // Start config reloader (SIGHUP + file polling)
+        let config_path = self.common.config.clone();
+        let reloader = ConfigReloader::new(
+            ReloaderConfig {
+                config_path: config_path.as_ref().map(std::path::PathBuf::from),
+                poll_interval: Duration::from_secs(5),
+                enable_sighup: true,
+                ..ReloaderConfig::default()
+            },
+            shared_config.clone(),
+            move || {
+                load_config(config_path.as_deref())
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            },
+            |cfg| {
+                validate_config(cfg)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            },
+        );
+        let _reloader_handle = reloader.start();
+
         // Create and start archiver
         let archiver = Arc::new(
-            Archiver::new(config)
+            Archiver::new(shared_config)
                 .await
                 .map_err(|e| CliError::Service(e.to_string()))?,
         );
