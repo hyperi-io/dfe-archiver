@@ -1,3 +1,10 @@
+# [1.3.0-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.2...v1.3.0-dev.3) (2026-03-19)
+
+
+### Features
+
+* rustlib v1.16.3 observability remediation ([d84909b](https://github.com/hyperi-io/dfe-archiver/commit/d84909b8dfc6489bf13c424e976eb6ea70dd53f5))
+
 # [1.3.0-dev.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.1...v1.3.0-dev.2) (2026-03-19)
 
 
