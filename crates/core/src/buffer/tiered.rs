@@ -10,14 +10,19 @@ use crate::types::{KafkaMessage, KafkaOffset};
 use crate::{Error, Result};
 use compact_str::CompactString;
 use dashmap::DashMap;
+use hyperi_rustlib::logger::helpers::log_state_change;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
+
+// Log spam guards for disk pressure conditions
+static SPOOL_FULL: AtomicBool = AtomicBool::new(false);
+static DISK_LOW: AtomicBool = AtomicBool::new(false);
 
 /// Configuration for tiered buffer manager
 #[derive(Debug, Clone)]
@@ -222,12 +227,14 @@ impl TieredBufferManager {
             self.stats
                 .disk_pressure_events
                 .fetch_add(1, Ordering::Relaxed);
-            warn!(
-                current_spool,
-                write_size,
-                max = self.config.max_spool_bytes,
-                "Spool size limit reached - backpressure"
-            );
+            if log_state_change(&SPOOL_FULL, true) {
+                warn!(
+                    current_spool,
+                    write_size,
+                    max = self.config.max_spool_bytes,
+                    "Spool size limit reached — backpressure"
+                );
+            }
             return Err(Error::Storage(format!(
                 "spool full: {} + {} > {} bytes",
                 current_spool, write_size, self.config.max_spool_bytes
@@ -239,12 +246,14 @@ impl TieredBufferManager {
             self.stats
                 .disk_pressure_events
                 .fetch_add(1, Ordering::Relaxed);
-            warn!(
-                available,
-                write_size,
-                min_free = self.config.min_free_disk_bytes,
-                "Disk space low - backpressure"
-            );
+            if log_state_change(&DISK_LOW, true) {
+                warn!(
+                    available,
+                    write_size,
+                    min_free = self.config.min_free_disk_bytes,
+                    "Disk space low — backpressure"
+                );
+            }
             return Err(Error::Storage(format!(
                 "disk full: {} available, need {} + {} reserved",
                 available, write_size, self.config.min_free_disk_bytes

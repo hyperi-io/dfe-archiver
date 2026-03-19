@@ -27,13 +27,20 @@ use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::TransportAdapter;
 use dfe_archiver_io::storage::create_backend;
+use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
+
+// Log spam guards
+static RECV_ERROR_LAST: AtomicU64 = AtomicU64::new(0);
+static ROUTE_ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
+static BACKPRESSURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Main archiver pipeline
 pub struct Archiver {
@@ -141,7 +148,9 @@ impl Archiver {
                     match result {
                         Ok(msgs) => msgs,
                         Err(e) => {
-                            error!(error = %e, "Failed to receive from Kafka");
+                            if log_debounced(&RECV_ERROR_LAST, 5000) {
+                                error!(error = %e, "Failed to receive from Kafka (debounced, max 1/5s)");
+                            }
                             self.metrics.record_error();
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             continue;
@@ -175,7 +184,9 @@ impl Archiver {
             let destination = match self.router.route(&message) {
                 Ok(dest) => dest,
                 Err(e) => {
-                    warn!(error = %e, "Routing failed, using topic as destination");
+                    if log_sampled(&ROUTE_ERROR_COUNT, 1000) {
+                        warn!(error = %e, total = ROUTE_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), "Routing failed, using topic (sampled 1/1000)");
+                    }
                     message.topic.clone()
                 }
             };
@@ -198,7 +209,9 @@ impl Archiver {
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "Buffer push failed (backpressure)");
+                    if log_state_change(&BACKPRESSURE_ACTIVE, true) {
+                        warn!(error = %e, "Buffer push failed — backpressure active");
+                    }
                     self.metrics.record_disk_pressure();
                     backpressure = true;
                     break;
@@ -231,6 +244,11 @@ impl Archiver {
 
         if backpressure {
             tokio::time::sleep(Duration::from_secs(5)).await;
+        } else {
+            // Backpressure cleared — log state transition
+            if log_state_change(&BACKPRESSURE_ACTIVE, false) {
+                info!("Backpressure cleared — normal processing resumed");
+            }
         }
 
         let stats = self.buffer.stats();
@@ -248,6 +266,10 @@ impl Archiver {
         );
         let pressure = self.scaling.calculate();
         self.metrics.set_scaling_pressure(pressure);
+        self.metrics
+            .set_scaling_memory_pressure(stats.current_hot_bytes as f64 / memory_limit as f64);
+        self.metrics
+            .set_scaling_circuit_open(self.scaling.snapshot().circuit_open);
     }
 
     /// Write a staged batch to archive storage

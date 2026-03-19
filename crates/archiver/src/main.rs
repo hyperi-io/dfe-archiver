@@ -28,6 +28,7 @@ use dfe_archiver::contract::deployment_contract;
 use dfe_archiver::{Archiver, metrics::start_metrics_server};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
+use hyperi_rustlib::logger::security;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -133,6 +134,20 @@ impl DfeApp for App {
         );
         let _reloader_handle = reloader.start();
 
+        // Spawn config change security event watcher
+        let security_config = shared_config.clone();
+        tokio::spawn(async move {
+            let mut rx = security_config.subscribe();
+            while rx.changed().await.is_ok() {
+                let version = *rx.borrow();
+                security::config_changed(
+                    "config_reload",
+                    "system",
+                    &format!("pipeline config reloaded (version {version})"),
+                );
+            }
+        });
+
         // Create and start archiver
         let archiver = Arc::new(
             Archiver::new(shared_config)
@@ -147,6 +162,8 @@ impl DfeApp for App {
             .await
             .map_err(|e| CliError::Service(e.to_string()))?;
 
+        // Mark pipeline ready
+        archiver.metrics().set_pipeline_ready(true);
         info!("dfe-archiver ready");
 
         // Spawn main loop

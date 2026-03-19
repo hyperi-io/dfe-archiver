@@ -41,7 +41,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # HyperI shared library
-hyperi-rustlib = { version = ">=1.16" }
+hyperi-rustlib = { version = ">=1.16.3" }
 
 # Async runtime
 tokio = { version = ">=1.50", features = ["full", "parking_lot"] }
