@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver"
-version = "1.2.6-dev.2"
+version = "1.3.0-dev.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-core"
-version = "1.2.6-dev.2"
+version = "1.3.0-dev.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1339,7 +1339,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hyperi-rustlib",
- "lz4_flex 0.13.0",
+ "lz4_flex",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-io"
-version = "1.2.6-dev.2"
+version = "1.3.0-dev.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2139,20 +2139,23 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.16.1"
+version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "157ec86811bb0da62298c8273cea5115d874d7a1f0fffdf5c711e8c8e1070255"
+checksum = "3ba5f1f8cd8e24fd0fef2741cc103107d5d5496b9f1da81ea18ba05084a879fe"
 dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "clap",
  "dirs",
  "dotenvy",
  "figment",
- "lz4_flex 0.12.1",
+ "libc",
+ "lz4_flex",
  "metrics",
  "metrics-exporter-prometheus",
  "owo-colors",
+ "parking_lot",
  "rdkafka",
  "rmp-serde",
  "serde",
@@ -2168,6 +2171,7 @@ dependencies = [
  "tower-resilience",
  "tracing",
  "tracing-subscriber",
+ "tracing-throttle",
  "yaque",
  "zstd",
 ]
@@ -2581,15 +2585,6 @@ name = "lz4_flex"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
-dependencies = [
- "twox-hash",
-]
-
-[[package]]
-name = "lz4_flex"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9a0d582c2874f68138a16ce1867e0ffde6c0bb0a0df85e1f36d04146db488a"
 dependencies = [
  "twox-hash",
 ]
@@ -5078,6 +5073,18 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "tracing-throttle"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e4e430251f5ca8f86ea941286923dc2e91be7ca95fec777d75ee8ae1c493f64"
+dependencies = [
+ "ahash",
+ "dashmap",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

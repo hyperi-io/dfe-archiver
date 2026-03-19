@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-archiver-core"
-version = "1.2.6"
+version = "1.3.0-dev.3"
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +20,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-hyperi-rustlib = { workspace = true, features = ["transport-kafka"] }
+hyperi-rustlib = { workspace = true, features = ["transport-kafka", "scaling"] }
 
 # Serialization
 serde = { workspace = true }
