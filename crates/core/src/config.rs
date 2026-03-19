@@ -6,6 +6,7 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use serde::{Deserialize, Serialize};
 
 pub use hyperi_rustlib::scaling::ScalingPressureConfig;
@@ -321,6 +322,103 @@ impl Default for CompressionConfig {
             codec: "zstd".to_string(),
             level: 3, // zstd default
             enabled: true,
+        }
+    }
+}
+
+/// Apply flat environment variable overrides.
+///
+/// Uses multiple prefixes to preserve the existing env var contract:
+/// `KAFKA_*`, `ARCHIVER_*`, `METRICS_*`, `S3_*`.
+///
+/// CRITICAL: These env var names are the contract with dfe-engine.
+/// Do NOT rename them.
+impl ApplyFlatEnv for Config {
+    fn apply_flat_env(&mut self, _prefix: &str) {
+        // Kafka transport
+        if let Some(v) = flat_env::flat_env_list("KAFKA", "BROKERS") {
+            self.kafka.brokers = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "GROUP_ID") {
+            self.kafka.group_id = v;
+        }
+        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPICS") {
+            self.kafka.topics = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "SASL_MECHANISM") {
+            self.kafka.sasl_mechanism = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "SECURITY_PROTOCOL") {
+            self.kafka.security_protocol = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "SASL_USER") {
+            self.kafka.sasl_username = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive("KAFKA", "SASL_PASSWORD") {
+            self.kafka.sasl_password = Some(v);
+        }
+
+        // Archive
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
+            self.archive.destination = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "PATH_TEMPLATE") {
+            self.archive.path_template = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "COMPRESSION_CODEC") {
+            self.compression.codec = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "FLUSH_BYTES") {
+            self.buffer.flush_bytes = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u64>("ARCHIVER", "FLUSH_INTERVAL_SECS") {
+            self.buffer.flush_age_secs = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MEMORY_LIMIT_BYTES") {
+            self.memory.limit_bytes = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MULTIPART_CHUNK_SIZE") {
+            self.archive.multipart_chunk_size = v;
+        }
+
+        // Metrics
+        if let Some(v) = flat_env::flat_env_string("METRICS", "ADDRESS") {
+            self.metrics.address = v;
+        }
+
+        // S3
+        if let Some(v) = flat_env::flat_env_string("S3", "BUCKET") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.bucket = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("S3", "REGION") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.region = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive("S3", "ACCESS_KEY_ID") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.access_key_id = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive("S3", "SECRET_ACCESS_KEY") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.secret_access_key = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string("S3", "ENDPOINT") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.endpoint = Some(v);
+        }
+    }
+}
+
+/// Normalisation: infer implied settings after all config sources merge.
+impl Normalize for Config {
+    fn normalize(&mut self) {
+        // SASL credentials present → ensure mechanism is set
+        if self.kafka.sasl_username.is_some()
+            && self.kafka.sasl_password.is_some()
+            && self.kafka.sasl_mechanism.is_none()
+        {
+            self.kafka.sasl_mechanism = Some("PLAIN".to_string());
         }
     }
 }
