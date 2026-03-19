@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-archiver-io"
-version = "1.3.0-dev.3"
+version = "1.3.0-dev.4"
 description = "I/O layer for dfe-archiver: Kafka transport and storage backends"
 edition.workspace = true
 rust-version.workspace = true
