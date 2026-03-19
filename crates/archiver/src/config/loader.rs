@@ -6,16 +6,17 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use dfe_archiver_core::config::{Config, S3Config};
+use dfe_archiver_core::config::Config;
 use dfe_archiver_core::{Error, Result};
+use hyperi_rustlib::config::flat_env::{ApplyFlatEnv, Normalize};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Load configuration with cascade: CLI → ENV → .env → file → defaults
 ///
 /// Priority (highest to lowest):
 /// 1. CLI arguments (handled by caller, merged after)
-/// 2. Environment variables (ARCHIVER_ prefix)
+/// 2. Environment variables (flat env overrides)
 /// 3. .env file (loaded by dotenvy in main)
 /// 4. Config file (YAML)
 /// 5. Hard-coded defaults
@@ -42,7 +43,10 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
         }
     }
 
-    apply_env_overrides(&mut config);
+    // Apply flat env overrides (preserves existing env var contract)
+    config.apply_flat_env("UNUSED");
+    config.normalize();
+
     validate_config(&config)?;
 
     Ok(config)
@@ -57,120 +61,10 @@ fn load_from_file(path: &str) -> Result<Config> {
         .map_err(|e| Error::Config(format!("failed to parse config file '{path}': {e}")))
 }
 
-/// Apply environment variable overrides (ARCHIVER_ prefix)
-fn apply_env_overrides(config: &mut Config) {
-    if let Ok(brokers) = std::env::var("KAFKA_BROKERS") {
-        config.kafka.brokers = brokers.split(',').map(|s| s.trim().to_string()).collect();
-        debug!(brokers = %brokers, "Override: kafka.brokers from env");
-    }
-
-    if let Ok(group_id) = std::env::var("KAFKA_GROUP_ID") {
-        config.kafka.group_id = group_id;
-        debug!("Override: kafka.group_id from env");
-    }
-
-    if let Ok(topics) = std::env::var("KAFKA_TOPICS") {
-        config.kafka.topics = topics.split(',').map(|s| s.trim().to_string()).collect();
-        debug!(topics = %topics, "Override: kafka.topics from env");
-    }
-
-    if let Ok(mechanism) = std::env::var("KAFKA_SASL_MECHANISM") {
-        config.kafka.sasl_mechanism = Some(mechanism);
-        debug!("Override: kafka.sasl_mechanism from env");
-    }
-
-    if let Ok(protocol) = std::env::var("KAFKA_SECURITY_PROTOCOL") {
-        config.kafka.security_protocol = protocol;
-        debug!("Override: kafka.security_protocol from env");
-    }
-
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        config.kafka.sasl_username = Some(user);
-        debug!("Override: kafka.sasl_username from env");
-    }
-
-    if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-        config.kafka.sasl_password = Some(password);
-        debug!("Override: kafka.sasl_password from env (redacted)");
-    }
-
-    if let Ok(dest) = std::env::var("ARCHIVER_DESTINATION") {
-        config.archive.destination = dest;
-        debug!("Override: archive.destination from env");
-    }
-
-    if let Ok(template) = std::env::var("ARCHIVER_PATH_TEMPLATE") {
-        config.archive.path_template = template;
-        debug!("Override: archive.path_template from env");
-    }
-
-    if let Ok(codec) = std::env::var("ARCHIVER_COMPRESSION_CODEC") {
-        config.compression.codec = codec;
-        debug!("Override: compression.codec from env");
-    }
-
-    if let Ok(bytes) = std::env::var("ARCHIVER_FLUSH_BYTES")
-        && let Ok(bytes) = bytes.parse()
-    {
-        config.buffer.flush_bytes = bytes;
-        debug!("Override: buffer.flush_bytes from env");
-    }
-
-    if let Ok(secs) = std::env::var("ARCHIVER_FLUSH_INTERVAL_SECS")
-        && let Ok(secs) = secs.parse()
-    {
-        config.buffer.flush_age_secs = secs;
-        debug!("Override: buffer.flush_age_secs from env");
-    }
-
-    if let Ok(addr) = std::env::var("METRICS_ADDRESS") {
-        config.metrics.address = addr;
-        debug!("Override: metrics.address from env");
-    }
-
-    if let Ok(limit) = std::env::var("ARCHIVER_MEMORY_LIMIT_BYTES")
-        && let Ok(limit) = limit.parse()
-    {
-        config.memory.limit_bytes = limit;
-        debug!("Override: memory.limit_bytes from env");
-    }
-
-    if let Ok(size) = std::env::var("ARCHIVER_MULTIPART_CHUNK_SIZE")
-        && let Ok(size) = size.parse()
-    {
-        config.archive.multipart_chunk_size = size;
-        debug!("Override: archive.multipart_chunk_size from env");
-    }
-
-    if let Ok(bucket) = std::env::var("S3_BUCKET") {
-        let s3 = config.archive.s3.get_or_insert_with(S3Config::default);
-        s3.bucket = bucket;
-        debug!("Override: s3.bucket from env");
-    }
-    if let Ok(region) = std::env::var("S3_REGION") {
-        let s3 = config.archive.s3.get_or_insert_with(S3Config::default);
-        s3.region = Some(region);
-        debug!("Override: s3.region from env");
-    }
-    if let Ok(key) = std::env::var("S3_ACCESS_KEY_ID") {
-        let s3 = config.archive.s3.get_or_insert_with(S3Config::default);
-        s3.access_key_id = Some(key);
-        debug!("Override: s3.access_key_id from env (redacted)");
-    }
-    if let Ok(secret) = std::env::var("S3_SECRET_ACCESS_KEY") {
-        let s3 = config.archive.s3.get_or_insert_with(S3Config::default);
-        s3.secret_access_key = Some(secret);
-        debug!("Override: s3.secret_access_key from env (redacted)");
-    }
-    if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
-        let s3 = config.archive.s3.get_or_insert_with(S3Config::default);
-        s3.endpoint = Some(endpoint);
-        debug!("Override: s3.endpoint from env");
-    }
-}
-
 /// Validate configuration
-fn validate_config(config: &Config) -> Result<()> {
+///
+/// Called by `load_config` and by the `ConfigReloader` on hot-reload.
+pub fn validate_config(config: &Config) -> Result<()> {
     if config.kafka.brokers.is_empty() {
         return Err(Error::Config("kafka.brokers cannot be empty".to_string()));
     }
@@ -197,6 +91,12 @@ fn validate_config(config: &Config) -> Result<()> {
     if config.buffer.flush_bytes == 0 {
         return Err(Error::Config(
             "buffer.flush_bytes must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.memory.limit_bytes == 0 {
+        return Err(Error::Config(
+            "memory.limit_bytes must be greater than 0".to_string(),
         ));
     }
 
@@ -254,5 +154,24 @@ mod tests {
 
         let result = validate_config(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zero_memory_limit_fails() {
+        let mut config = Config::default();
+        config.memory.limit_bytes = 0;
+
+        let result = validate_config(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_infers_sasl_mechanism() {
+        let mut config = Config::default();
+        config.kafka.sasl_username = Some("user".to_string());
+        config.kafka.sasl_password = Some("pass".to_string());
+        config.normalize();
+
+        assert_eq!(config.kafka.sasl_mechanism, Some("PLAIN".to_string()));
     }
 }

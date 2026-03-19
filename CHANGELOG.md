@@ -1,15 +1,28 @@
-## [1.2.6](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.5...v1.2.6) (2026-03-16)
+# [1.3.0-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.2...v1.3.0-dev.3) (2026-03-19)
+
+
+### Features
+
+* rustlib v1.16.3 observability remediation ([d84909b](https://github.com/hyperi-io/dfe-archiver/commit/d84909b8dfc6489bf13c424e976eb6ea70dd53f5))
+
+# [1.3.0-dev.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.1...v1.3.0-dev.2) (2026-03-19)
 
 
 ### Bug Fixes
 
-* migrate to 3-crate workspace (core, io, archiver) [skip ci] ([6079398](https://github.com/hyperi-io/dfe-archiver/commit/6079398e38f09d8caabdf94c18e78108db37b37a))
-* migrate to hyperi-ci and fix clippy quality debt ([0aba816](https://github.com/hyperi-io/dfe-archiver/commit/0aba816f55db53afb625f9a128eae3175d5349cc))
-* migrate to hyperi-ci from legacy ci submodule ([a6b16c3](https://github.com/hyperi-io/dfe-archiver/commit/a6b16c310ec627e460f7fd3d818d8fc85161cf2a))
-* remove cmake-build rdkafka, add tooling config, create Dockerfile ([3498dd3](https://github.com/hyperi-io/dfe-archiver/commit/3498dd33ff809b418ed831661b524424572b5b1b))
-* trigger release build for GA ([a1f46b9](https://github.com/hyperi-io/dfe-archiver/commit/a1f46b9e017bffa3e29cd7aa3961ec4e9d2330e7))
-* update bytes 1.11.1 (RUSTSEC-2026-0007), time 0.3.47 (RUSTSEC-2026-0009) [skip ci] ([fea31cb](https://github.com/hyperi-io/dfe-archiver/commit/fea31cb44bda84421368a213eda0ef7150a250d2))
-* use crates.io for hyperi-rustlib, remove transport-zenoh ([f542230](https://github.com/hyperi-io/dfe-archiver/commit/f542230c5d43f540885835ff2f11363b0ed7301e))
+* address code review findings from Rust standards audit ([46ed024](https://github.com/hyperi-io/dfe-archiver/commit/46ed0243583e2db04f1edfa000b13bc23e188e4f))
+
+
+### Features
+
+* add config hot-reload via rustlib SharedConfig + ConfigReloader ([4b6c3e5](https://github.com/hyperi-io/dfe-archiver/commit/4b6c3e5241d7116d94f9c5f3b8bd5fb0d933ef98))
+
+# [1.3.0-dev.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6-dev.3...v1.3.0-dev.1) (2026-03-18)
+
+
+### Features
+
+* add KEDA scaling metrics, DeploymentContract, and DfeApp CLI ([2ab1245](https://github.com/hyperi-io/dfe-archiver/commit/2ab1245b264ab7aef9e1272b076f9f2ae70b037b))
 
 ## [1.2.6-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6-dev.2...v1.2.6-dev.3) (2026-03-16)
 

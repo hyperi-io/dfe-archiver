@@ -8,21 +8,24 @@
 
 use dfe_archiver_core::Result;
 use dfe_archiver_core::config::MetricsConfig;
-use hyperi_rustlib::metrics::MetricsManager;
+use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use tracing::info;
 
-/// Archiver metrics using hyperi-rustlib's Prometheus exporter
-///
-/// This struct holds the metrics manager and provides methods for recording metrics.
-/// The actual `MetricsManager` should be started separately via `start_metrics_server`.
+/// Archiver metrics — dual-emits legacy `dfe_archiver_*` names and
+/// standard `dfe_*` names via `DfeMetrics`.
+#[derive(Default)]
 pub struct ArchiverMetrics {
-    _namespace: &'static str,
+    /// Standard DFE metrics (None in tests without a metrics exporter)
+    dfe: Option<DfeMetrics>,
 }
 
 impl ArchiverMetrics {
-    /// Create new metrics instance and register all metrics
+    /// Create new metrics instance and register all metrics.
+    ///
+    /// Registers legacy `dfe_archiver_*` counters/gauges/histograms AND
+    /// initialises `DfeMetrics` for the standard `dfe_*` metric set.
     #[must_use]
     pub fn new() -> Arc<Self> {
         let manager = MetricsManager::new("dfe_archiver");
@@ -38,8 +41,10 @@ impl ArchiverMetrics {
         let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
         let _ = manager.counter("files_created_total", "Total archive files created");
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
-        let _ = manager.counter("bytes_written_total", "Total bytes written (uncompressed)");
-        let _ = manager.counter("bytes_compressed_total", "Total bytes written (compressed)");
+        let _ = manager.counter(
+            "bytes_written_total",
+            "Total bytes written (uncompressed input)",
+        );
         let _ = manager.counter("flush_operations_total", "Total flush operations");
         let _ = manager.counter("archive_errors_total", "Total archive errors");
         let _ = manager.counter(
@@ -57,24 +62,36 @@ impl ArchiverMetrics {
         let _ = manager.histogram("batch_size_bytes", "Archive batch size in bytes");
         let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
-        Arc::new(Self {
-            _namespace: "dfe_archiver",
-        })
+        let _ = manager.gauge("scaling_pressure", "KEDA scaling pressure (0-100)");
+
+        // Register standard DfeMetrics (dfe_* namespace)
+        let dfe = DfeMetrics::register();
+
+        Arc::new(Self { dfe: Some(dfe) })
     }
 
     /// Record messages received
     pub fn record_received(&self, count: u64) {
         counter!("dfe_archiver_messages_received_total").increment(count);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_received(count);
+        }
     }
 
     /// Record messages archived
     pub fn record_archived(&self, count: u64) {
         counter!("dfe_archiver_messages_archived_total").increment(count);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_delivered(count);
+        }
     }
 
     /// Record messages sent to DLQ
     pub fn record_dlq(&self, count: u64) {
         counter!("dfe_archiver_messages_dlq_total").increment(count);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_dlq(count);
+        }
     }
 
     /// Record file created
@@ -87,10 +104,9 @@ impl ArchiverMetrics {
         counter!("dfe_archiver_files_closed_total").increment(1);
     }
 
-    /// Record bytes written
-    pub fn record_bytes(&self, uncompressed: u64, compressed: u64) {
-        counter!("dfe_archiver_bytes_written_total").increment(uncompressed);
-        counter!("dfe_archiver_bytes_compressed_total").increment(compressed);
+    /// Record bytes written (uncompressed input to writer)
+    pub fn record_bytes_written(&self, bytes: u64) {
+        counter!("dfe_archiver_bytes_written_total").increment(bytes);
     }
 
     /// Update buffer stats
@@ -128,6 +144,9 @@ impl ArchiverMetrics {
     /// Update spool size
     pub fn set_spool_bytes(&self, bytes: u64) {
         gauge!("dfe_archiver_spool_bytes").set(bytes as f64);
+        if let Some(ref dfe) = self.dfe {
+            dfe.spool_bytes(bytes as f64);
+        }
     }
 
     /// Record batch size for histogram
@@ -138,42 +157,37 @@ impl ArchiverMetrics {
     /// Record flush duration for histogram
     pub fn record_flush_duration(&self, duration_secs: f64) {
         histogram!("dfe_archiver_flush_duration_seconds").record(duration_secs);
-    }
-}
-
-impl Default for ArchiverMetrics {
-    fn default() -> Self {
-        Self {
-            _namespace: "dfe_archiver",
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_send_duration("storage", duration_secs);
         }
     }
-}
 
-/// Snapshot of metrics for reporting (computed from Prometheus metrics)
-#[derive(Debug, Clone, Default)]
-pub struct MetricsSnapshot {
-    pub messages_received: u64,
-    pub messages_archived: u64,
-    pub messages_dlq: u64,
-    pub files_created: u64,
-    pub files_closed: u64,
-    pub bytes_written: u64,
-    pub bytes_compressed: u64,
-    pub buffer_bytes: u64,
-    pub buffer_records: u64,
-    pub kafka_lag: u64,
-    pub flush_count: u64,
-    pub archive_errors: u64,
-}
+    /// Update KEDA scaling pressure gauge
+    pub fn set_scaling_pressure(&self, value: f64) {
+        gauge!("dfe_archiver_scaling_pressure").set(value);
+        if let Some(ref dfe) = self.dfe {
+            dfe.scaling_pressure(value);
+        }
+    }
 
-impl MetricsSnapshot {
-    /// Get compression ratio
-    #[must_use]
-    pub fn compression_ratio(&self) -> f64 {
-        if self.bytes_written == 0 {
-            1.0
-        } else {
-            self.bytes_compressed as f64 / self.bytes_written as f64
+    /// Update pipeline readiness
+    pub fn set_pipeline_ready(&self, ready: bool) {
+        if let Some(ref dfe) = self.dfe {
+            dfe.pipeline_ready(ready);
+        }
+    }
+
+    /// Update scaling circuit breaker state
+    pub fn set_scaling_circuit_open(&self, open: bool) {
+        if let Some(ref dfe) = self.dfe {
+            dfe.scaling_circuit_open(open);
+        }
+    }
+
+    /// Update scaling memory pressure ratio
+    pub fn set_scaling_memory_pressure(&self, ratio: f64) {
+        if let Some(ref dfe) = self.dfe {
+            dfe.scaling_memory_pressure(ratio);
         }
     }
 }
