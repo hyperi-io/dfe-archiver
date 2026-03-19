@@ -1,3 +1,15 @@
+# [1.3.0-dev.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.1...v1.3.0-dev.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* address code review findings from Rust standards audit ([46ed024](https://github.com/hyperi-io/dfe-archiver/commit/46ed0243583e2db04f1edfa000b13bc23e188e4f))
+
+
+### Features
+
+* add config hot-reload via rustlib SharedConfig + ConfigReloader ([4b6c3e5](https://github.com/hyperi-io/dfe-archiver/commit/4b6c3e5241d7116d94f9c5f3b8bd5fb0d933ef98))
+
 # [1.3.0-dev.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6-dev.3...v1.3.0-dev.1) (2026-03-18)
 
 
