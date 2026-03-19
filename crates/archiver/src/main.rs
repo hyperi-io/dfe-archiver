@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      crates/archiver/src/main.rs
-// Purpose:   CLI entry point for the archiver service
+// Purpose:   CLI entry point using hyperi-rustlib DfeApp pattern
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
@@ -20,107 +20,228 @@ static GLOBAL_JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemallo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use clap::Parser;
-use dfe_archiver::{Archiver, Result, config::load_config, metrics::start_metrics_server};
+use clap::{Parser, Subcommand};
+use dfe_archiver::config::{
+    ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
+};
+use dfe_archiver::contract::deployment_contract;
+use dfe_archiver::{Archiver, metrics::start_metrics_server};
+use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
+use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
+use hyperi_rustlib::logger::security;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 /// DFE Archiver - High-volume Kafka-to-storage archiver
 #[derive(Parser, Debug)]
-#[command(name = "dfe-archiver")]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Path to configuration file
-    #[arg(short, long, env = "ARCHIVER_CONFIG")]
-    config: Option<String>,
+#[command(name = "dfe-archiver", version)]
+struct App {
+    #[command(flatten)]
+    common: CommonArgs,
 
-    /// Kafka broker addresses (comma-separated)
-    #[arg(long, env = "KAFKA_BROKERS")]
-    kafka_brokers: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-    /// Kafka consumer group ID
-    #[arg(long, env = "KAFKA_GROUP_ID")]
-    kafka_group_id: Option<String>,
+#[derive(Debug, Clone, Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Standard(StandardCommand),
 
-    /// Kafka topics to consume (comma-separated)
-    #[arg(long, env = "KAFKA_TOPICS")]
-    kafka_topics: Option<String>,
+    /// Generate Dockerfile from deployment contract
+    EmitDockerfile {
+        /// Output path (- for stdout)
+        #[arg(default_value = "-")]
+        output: String,
+    },
 
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
-    log_level: String,
+    /// Generate Helm chart from deployment contract
+    EmitHelm {
+        /// Output directory
+        #[arg(default_value = "chart")]
+        output: String,
+    },
 
-    /// Metrics server bind address
-    #[arg(long, env = "METRICS_ADDRESS", default_value = "0.0.0.0:9090")]
-    metrics_address: String,
+    /// Print deployment contract as JSON
+    EmitContract,
+}
 
-    /// Output destination (file://, s3://, gs://, az://, minio://)
-    #[arg(long, env = "ARCHIVER_DESTINATION")]
-    destination: Option<String>,
+impl DfeApp for App {
+    type Config = dfe_archiver_core::config::Config;
+
+    fn name(&self) -> &'static str {
+        "dfe-archiver"
+    }
+
+    fn env_prefix(&self) -> &'static str {
+        "ARCHIVER"
+    }
+
+    fn version_info(&self) -> VersionInfo {
+        VersionInfo::new("dfe-archiver", env!("CARGO_PKG_VERSION"))
+    }
+
+    fn common_args(&self) -> &CommonArgs {
+        &self.common
+    }
+
+    fn command(&self) -> Option<&StandardCommand> {
+        match &self.command {
+            Some(Command::Standard(cmd)) => Some(cmd),
+            _ => None,
+        }
+    }
+
+    fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
+        load_config(path).map_err(|e| CliError::Config(e.to_string()))
+    }
+
+    async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
+        info!(
+            kafka_brokers = %config.kafka.brokers.join(","),
+            kafka_topics = %config.kafka.topics.join(","),
+            destination = %config.archive.destination,
+            "Configuration loaded"
+        );
+
+        // Start metrics server
+        let _metrics_manager = start_metrics_server(&config.metrics)
+            .await
+            .map_err(|e| CliError::Service(format!("metrics server failed: {e}")))?;
+
+        // Wrap config in SharedConfig for hot-reload
+        let shared_config = SharedConfig::new(config);
+
+        // Start config reloader (SIGHUP + file polling)
+        let config_path = self.common.config.clone();
+        let reloader = ConfigReloader::new(
+            ReloaderConfig {
+                config_path: config_path.as_ref().map(std::path::PathBuf::from),
+                poll_interval: Duration::from_secs(5),
+                enable_sighup: true,
+                ..ReloaderConfig::default()
+            },
+            shared_config.clone(),
+            move || {
+                load_config(config_path.as_deref())
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            },
+            |cfg| {
+                validate_config(cfg)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            },
+        );
+        let _reloader_handle = reloader.start();
+
+        // Spawn config change security event watcher
+        let security_config = shared_config.clone();
+        tokio::spawn(async move {
+            let mut rx = security_config.subscribe();
+            while rx.changed().await.is_ok() {
+                let version = *rx.borrow();
+                security::config_changed(
+                    "config_reload",
+                    "system",
+                    &format!("pipeline config reloaded (version {version})"),
+                );
+            }
+        });
+
+        // Create and start archiver
+        let archiver = Arc::new(
+            Archiver::new(shared_config)
+                .await
+                .map_err(|e| CliError::Service(e.to_string()))?,
+        );
+        let archiver_run = Arc::clone(&archiver);
+
+        // Verify Kafka connection
+        archiver
+            .check_connection()
+            .await
+            .map_err(|e| CliError::Service(e.to_string()))?;
+
+        // Mark pipeline ready
+        archiver.metrics().set_pipeline_ready(true);
+        info!("dfe-archiver ready");
+
+        // Spawn main loop
+        let run_handle = tokio::spawn(async move {
+            if let Err(e) = archiver_run.run().await {
+                tracing::error!(error = %e, "Archiver run failed");
+            }
+        });
+
+        // Wait for SIGTERM (K8s) or SIGINT (Ctrl+C)
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| CliError::Service(format!("SIGTERM handler failed: {e}")))?;
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+
+        info!("Shutdown signal received");
+
+        // Signal shutdown and wait for drain
+        archiver.shutdown();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        archiver
+            .drain()
+            .await
+            .map_err(|e| CliError::Service(e.to_string()))?;
+
+        let _ = run_handle.await;
+        info!("Shutdown complete");
+
+        Ok(())
+    }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Load .env file if present
+async fn main() {
     dotenvy::dotenv().ok();
 
-    // Parse CLI arguments
-    let args = Args::parse();
+    let app = App::parse();
 
-    // Initialise logging via hyperi-rustlib (auto-detects JSON/Text format)
-    hyperi_rustlib::logger::setup_default()
-        .map_err(|e| dfe_archiver::Error::Config(format!("logger init failed: {e}")))?;
-
-    info!(version = dfe_archiver::VERSION, "Starting dfe-archiver");
-
-    // Load configuration (CLI → ENV → .env → file → defaults)
-    let config = load_config(args.config.as_deref())?;
-
-    info!(
-        kafka_brokers = %config.kafka.brokers.join(","),
-        kafka_topics = %config.kafka.topics.join(","),
-        destination = %config.archive.destination,
-        "Configuration loaded"
-    );
-
-    // Start metrics server
-    let _metrics_manager = start_metrics_server(&config.metrics).await?;
-
-    // Create and start archiver
-    let archiver = Arc::new(Archiver::new(config).await?);
-    let archiver_run = Arc::clone(&archiver);
-
-    // Verify Kafka connection
-    archiver.check_connection().await?;
-
-    info!("dfe-archiver ready");
-
-    // Spawn main loop
-    let run_handle = tokio::spawn(async move {
-        if let Err(e) = archiver_run.run().await {
-            tracing::error!(error = %e, "Archiver run failed");
+    // Handle deployment contract commands before run_app
+    // (these don't need logger/config init)
+    match &app.command {
+        Some(Command::EmitDockerfile { output }) => {
+            let contract = deployment_contract();
+            let content = generate_dockerfile(&contract);
+            if output == "-" {
+                print!("{content}");
+            } else {
+                std::fs::write(output, &content).unwrap_or_else(|e| {
+                    eprintln!("error: failed to write {output}: {e}");
+                    std::process::exit(1);
+                });
+                eprintln!("Dockerfile written to {output}");
+            }
+            return;
         }
-    });
+        Some(Command::EmitHelm { output }) => {
+            let contract = deployment_contract();
+            generate_chart(&contract, output).unwrap_or_else(|e| {
+                eprintln!("error: failed to generate chart: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("Helm chart generated at {output}/");
+            return;
+        }
+        Some(Command::EmitContract) => {
+            let contract = deployment_contract();
+            println!("{}", contract.to_json());
+            return;
+        }
+        _ => {}
+    }
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| dfe_archiver::Error::Runtime(format!("signal handler failed: {e}")))?;
-
-    info!("Shutdown signal received");
-
-    // Signal shutdown and wait for drain
-    archiver.shutdown();
-
-    // Give the run loop time to exit
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Drain remaining buffers
-    archiver.drain().await?;
-
-    // Wait for run handle to complete
-    let _ = run_handle.await;
-
-    info!("Shutdown complete");
-    Ok(())
+    // Standard DfeApp lifecycle (run, version, config-check)
+    if let Err(e) = run_app(app).await {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    }
 }
