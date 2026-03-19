@@ -1,3 +1,10 @@
+# [1.3.0-dev.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.3...v1.3.0-dev.4) (2026-03-19)
+
+
+### Bug Fixes
+
+* trigger release build for GA ([1a3cfb8](https://github.com/hyperi-io/dfe-archiver/commit/1a3cfb80a5d75cbd0f0b155ccdb6442be9d6bf18))
+
 # [1.3.0-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.2...v1.3.0-dev.3) (2026-03-19)
 
 
