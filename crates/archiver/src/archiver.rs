@@ -17,7 +17,7 @@
 //!   (10K msgs)    routing     buffering      rolling       File/etc
 //! ```
 
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::metrics::ArchiverMetrics;
 use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver_core::buffer::TieredBufferManager;
@@ -27,29 +27,47 @@ use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::TransportAdapter;
 use dfe_archiver_io::storage::create_backend;
+use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
+use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, instrument, warn};
+
+// Log spam guards
+static RECV_ERROR_LAST: AtomicU64 = AtomicU64::new(0);
+static ROUTE_ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
+static BACKPRESSURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Main archiver pipeline
 pub struct Archiver {
-    config: Config,
+    /// Startup config snapshot (for restart-required fields: transport, archive, routing, etc.)
+    startup_config: Config,
+    /// Shared config for hot-reloadable fields (buffer, memory, scaling tunables)
+    shared_config: SharedConfig<Config>,
     transport: Mutex<TransportAdapter>,
     router: Router,
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
     /// Active archive writers per destination
     writers: Mutex<HashMap<String, ArchiveWriter>>,
-    /// Shutdown flag
-    shutdown: AtomicBool,
+    /// Cancellation token for graceful shutdown
+    cancel: CancellationToken,
+    /// KEDA scaling pressure calculator
+    scaling: ScalingPressure,
 }
 
 impl Archiver {
-    /// Create new archiver from configuration
-    pub async fn new(config: Config) -> Result<Self> {
+    /// Create new archiver from shared configuration.
+    ///
+    /// Takes a snapshot of the config for startup-bound fields (transport,
+    /// archive, routing, compression). Hot-reloadable fields (buffer thresholds,
+    /// memory limits, scaling tunables) are read from `shared_config` each iteration.
+    pub async fn new(shared_config: SharedConfig<Config>) -> Result<Self> {
+        let config = shared_config.get();
         let transport = TransportAdapter::new(&config.kafka).await?;
 
         let router = Router::new(config.routing.clone());
@@ -69,6 +87,15 @@ impl Archiver {
 
         let metrics = ArchiverMetrics::new();
 
+        let scaling = ScalingPressure::new(
+            config.scaling.clone(),
+            vec![
+                ScalingComponent::new("kafka_lag", 0.40, 100_000.0),
+                ScalingComponent::new("buffer_depth", 0.30, 10_000.0),
+                ScalingComponent::new("memory", 0.30, 1.0),
+            ],
+        );
+
         info!(
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
@@ -77,13 +104,15 @@ impl Archiver {
         );
 
         Ok(Self {
-            config,
+            startup_config: config,
+            shared_config,
             transport: Mutex::new(transport),
             router,
             buffer,
             metrics,
             writers: Mutex::new(HashMap::new()),
-            shutdown: AtomicBool::new(false),
+            cancel: CancellationToken::new(),
+            scaling,
         })
     }
 
@@ -99,25 +128,33 @@ impl Archiver {
 
     /// Run the main archiver loop
     ///
-    /// This runs until shutdown is signaled.
+    /// This runs until shutdown is signaled via the cancellation token.
+    #[instrument(skip(self))]
     pub async fn run(&self) -> Result<()> {
         info!("Starting archiver main loop");
 
         loop {
-            if self.shutdown.load(Ordering::Relaxed) {
-                info!("Shutdown requested, exiting main loop");
-                break;
-            }
-
-            let messages = {
-                let transport = self.transport.lock().await;
-                match transport.recv(self.config.kafka.batch_size).await {
-                    Ok(msgs) => msgs,
-                    Err(e) => {
-                        error!(error = %e, "Failed to receive from Kafka");
-                        self.metrics.record_error();
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
+            // Race recv against cancellation — exit immediately on shutdown
+            let messages = tokio::select! {
+                () = self.cancel.cancelled() => {
+                    info!("Shutdown requested, exiting main loop");
+                    return Ok(());
+                }
+                result = async {
+                    let batch_size = self.shared_config.with(|c| c.kafka.batch_size);
+                    let transport = self.transport.lock().await;
+                    transport.recv(batch_size).await
+                } => {
+                    match result {
+                        Ok(msgs) => msgs,
+                        Err(e) => {
+                            if log_debounced(&RECV_ERROR_LAST, 5000) {
+                                error!(error = %e, "Failed to receive from Kafka (debounced, max 1/5s)");
+                            }
+                            self.metrics.record_error();
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
                     }
                 }
             };
@@ -127,84 +164,116 @@ impl Archiver {
                 continue;
             }
 
-            self.metrics.record_received(messages.len() as u64);
-            debug!(count = messages.len(), "Received batch from Kafka");
+            self.process_messages(messages).await;
+        }
+    }
 
-            let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
-            let mut backpressure = false;
+    /// Process a batch of messages: route, buffer, write, commit offsets, update metrics
+    async fn process_messages(&self, messages: Vec<dfe_archiver_core::KafkaMessage>) {
+        let batch_len = messages.len();
+        self.metrics.record_received(batch_len as u64);
+        debug!(count = batch_len, "Received batch from Kafka");
 
-            for message in messages {
-                let destination = match self.router.route(&message) {
-                    Ok(dest) => dest,
-                    Err(e) => {
-                        warn!(error = %e, "Routing failed, using topic as destination");
-                        message.topic.clone()
+        // Update kafka_lag scaling component — full batches indicate lag
+        self.scaling.set_component("kafka_lag", batch_len as f64);
+
+        let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
+        let mut backpressure = false;
+
+        for message in messages {
+            let destination = match self.router.route(&message) {
+                Ok(dest) => dest,
+                Err(e) => {
+                    if log_sampled(&ROUTE_ERROR_COUNT, 1000) {
+                        warn!(error = %e, total = ROUTE_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), "Routing failed, using topic (sampled 1/1000)");
                     }
-                };
+                    message.topic.clone()
+                }
+            };
 
-                match self.buffer.push(&destination, message) {
-                    Ok(staged_batches) => {
-                        for batch in staged_batches {
-                            if let Err(e) = self.write_batch(&batch).await {
-                                error!(
-                                    error = %e,
-                                    destination = %batch.destination,
-                                    "Failed to write batch"
-                                );
-                                self.metrics.record_error();
-                                continue;
-                            }
-
-                            offsets_to_commit.extend(batch.offsets);
-                            self.metrics.record_archived(batch.record_count as u64);
+            match self.buffer.push(&destination, message) {
+                Ok(staged_batches) => {
+                    for batch in staged_batches {
+                        if let Err(e) = self.write_batch(&batch).await {
+                            error!(
+                                error = %e,
+                                destination = %batch.destination,
+                                "Failed to write batch"
+                            );
+                            self.metrics.record_error();
+                            continue;
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Buffer push failed (backpressure)");
-                        self.metrics.record_disk_pressure();
-                        backpressure = true;
-                        break;
-                    }
-                }
-            }
 
-            if !backpressure {
-                let aged_batches = self.buffer.flush_aged();
-                for batch in aged_batches {
-                    if let Err(e) = self.write_batch(&batch).await {
-                        error!(
-                            error = %e,
-                            destination = %batch.destination,
-                            "Failed to write aged batch"
-                        );
-                        self.metrics.record_error();
-                    } else {
                         offsets_to_commit.extend(batch.offsets);
+                        self.metrics.record_archived(batch.record_count as u64);
                     }
                 }
-            }
-
-            if !offsets_to_commit.is_empty() {
-                let transport = self.transport.lock().await;
-                if let Err(e) = transport.commit(&offsets_to_commit).await {
-                    error!(error = %e, "Failed to commit offsets");
+                Err(e) => {
+                    if log_state_change(&BACKPRESSURE_ACTIVE, true) {
+                        warn!(error = %e, "Buffer push failed — backpressure active");
+                    }
+                    self.metrics.record_disk_pressure();
+                    backpressure = true;
+                    break;
                 }
             }
-
-            if backpressure {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-
-            let stats = self.buffer.stats();
-            self.metrics
-                .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
-            self.metrics.set_spool_bytes(stats.current_spool_bytes);
         }
 
-        Ok(())
+        if !backpressure {
+            let aged_batches = self.buffer.flush_aged();
+            for batch in aged_batches {
+                if let Err(e) = self.write_batch(&batch).await {
+                    error!(
+                        error = %e,
+                        destination = %batch.destination,
+                        "Failed to write aged batch"
+                    );
+                    self.metrics.record_error();
+                } else {
+                    offsets_to_commit.extend(batch.offsets);
+                }
+            }
+        }
+
+        if !offsets_to_commit.is_empty() {
+            let transport = self.transport.lock().await;
+            if let Err(e) = transport.commit(&offsets_to_commit).await {
+                error!(error = %e, "Failed to commit offsets");
+            }
+        }
+
+        if backpressure {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        } else {
+            // Backpressure cleared — log state transition
+            if log_state_change(&BACKPRESSURE_ACTIVE, false) {
+                info!("Backpressure cleared — normal processing resumed");
+            }
+        }
+
+        let stats = self.buffer.stats();
+        self.metrics
+            .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
+        self.metrics.set_spool_bytes(stats.current_spool_bytes);
+
+        // Update scaling pressure components (read tunables from shared config)
+        let memory_limit = self.shared_config.with(|c| c.memory.limit_bytes);
+        self.scaling
+            .set_component("buffer_depth", stats.current_hot_buffers as f64);
+        self.scaling.set_component(
+            "memory",
+            stats.current_hot_bytes as f64 / memory_limit as f64,
+        );
+        let pressure = self.scaling.calculate();
+        self.metrics.set_scaling_pressure(pressure);
+        self.metrics
+            .set_scaling_memory_pressure(stats.current_hot_bytes as f64 / memory_limit as f64);
+        self.metrics
+            .set_scaling_circuit_open(self.scaling.snapshot().circuit_open);
     }
 
     /// Write a staged batch to archive storage
+    #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
     async fn write_batch(&self, batch: &dfe_archiver_core::buffer::StagedBatch) -> Result<()> {
         let start = std::time::Instant::now();
 
@@ -225,8 +294,7 @@ impl Archiver {
         let duration = start.elapsed();
         self.metrics.record_flush();
         self.metrics.record_flush_duration(duration.as_secs_f64());
-        self.metrics
-            .record_bytes(batch.data.len() as u64, batch.data.len() as u64);
+        self.metrics.record_bytes_written(batch.data.len() as u64);
         self.metrics.record_batch_size(batch.data.len() as u64);
 
         debug!(
@@ -240,21 +308,25 @@ impl Archiver {
         Ok(())
     }
 
-    /// Create a new archive writer for a destination
+    /// Create a new archive writer for a destination.
+    ///
+    /// Uses `startup_config` for archive/compression settings (restart-required).
     fn create_writer(&self, destination: &str) -> Result<ArchiveWriter> {
         let policy = RollingPolicy {
-            max_size_bytes: self.config.archive.roll_size_bytes,
-            max_age_secs: self.config.archive.roll_interval_secs,
+            max_size_bytes: self.startup_config.archive.roll_size_bytes,
+            max_age_secs: self.startup_config.archive.roll_interval_secs,
         };
 
         let compressor = create_compressor(
-            &self.config.compression.codec,
-            self.config.compression.level,
+            &self.startup_config.compression.codec,
+            self.startup_config.compression.level,
         )?;
 
-        let mut archive_config = self.config.archive.clone();
-        archive_config.path_template =
-            format!("{}/{}", destination, self.config.archive.path_template);
+        let mut archive_config = self.startup_config.archive.clone();
+        archive_config.path_template = format!(
+            "{}/{}",
+            destination, self.startup_config.archive.path_template
+        );
 
         let storage = create_backend(&archive_config)?;
 
@@ -269,10 +341,11 @@ impl Archiver {
     /// Request graceful shutdown
     pub fn shutdown(&self) {
         info!("Shutdown requested");
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 
     /// Drain all buffers and close writers (for shutdown)
+    #[instrument(skip(self))]
     pub async fn drain(&self) -> Result<()> {
         info!("Draining buffers...");
 

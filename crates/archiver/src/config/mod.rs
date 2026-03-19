@@ -7,8 +7,8 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 mod loader;
-mod shared;
 
 pub use dfe_archiver_core::config::*;
-pub use loader::load_config;
-pub use shared::SharedConfig;
+pub use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
+pub use hyperi_rustlib::config::shared::SharedConfig;
+pub use loader::{load_config, validate_config};
