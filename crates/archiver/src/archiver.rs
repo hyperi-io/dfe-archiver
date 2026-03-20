@@ -175,8 +175,11 @@ impl Archiver {
                 }
                 result = async {
                     let batch_size = self.shared_config.with(|c| c.kafka.batch_size);
+                    let recv_start = std::time::Instant::now();
                     let transport = self.transport.lock().await;
-                    transport.recv(batch_size).await
+                    let result = transport.recv(batch_size).await;
+                    self.metrics.record_recv_duration(recv_start.elapsed().as_secs_f64());
+                    result
                 } => {
                     match result {
                         Ok(msgs) => msgs,
@@ -221,6 +224,7 @@ impl Archiver {
             let destination = match self.router.route(&message) {
                 Ok(dest) => dest,
                 Err(e) => {
+                    self.metrics.record_routing_error();
                     if log_sampled(&ROUTE_ERROR_COUNT, 1000) {
                         warn!(error = %e, total = ROUTE_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), "Routing failed, using topic (sampled 1/1000)");
                     }
@@ -274,9 +278,12 @@ impl Archiver {
 
         if !offsets_to_commit.is_empty() {
             let transport = self.transport.lock().await;
+            let commit_count = offsets_to_commit.len() as u64;
             if let Err(e) = transport.commit(&offsets_to_commit).await {
+                self.metrics.record_commit_error();
                 error!(error = %e, "Failed to commit offsets");
             }
+            self.metrics.record_commit(commit_count);
         }
 
         if backpressure {
@@ -288,12 +295,22 @@ impl Archiver {
             }
         }
 
+        self.update_pipeline_metrics().await;
+    }
+
+    /// Update buffer stats, scaling pressure, and pipeline gauges
+    async fn update_pipeline_metrics(&self) {
+        self.metrics.set_last_batch_timestamp();
+
         let stats = self.buffer.stats();
         self.metrics
             .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
         self.metrics.set_spool_bytes(stats.current_spool_bytes);
 
-        // Update scaling pressure components using MemoryGuard for cgroup-aware tracking
+        let writers = self.writers.lock().await;
+        self.metrics.set_unique_destinations(writers.len());
+        drop(writers);
+
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
         self.scaling
@@ -333,8 +350,7 @@ impl Archiver {
         self.memory_guard.release(batch.data.len() as u64);
 
         let duration = start.elapsed();
-        self.metrics.record_flush();
-        self.metrics.record_flush_duration(duration.as_secs_f64());
+        self.metrics.record_flush(duration.as_secs_f64(), "size");
         self.metrics.record_bytes_written(batch.data.len() as u64);
         self.metrics.record_batch_size(batch.data.len() as u64);
 

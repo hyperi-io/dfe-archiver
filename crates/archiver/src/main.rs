@@ -106,7 +106,8 @@ impl DfeApp for App {
         );
 
         // Initialise metrics: register, start server, wire /readyz
-        let (metrics, _metrics_manager) = init_metrics(&config.metrics)
+        let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
+        let (metrics, _metrics_manager) = init_metrics(&config.metrics, commit)
             .await
             .map_err(|e| CliError::Service(format!("metrics init failed: {e}")))?;
 

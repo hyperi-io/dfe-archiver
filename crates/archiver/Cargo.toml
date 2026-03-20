@@ -32,8 +32,8 @@ workspace = true
 dfe-archiver-core = { workspace = true }
 dfe-archiver-io = { workspace = true }
 hyperi-rustlib = { workspace = true, features = [
-    "config", "config-reload", "logger", "metrics", "transport-kafka",
-    "http-server", "tiered-sink", "spool",
+    "config", "config-reload", "logger", "metrics", "metrics-dfe",
+    "transport-kafka", "http-server", "tiered-sink", "spool",
     "scaling", "deployment", "cli", "memory",
 ] }
 
