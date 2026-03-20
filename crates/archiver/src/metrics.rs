@@ -63,6 +63,14 @@ impl ArchiverMetrics {
         let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
         let _ = manager.gauge("scaling_pressure", "KEDA scaling pressure (0-100)");
+        let _ = manager.gauge(
+            "memory_used_bytes",
+            "Current tracked memory usage (cgroup-aware)",
+        );
+        let _ = manager.gauge(
+            "memory_limit_bytes",
+            "Effective memory limit (cgroup-aware)",
+        );
 
         // Register standard DfeMetrics (dfe_* namespace)
         let dfe = DfeMetrics::register();
@@ -189,6 +197,12 @@ impl ArchiverMetrics {
         if let Some(ref dfe) = self.dfe {
             dfe.scaling_memory_pressure(ratio);
         }
+    }
+
+    /// Update memory usage from `MemoryGuard` (cgroup-aware)
+    pub fn set_memory_usage(&self, current_bytes: u64, limit_bytes: u64) {
+        gauge!("dfe_archiver_memory_used_bytes").set(current_bytes as f64);
+        gauge!("dfe_archiver_memory_limit_bytes").set(limit_bytes as f64);
     }
 }
 
