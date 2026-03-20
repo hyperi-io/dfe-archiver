@@ -1,9 +1,17 @@
-# [1.3.0-dev.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.3...v1.3.0-dev.4) (2026-03-19)
+# [1.3.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.2.6...v1.3.0) (2026-03-19)
 
 
 ### Bug Fixes
 
+* address code review findings from Rust standards audit ([46ed024](https://github.com/hyperi-io/dfe-archiver/commit/46ed0243583e2db04f1edfa000b13bc23e188e4f))
 * trigger release build for GA ([1a3cfb8](https://github.com/hyperi-io/dfe-archiver/commit/1a3cfb80a5d75cbd0f0b155ccdb6442be9d6bf18))
+
+
+### Features
+
+* add config hot-reload via rustlib SharedConfig + ConfigReloader ([4b6c3e5](https://github.com/hyperi-io/dfe-archiver/commit/4b6c3e5241d7116d94f9c5f3b8bd5fb0d933ef98))
+* add KEDA scaling metrics, DeploymentContract, and DfeApp CLI ([2ab1245](https://github.com/hyperi-io/dfe-archiver/commit/2ab1245b264ab7aef9e1272b076f9f2ae70b037b))
+* rustlib v1.16.3 observability remediation ([d84909b](https://github.com/hyperi-io/dfe-archiver/commit/d84909b8dfc6489bf13c424e976eb6ea70dd53f5))
 
 # [1.3.0-dev.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.2...v1.3.0-dev.3) (2026-03-19)
 
