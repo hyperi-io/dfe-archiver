@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-archiver"
-version = "1.3.0-dev.5"
+version = "1.3.0-dev.6"
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
 edition.workspace = true
 rust-version.workspace = true
