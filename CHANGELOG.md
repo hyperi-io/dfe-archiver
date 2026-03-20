@@ -1,3 +1,10 @@
+# [1.3.0-dev.7](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.6...v1.3.0-dev.7) (2026-03-20)
+
+
+### Features
+
+* adopt DFE metrics standard with rustlib metric groups ([c9d5bc8](https://github.com/hyperi-io/dfe-archiver/commit/c9d5bc85b96baa568bc2c10a27401a1c8b952c7c))
+
 # [1.3.0-dev.6](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.5...v1.3.0-dev.6) (2026-03-20)
 
 
