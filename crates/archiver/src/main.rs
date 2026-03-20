@@ -25,7 +25,7 @@ use dfe_archiver::config::{
     ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
 };
 use dfe_archiver::contract::deployment_contract;
-use dfe_archiver::{Archiver, metrics::start_metrics_server};
+use dfe_archiver::{Archiver, metrics::init_metrics};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
 use hyperi_rustlib::logger::security;
@@ -105,10 +105,11 @@ impl DfeApp for App {
             "Configuration loaded"
         );
 
-        // Start metrics server
-        let _metrics_manager = start_metrics_server(&config.metrics)
+        // Initialise metrics: register, start server, wire /readyz
+        let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
+        let (metrics, _metrics_manager) = init_metrics(&config.metrics, commit)
             .await
-            .map_err(|e| CliError::Service(format!("metrics server failed: {e}")))?;
+            .map_err(|e| CliError::Service(format!("metrics init failed: {e}")))?;
 
         // Wrap config in SharedConfig for hot-reload
         let shared_config = SharedConfig::new(config);
@@ -148,9 +149,9 @@ impl DfeApp for App {
             }
         });
 
-        // Create and start archiver
+        // Create and start archiver (pass pre-initialised metrics)
         let archiver = Arc::new(
-            Archiver::new(shared_config)
+            Archiver::new(shared_config, metrics)
                 .await
                 .map_err(|e| CliError::Service(e.to_string()))?,
         );
