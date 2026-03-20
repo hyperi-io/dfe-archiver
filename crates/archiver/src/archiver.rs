@@ -28,6 +28,7 @@ use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::TransportAdapter;
 use dfe_archiver_io::storage::create_backend;
 use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
+use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ use tracing::{debug, error, info, instrument, warn};
 static RECV_ERROR_LAST: AtomicU64 = AtomicU64::new(0);
 static ROUTE_ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
 static BACKPRESSURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MEMORY_PRESSURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Main archiver pipeline
 pub struct Archiver {
@@ -58,6 +60,8 @@ pub struct Archiver {
     cancel: CancellationToken,
     /// KEDA scaling pressure calculator
     scaling: ScalingPressure,
+    /// Cgroup-aware memory guard for backpressure
+    memory_guard: MemoryGuard,
 }
 
 impl Archiver {
@@ -96,6 +100,8 @@ impl Archiver {
             ],
         );
 
+        let memory_guard = MemoryGuard::new(MemoryGuardConfig::from_env("DFE_ARCHIVER"));
+
         info!(
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
@@ -113,6 +119,7 @@ impl Archiver {
             writers: Mutex::new(HashMap::new()),
             cancel: CancellationToken::new(),
             scaling,
+            memory_guard,
         })
     }
 
@@ -134,6 +141,28 @@ impl Archiver {
         info!("Starting archiver main loop");
 
         loop {
+            // Pattern B: pause consumption when under memory pressure
+            // Consumer lag rises, KEDA scales up replicas. No data loss.
+            if self.memory_guard.under_pressure() {
+                if log_state_change(&MEMORY_PRESSURE_ACTIVE, true) {
+                    warn!(
+                        current_bytes = self.memory_guard.current_bytes(),
+                        limit_bytes = self.memory_guard.limit_bytes(),
+                        ratio = format!("{:.1}%", self.memory_guard.pressure_ratio() * 100.0),
+                        "Memory pressure HIGH — pausing Kafka consumption"
+                    );
+                }
+                self.metrics.set_memory_usage(
+                    self.memory_guard.current_bytes(),
+                    self.memory_guard.limit_bytes(),
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            if log_state_change(&MEMORY_PRESSURE_ACTIVE, false) {
+                info!("Memory pressure recovered — resuming Kafka consumption");
+            }
+
             // Race recv against cancellation — exit immediately on shutdown
             let messages = tokio::select! {
                 () = self.cancel.cancelled() => {
@@ -173,6 +202,10 @@ impl Archiver {
         let batch_len = messages.len();
         self.metrics.record_received(batch_len as u64);
         debug!(count = batch_len, "Received batch from Kafka");
+
+        // Track incoming bytes in memory guard
+        let batch_bytes: u64 = messages.iter().map(|m| m.payload.len() as u64).sum();
+        self.memory_guard.add_bytes(batch_bytes);
 
         // Update kafka_lag scaling component — full batches indicate lag
         self.scaling.set_component("kafka_lag", batch_len as f64);
@@ -256,20 +289,21 @@ impl Archiver {
             .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
         self.metrics.set_spool_bytes(stats.current_spool_bytes);
 
-        // Update scaling pressure components (read tunables from shared config)
-        let memory_limit = self.shared_config.with(|c| c.memory.limit_bytes);
+        // Update scaling pressure components using MemoryGuard for cgroup-aware tracking
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
-        self.scaling.set_component(
-            "memory",
-            stats.current_hot_bytes as f64 / memory_limit as f64,
-        );
+        self.scaling
+            .set_component("memory", self.memory_guard.pressure_ratio());
         let pressure = self.scaling.calculate();
         self.metrics.set_scaling_pressure(pressure);
         self.metrics
-            .set_scaling_memory_pressure(stats.current_hot_bytes as f64 / memory_limit as f64);
+            .set_scaling_memory_pressure(self.memory_guard.pressure_ratio());
         self.metrics
             .set_scaling_circuit_open(self.scaling.snapshot().circuit_open);
+        self.metrics.set_memory_usage(
+            self.memory_guard.current_bytes(),
+            self.memory_guard.limit_bytes(),
+        );
     }
 
     /// Write a staged batch to archive storage
@@ -290,6 +324,9 @@ impl Archiver {
 
         writer.write(&batch.data).await?;
         writer.flush().await?;
+
+        // Release bytes from memory guard after successful write
+        self.memory_guard.release(batch.data.len() as u64);
 
         let duration = start.elapsed();
         self.metrics.record_flush();
@@ -379,10 +416,10 @@ impl Archiver {
         Arc::clone(&self.metrics)
     }
 
-    /// Check if archiver is healthy
+    /// Check if archiver is healthy (transport up and not under memory pressure)
     pub async fn is_healthy(&self) -> bool {
         let transport = self.transport.lock().await;
-        transport.is_healthy()
+        transport.is_healthy() && !self.memory_guard.under_pressure()
     }
 }
 
