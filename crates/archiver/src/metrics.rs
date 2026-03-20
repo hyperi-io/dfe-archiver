@@ -11,25 +11,33 @@ use dfe_archiver_core::config::MetricsConfig;
 use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
 
 /// Archiver metrics — dual-emits legacy `dfe_archiver_*` names and
 /// standard `dfe_*` names via `DfeMetrics`.
-#[derive(Default)]
 pub struct ArchiverMetrics {
     /// Standard DFE metrics (None in tests without a metrics exporter)
     dfe: Option<DfeMetrics>,
+    /// Pipeline readiness flag (shared with `MetricsManager` readiness check)
+    ready: Arc<AtomicBool>,
+}
+
+impl Default for ArchiverMetrics {
+    fn default() -> Self {
+        Self {
+            dfe: None,
+            ready: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl ArchiverMetrics {
-    /// Create new metrics instance and register all metrics.
+    /// Register all archiver metrics on the given manager.
     ///
-    /// Registers legacy `dfe_archiver_*` counters/gauges/histograms AND
-    /// initialises `DfeMetrics` for the standard `dfe_*` metric set.
-    #[must_use]
-    pub fn new() -> Arc<Self> {
-        let manager = MetricsManager::new("dfe_archiver");
-
+    /// Uses a single `MetricsManager` for both metric registration and the
+    /// HTTP server, avoiding the previous double-instantiation.
+    fn register(manager: &MetricsManager) -> Self {
         let _ = manager.counter(
             "messages_received_total",
             "Total messages received from Kafka",
@@ -72,10 +80,12 @@ impl ArchiverMetrics {
             "Effective memory limit (cgroup-aware)",
         );
 
-        // Register standard DfeMetrics (dfe_* namespace)
         let dfe = DfeMetrics::register();
 
-        Arc::new(Self { dfe: Some(dfe) })
+        Self {
+            dfe: Some(dfe),
+            ready: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Record messages received
@@ -178,8 +188,12 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Update pipeline readiness
+    /// Update pipeline readiness.
+    ///
+    /// This sets the `DfeMetrics` gauge AND the shared `AtomicBool` that
+    /// the `MetricsManager` readiness check reads for `/readyz`.
     pub fn set_pipeline_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Release);
         if let Some(ref dfe) = self.dfe {
             dfe.pipeline_ready(ready);
         }
@@ -206,31 +220,40 @@ impl ArchiverMetrics {
     }
 }
 
-/// Start metrics HTTP server using hyperi-rustlib
+/// Initialise the metrics subsystem: register metrics, start HTTP server,
+/// wire `/readyz` to pipeline readiness.
 ///
-/// This creates a new `MetricsManager` and starts the server.
-/// The server provides /metrics, /healthz, /readyz endpoints.
+/// Returns the `ArchiverMetrics` handle (wrapped in `Arc`) and the
+/// `MetricsManager` (which owns the server task).
 ///
 /// # Errors
-/// Returns error if server fails to start
-pub async fn start_metrics_server(config: &MetricsConfig) -> Result<MetricsManager> {
-    if !config.enabled {
-        info!("Metrics server disabled");
-        return Ok(MetricsManager::new("dfe_archiver"));
-    }
-
+/// Returns error if the HTTP server fails to bind.
+pub async fn init_metrics(
+    config: &MetricsConfig,
+) -> Result<(Arc<ArchiverMetrics>, MetricsManager)> {
     let mut manager = MetricsManager::new("dfe_archiver");
 
-    manager
-        .start_server(&config.address)
-        .await
-        .map_err(|e| dfe_archiver_core::Error::Config(format!("metrics server failed: {e}")))?;
+    // Register all archiver-specific metrics on this single manager
+    let metrics = ArchiverMetrics::register(&manager);
 
-    info!(
-        address = %config.address,
-        path = %config.path,
-        "Metrics server started (hyperi-rustlib)"
-    );
+    // Wire /readyz to the pipeline readiness flag
+    let ready_flag = Arc::clone(&metrics.ready);
+    manager.set_readiness_check(move || ready_flag.load(Ordering::Acquire));
 
-    Ok(manager)
+    if config.enabled {
+        manager
+            .start_server(&config.address)
+            .await
+            .map_err(|e| dfe_archiver_core::Error::Config(format!("metrics server failed: {e}")))?;
+
+        info!(
+            address = %config.address,
+            path = %config.path,
+            "Metrics server started (hyperi-rustlib)"
+        );
+    } else {
+        info!("Metrics server disabled");
+    }
+
+    Ok((Arc::new(metrics), manager))
 }
