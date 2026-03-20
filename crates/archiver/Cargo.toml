@@ -52,7 +52,6 @@ serde_yaml_ng = { workspace = true }
 
 # Tracing
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 # Utilities
 chrono = { workspace = true }
@@ -69,16 +68,14 @@ test-log = { workspace = true }
 tracing-subscriber = { workspace = true }
 walkdir = { workspace = true }
 reqwest = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
+rdkafka = { workspace = true }
 
 [features]
 default = ["jemalloc"]
 jemalloc = ["tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 transport-memory = ["dfe-archiver-core/transport-memory"]
-testcontainers = []
-full = ["jemalloc", "testcontainers"]
+full = ["jemalloc"]
 
 [dependencies.tikv-jemallocator]
 workspace = true

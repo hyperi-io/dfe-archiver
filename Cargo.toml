@@ -41,7 +41,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # HyperI shared library
-hyperi-rustlib = { version = ">=1.16.5" }
+hyperi-rustlib = { version = ">=1.16.6" }
 
 # Async runtime
 tokio = { version = ">=1.50", features = ["full", "parking_lot"] }
@@ -106,8 +106,7 @@ tokio-test = ">=0.4"
 test-log = { version = ">=0.2", features = ["trace"] }
 walkdir = ">=2.5"
 reqwest = ">=0.13"
-testcontainers = ">=0.26"
-testcontainers-modules = { version = ">=0.14", features = ["kafka"] }
+rdkafka = { version = ">=0.39", features = ["dynamic-linking"] }
 
 [profile.release]
 lto = true

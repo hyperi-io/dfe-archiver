@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      crates/archiver/tests/kafka_test.rs
-// Purpose:   Integration tests against real Kafka
+// Purpose:   Integration tests against real Kafka (remote or docker-local)
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
@@ -10,46 +10,44 @@
 
 //! Integration tests for Kafka transport.
 //!
-//! These tests require a running Kafka instance. Configure via .env:
-//! - `KAFKA_BROKERS` — broker address(es)
-//! - `KAFKA_SASL_MECHANISM` — e.g. SCRAM-SHA-512
-//! - `KAFKA_SECURITY_PROTOCOL` — e.g. SASL_PLAINTEXT
-//! - `KAFKA_SASL_USER` — SASL username
-//! - `KAFKA_SASL_PASSWORD` — SASL password
+//! Supports dual-mode via `TEST_MODE` in `.env`:
+//! - `remote` — DevEx Kafka with SASL_SSL (default)
+//! - `docker` — dfe-docker Redpanda on localhost:19092 (PLAINTEXT)
 //!
 //! Run with: `cargo test --test kafka_test -- --ignored`
 
 mod common;
 
-use common::{get_kafka_brokers, get_kafka_sasl, kafka_available};
+use common::kafka_test_config;
 use dfe_archiver::config::KafkaConfig;
 use dfe_archiver::io::TransportAdapter;
 
+/// Build a `KafkaConfig` from the test config helper
+fn build_kafka_config(topics: Vec<String>, group_suffix: &str) -> KafkaConfig {
+    let kf = kafka_test_config();
+    KafkaConfig {
+        brokers: kf
+            .brokers
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect(),
+        group_id: format!("dfe-archiver-test-{group_suffix}"),
+        topics,
+        sasl_mechanism: kf.sasl_mechanism,
+        sasl_username: kf.sasl_user,
+        sasl_password: kf.sasl_password,
+        security_protocol: kf.security_protocol,
+        ..Default::default()
+    }
+}
+
 /// Test basic Kafka connection
 #[tokio::test]
-#[ignore = "requires external Kafka - run with --ignored"]
+#[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_connection() {
-    if !kafka_available() {
-        eprintln!("Skipping: Kafka not available");
-        return;
-    }
+    skip_if_no_kafka!();
 
-    let brokers = get_kafka_brokers();
-    let sasl = get_kafka_sasl();
-
-    let mut config = KafkaConfig {
-        brokers: brokers.split(',').map(|s| s.trim().to_string()).collect(),
-        group_id: "dfe-archiver-test".to_string(),
-        topics: vec!["test-topic".to_string()],
-        ..Default::default()
-    };
-
-    if let Some(sasl) = sasl {
-        config.sasl_mechanism = Some(sasl.mechanism);
-        config.sasl_username = Some(sasl.username);
-        config.sasl_password = Some(sasl.password);
-        config.security_protocol = sasl.protocol;
-    }
+    let config = build_kafka_config(vec!["test-topic".to_string()], "conn");
 
     let transport = TransportAdapter::new(&config)
         .await
@@ -62,30 +60,14 @@ async fn test_kafka_connection() {
 
 /// Test message consumption (requires messages in topic)
 #[tokio::test]
-#[ignore = "requires external Kafka with data - run with --ignored"]
+#[ignore = "requires Kafka with data - run with --ignored"]
 async fn test_kafka_consume() {
-    if !kafka_available() {
-        eprintln!("Skipping: Kafka not available");
-        return;
-    }
+    skip_if_no_kafka!();
 
-    let brokers = get_kafka_brokers();
-    let sasl = get_kafka_sasl();
-
-    let mut config = KafkaConfig {
-        brokers: brokers.split(',').map(|s| s.trim().to_string()).collect(),
-        group_id: format!("dfe-archiver-test-{}", std::process::id()),
-        topics: vec!["test-topic".to_string()],
-        batch_size: 100,
-        ..Default::default()
-    };
-
-    if let Some(sasl) = sasl {
-        config.sasl_mechanism = Some(sasl.mechanism);
-        config.sasl_username = Some(sasl.username);
-        config.sasl_password = Some(sasl.password);
-        config.security_protocol = sasl.protocol;
-    }
+    let config = build_kafka_config(
+        vec!["test-topic".to_string()],
+        &format!("{}", std::process::id()),
+    );
 
     let transport = TransportAdapter::new(&config)
         .await

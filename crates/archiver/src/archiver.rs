@@ -70,7 +70,13 @@ impl Archiver {
     /// Takes a snapshot of the config for startup-bound fields (transport,
     /// archive, routing, compression). Hot-reloadable fields (buffer thresholds,
     /// memory limits, scaling tunables) are read from `shared_config` each iteration.
-    pub async fn new(shared_config: SharedConfig<Config>) -> Result<Self> {
+    ///
+    /// `metrics` must be the pre-initialised `ArchiverMetrics` from `init_metrics()`,
+    /// which shares the same `MetricsManager` as the HTTP server.
+    pub async fn new(
+        shared_config: SharedConfig<Config>,
+        metrics: Arc<ArchiverMetrics>,
+    ) -> Result<Self> {
         let config = shared_config.get();
         let transport = TransportAdapter::new(&config.kafka).await?;
 
@@ -88,8 +94,6 @@ impl Archiver {
             spool_compression: true,
         };
         let buffer = TieredBufferManager::new(buffer_config)?;
-
-        let metrics = ArchiverMetrics::new();
 
         let scaling = ScalingPressure::new(
             config.scaling.clone(),
