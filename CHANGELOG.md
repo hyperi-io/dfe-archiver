@@ -1,3 +1,17 @@
+# [1.5.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.4.0...v1.5.0) (2026-03-20)
+
+
+### Bug Fixes
+
+* bump hyperi-rustlib to >=1.16.7 ([aa56762](https://github.com/hyperi-io/dfe-archiver/commit/aa5676242da242e385cba8656dda8293cf5d177c))
+* consolidate MetricsManager, wire readiness, add test infra ([b48e0c1](https://github.com/hyperi-io/dfe-archiver/commit/b48e0c166f4fb89eccb1afe808db2005558b3455))
+* trigger CI on PRs to release branch ([19fa5ed](https://github.com/hyperi-io/dfe-archiver/commit/19fa5edb59f78c750f8ed2be504db4f8415da99e))
+
+
+### Features
+
+* adopt DFE metrics standard with rustlib metric groups ([c9d5bc8](https://github.com/hyperi-io/dfe-archiver/commit/c9d5bc85b96baa568bc2c10a27401a1c8b952c7c))
+
 # [1.4.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0...v1.4.0) (2026-03-20)
 
 
