@@ -1,3 +1,10 @@
+# [1.3.0-dev.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.4...v1.3.0-dev.5) (2026-03-20)
+
+
+### Features
+
+* add cgroup-aware MemoryGuard backpressure ([344a55f](https://github.com/hyperi-io/dfe-archiver/commit/344a55ff1e9bfbfea8cf35232dd5bf2712756de9))
+
 # [1.3.0-dev.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.3...v1.3.0-dev.4) (2026-03-19)
 
 
