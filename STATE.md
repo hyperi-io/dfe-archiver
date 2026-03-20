@@ -64,7 +64,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ### Tech Stack
 
-- **Language:** Rust (2021 edition, MSRV 1.94)
+- **Language:** Rust (2024 edition, MSRV 1.94)
 - **Async Runtime:** Tokio
 - **Shared Library:** hyperi-rustlib (config, logging, metrics, transport)
 - **JSON Parsing:** sonic-rs (SIMD-accelerated)
@@ -110,7 +110,7 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
 
 ## External Dependencies
 
-- **hyperi-rustlib** - Shared HyperI library (Artifactory registry)
+- **hyperi-rustlib** - Shared HyperI library (crates.io)
 - **Kafka** - AutoMQ or Strimzi deployment
 - **Object Storage** - S3/MinIO/GCS/Azure for production archives
 
@@ -169,6 +169,12 @@ This file contains **static project context only**.
 **Build host rules:**
 
 - **NEVER kill cargo processes** to free the build directory lock. Multiple projects share this host and run cargo concurrently. Wait for the lock to clear.
+
+**hyperi-rustlib rules:**
+
+- **ALWAYS use crates.io** for hyperi-rustlib (`version = ">=X.Y.Z"`). NEVER use `path = "/projects/hyperi-rustlib"` or any local path override in Cargo.toml.
+- You may READ code at `/projects/hyperi-rustlib` for reference, but the dependency MUST come from crates.io.
+- This rule is non-negotiable and must never be removed from this file.
 
 **DO NOT add:**
 
