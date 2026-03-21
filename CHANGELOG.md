@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.0...v1.5.1) (2026-03-21)
+
+
+### Bug Fixes
+
+* update deps to resolve 3 security advisories ([fd6cf95](https://github.com/hyperi-io/dfe-archiver/commit/fd6cf9565d103303ee1f2fdfa39738cf01387f23))
+
 # [1.5.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.4.0...v1.5.0) (2026-03-20)
 
 
