@@ -1,3 +1,10 @@
+# [1.3.0-dev.8](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.7...v1.3.0-dev.8) (2026-03-21)
+
+
+### Bug Fixes
+
+* update deps to resolve 3 security advisories ([fd6cf95](https://github.com/hyperi-io/dfe-archiver/commit/fd6cf9565d103303ee1f2fdfa39738cf01387f23))
+
 # [1.3.0-dev.7](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.6...v1.3.0-dev.7) (2026-03-20)
 
 
