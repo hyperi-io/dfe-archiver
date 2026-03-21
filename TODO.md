@@ -18,7 +18,10 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-_No active tasks._
+- [ ] Wire compression metrics into ArchiveWriter (record_bytes_compressed, record_compression_duration at flush site)
+- [ ] Wire archive roll trigger metrics (record_archive_roll with "size"/"age" at roll decision point)
+- [ ] Wire record_file_closed with compressed_bytes at writer close
+- [ ] Wire record_sink_duration with backend label at storage write site
 
 ---
 
@@ -60,8 +63,9 @@ _No active tasks._
 2. [x] Prometheus metrics via hyperi-rustlib
 3. [x] Health endpoints (/healthz, /readyz)
 4. [x] Graceful shutdown with buffer drain
-5. [ ] Memory pressure handling
-6. [ ] DLQ support for failed messages
+5. [x] Memory pressure handling (MemoryGuard with cgroup-aware backpressure)
+6. [x] DFE metrics standard adoption (metric groups, archiver-specific metrics)
+7. [ ] DLQ support for failed messages
 
 ### Phase 4: Performance Optimization
 
@@ -89,6 +93,13 @@ _No active tasks._
 - [x] DeploymentContract integration (emit-dockerfile, emit-helm, emit-contract CLI)
 - [x] Migrated CLI to DfeApp pattern (hyperi-rustlib cli feature)
 - [x] Hot-reload config via rustlib SharedConfig + ConfigReloader (SIGHUP + file polling)
+- [x] CancellationToken replacing AtomicBool for shutdown
+- [x] SIGTERM + SIGINT handling in main.rs
+- [x] MemoryGuard with cgroup-aware backpressure (Pattern B: pause consumption)
+- [x] DFE metrics standard: rustlib metric groups (AppMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics, BackpressureMetrics)
+- [x] Archiver-specific metrics: compression ratio/duration, routing errors, staleness gauge, evictions, archive roll triggers, storage backend labels
+- [x] Test infrastructure with docker/remote dual-mode (TEST_MODE=docker|remote)
+- [x] Released v1.5.0 GA (full CI: quality, test, build amd64+arm64, release, publish)
 
 ---
 
