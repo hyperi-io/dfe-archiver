@@ -114,6 +114,9 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 ### Medium Priority
 
 - [x] Hot-reload config watcher
+- [ ] Update hyperi-ai submodule to latest
+- [ ] Documentation review using /doco skill (audit docs against code reality)
+- [ ] Rebuild and retest with updated hyperi-ci (prod/test change separation)
 - [ ] DLQ producer for failed records
 - [ ] Rate limiting/backpressure
 
