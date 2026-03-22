@@ -1,3 +1,10 @@
+# [1.3.0-dev.9](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.8...v1.3.0-dev.9) (2026-03-22)
+
+
+### Bug Fixes
+
+* inline Renovate config (preset resolution broken) ([3b6fedc](https://github.com/hyperi-io/dfe-archiver/commit/3b6fedccc9155802e752d336a34bb8a12dad6868))
+
 # [1.3.0-dev.8](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.7...v1.3.0-dev.8) (2026-03-21)
 
 
