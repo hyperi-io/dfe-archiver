@@ -100,6 +100,10 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Archiver-specific metrics: compression ratio/duration, routing errors, staleness gauge, evictions, archive roll triggers, storage backend labels
 - [x] Test infrastructure with docker/remote dual-mode (TEST_MODE=docker|remote)
 - [x] Released v1.5.0 GA (full CI: quality, test, build amd64+arm64, release, publish)
+- [x] Restructured tests/ to HyperI testing standard (smoke.rs, integration/, e2e/, fixtures/)
+- [x] Single-binary test pattern (integration.rs + e2e.rs with #[path] submodules)
+- [x] Added 49 new unit tests (79 total, up from 30): writer, metrics, error, types, buffer, compression, routing, config, storage
+- [x] Mandatory smoke test: startup components + deployment contract
 
 ---
 
