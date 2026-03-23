@@ -204,7 +204,7 @@ pub fn create_compressor(codec: &str, level: i32) -> Result<Box<dyn Compressor +
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -258,5 +258,62 @@ mod tests {
         assert!(create_compressor("gzip", 6).is_ok());
         assert!(create_compressor("none", 0).is_ok());
         assert!(create_compressor("invalid", 0).is_err());
+    }
+
+    #[test]
+    fn test_compress_empty_input() {
+        for codec in &["zstd", "lz4", "snappy", "gzip", "none"] {
+            let c = create_compressor(codec, 0).expect(codec);
+            let compressed = c
+                .compress(b"")
+                .unwrap_or_else(|e| panic!("{codec} compress empty: {e}"));
+            let decompressed = c
+                .decompress(&compressed)
+                .unwrap_or_else(|e| panic!("{codec} decompress empty: {e}"));
+            assert!(decompressed.is_empty(), "{codec} should roundtrip empty");
+        }
+    }
+
+    #[test]
+    fn test_compress_large_input() {
+        let large = vec![b'X'; 2 * 1024 * 1024]; // 2MB
+        for codec in &["zstd", "lz4", "snappy", "gzip"] {
+            let c = create_compressor(codec, 0).expect(codec);
+            let compressed = c
+                .compress(&large)
+                .unwrap_or_else(|e| panic!("{codec} compress large: {e}"));
+            let decompressed = c
+                .decompress(&compressed)
+                .unwrap_or_else(|e| panic!("{codec} decompress large: {e}"));
+            assert_eq!(decompressed.len(), large.len(), "{codec} roundtrip large");
+        }
+    }
+
+    #[test]
+    fn test_decompress_corrupted_data() {
+        let garbage = b"this is not compressed data at all";
+        for codec in &["zstd", "lz4", "snappy", "gzip"] {
+            let c = create_compressor(codec, 0).expect(codec);
+            let result = c.decompress(garbage);
+            assert!(result.is_err(), "{codec} should error on corrupted data");
+        }
+    }
+
+    #[test]
+    fn test_compressor_extensions() {
+        assert_eq!(
+            create_compressor("zstd", 0).expect("zstd").extension(),
+            "zst"
+        );
+        assert_eq!(create_compressor("lz4", 0).expect("lz4").extension(), "lz4");
+        assert_eq!(
+            create_compressor("snappy", 0).expect("snappy").extension(),
+            "snappy"
+        );
+        assert_eq!(
+            create_compressor("gzip", 0).expect("gzip").extension(),
+            "gz"
+        );
+        assert_eq!(create_compressor("none", 0).expect("none").extension(), "");
     }
 }

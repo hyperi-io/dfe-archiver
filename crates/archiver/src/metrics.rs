@@ -424,3 +424,66 @@ pub async fn init_metrics(
 
     Ok((Arc::new(metrics), manager))
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// Verify `ArchiverMetrics::default()` doesn't panic (test-mode with no exporter)
+    #[test]
+    fn test_default_metrics_no_panic() {
+        let m = ArchiverMetrics::default();
+        assert!(m.dfe.is_none());
+        assert!(m.app.is_none());
+    }
+
+    /// Verify all recording methods work without a metrics exporter (no-op path)
+    #[test]
+    fn test_recording_methods_no_panic_without_exporter() {
+        let m = ArchiverMetrics::default();
+        m.record_received(100);
+        m.record_archived(50);
+        m.record_dlq(1);
+        m.record_file_created();
+        m.record_file_closed(1024);
+        m.record_archive_roll("size");
+        m.record_bytes_written(4096);
+        m.record_bytes_compressed(2048, 4096);
+        m.record_compression_duration(0.042);
+        m.set_kafka_lag(500);
+        m.record_flush(0.01, "size");
+        m.record_error();
+        m.record_sink_error("file");
+        m.record_sink_duration("file", 0.005);
+        m.record_disk_pressure();
+        m.record_backpressure_duration(0.1);
+        m.set_hot_buffer_stats(10, 8192);
+        m.set_spool_bytes(0);
+        m.record_batch_size(1024);
+        m.record_recv_duration(0.05);
+        m.record_commit(1);
+        m.record_commit_error();
+        m.record_routing_error();
+        m.record_eviction();
+        m.set_unique_destinations(5);
+        m.set_last_batch_timestamp();
+        m.set_scaling_pressure(0.42);
+        m.set_pipeline_ready(true);
+        m.set_scaling_circuit_open(false);
+        m.set_scaling_memory_pressure(0.3);
+        m.set_memory_usage(100_000, 1_000_000);
+        m.record_config_reload(true);
+        m.record_config_reload(false);
+    }
+
+    /// Verify zero-value edge cases don't panic
+    #[test]
+    fn test_recording_zero_values() {
+        let m = ArchiverMetrics::default();
+        m.record_received(0);
+        m.record_bytes_compressed(0, 0);
+        m.set_hot_buffer_stats(0, 0);
+        m.set_memory_usage(0, 0);
+    }
+}

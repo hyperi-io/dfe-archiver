@@ -1,17 +1,12 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/archive_test.rs
+// File:      crates/archiver/tests/integration/archive.rs
 // Purpose:   Integration tests for archive writing and rolling
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used)]
-
-//! Integration tests for archive file writing and rolling.
-
-mod common;
-
+use crate::common;
 use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::ArchiveConfig;

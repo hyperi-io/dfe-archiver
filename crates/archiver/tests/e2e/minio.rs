@@ -1,29 +1,15 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/minio_test.rs
-// Purpose:   Integration tests for MinIO storage backend
+// File:      crates/archiver/tests/e2e/minio.rs
+// Purpose:   E2E tests for MinIO storage backend
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used, clippy::panic, clippy::unused_async)]
+// Requires running MinIO. Run with: cargo nextest run --test e2e -- --ignored
 
-//! Integration tests for MinIO/S3 storage backend.
-//!
-//! These tests require a running `MinIO` instance. Start with:
-//! ```bash
-//! docker compose -f docker-compose.dev.yaml up -d minio
-//! ```
-//!
-//! Default configuration:
-//! - Endpoint: <http://localhost:9000>
-//! - Access Key: minioadmin
-//! - Secret Key: minioadmin
-//! - Bucket: archive-test
-//!
-//! Run with: cargo test --test `minio_test` -- --ignored
-
-mod common;
+#[allow(unused_imports)]
+use crate::common;
 
 use dfe_archiver::config::{ArchiveConfig, MinioConfig};
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};

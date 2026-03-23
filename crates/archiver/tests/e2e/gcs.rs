@@ -1,68 +1,45 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/azure_test.rs
-// Purpose:   Integration tests for Azure Blob storage backend
+// File:      crates/archiver/tests/e2e/gcs.rs
+// Purpose:   E2E tests for Google Cloud Storage backend
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::manual_let_else,
-    clippy::unused_async
-)]
+// Requires GCS credentials. Run with: cargo nextest run --test e2e -- --ignored
 
-//! Integration tests for Azure Blob storage backend.
-//!
-//! These tests require Azure credentials via env vars or .env file.
-//!
-//! Setup:
-//! ```bash
-//! az login
-//! az storage account create --name dfearchivertest --resource-group hyperstack \
-//!   --location australiaeast --sku Standard_LRS
-//! az storage container create --name archive-test --account-name dfearchivertest --auth-mode login
-//! ```
-//!
-//! Run with:
-//! ```bash
-//! cargo test --test azure_test -- --ignored
-//! ```
-
-mod common;
-
-use dfe_archiver::config::{ArchiveConfig, AzureConfig};
+#[allow(unused_imports)]
+use crate::common;
+use dfe_archiver::config::{ArchiveConfig, GcsConfig};
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Get Azure configuration from environment
-fn get_azure_config() -> Option<AzureConfig> {
-    let account_name = env::var("AZURE_STORAGE_ACCOUNT").ok()?;
-    Some(AzureConfig {
-        account_name,
-        account_key: env::var("AZURE_STORAGE_KEY").ok(),
-        sas_token: None,
-        container: env::var("AZURE_CONTAINER").unwrap_or_else(|_| "archive-test".to_string()),
-        use_emulator: false,
-        endpoint: None,
+/// Get GCS configuration from environment.
+/// Prefers `GCS_SERVICE_ACCOUNT_KEY` (inline JSON) over `GOOGLE_APPLICATION_CREDENTIALS` (file path).
+fn get_gcs_config() -> Option<GcsConfig> {
+    let bucket = env::var("GCS_BUCKET").ok()?;
+    Some(GcsConfig {
+        bucket,
+        project_id: None,
+        service_account_key: env::var("GCS_SERVICE_ACCOUNT_KEY").ok(),
+        credentials_path: env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
     })
 }
 
-/// Test Azure backend basic operations (create, append, close, exists, delete)
+/// Test GCS backend basic operations (create, append, close, exists, delete)
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
-async fn test_azure_basic_operations() {
-    let config = if let Some(c) = get_azure_config() {
+#[ignore = "requires GCS credentials - run with --ignored"]
+async fn test_gcs_basic_operations() {
+    let config = if let Some(c) = get_gcs_config() {
         c
     } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        eprintln!("Skipping: GCS_BUCKET not set");
         return;
     };
 
-    let backend = ObjectStoreBackend::new_azure(&config, "test-basic".to_string(), 8 * 1024 * 1024)
-        .expect("create Azure backend");
+    let backend = ObjectStoreBackend::new_gcs(&config, "test-basic".to_string(), 8 * 1024 * 1024)
+        .expect("create GCS backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -71,10 +48,7 @@ async fn test_azure_basic_operations() {
         .append(&test_path, b"Hello, ")
         .await
         .expect("append 1");
-    backend
-        .append(&test_path, b"Azure!")
-        .await
-        .expect("append 2");
+    backend.append(&test_path, b"GCS!").await.expect("append 2");
     backend.close(&test_path).await.expect("close");
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
@@ -82,23 +56,23 @@ async fn test_azure_basic_operations() {
     backend.delete(&test_path).await.expect("delete");
     assert!(!backend.exists(&test_path).await.expect("not exists"));
 
-    println!("Azure basic operations test passed");
+    println!("GCS basic operations test passed");
 }
 
-/// Test Azure multipart upload with large file
+/// Test GCS multipart upload with large file
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
-async fn test_azure_multipart_large_file() {
-    let config = if let Some(c) = get_azure_config() {
+#[ignore = "requires GCS credentials - run with --ignored"]
+async fn test_gcs_multipart_large_file() {
+    let config = if let Some(c) = get_gcs_config() {
         c
     } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        eprintln!("Skipping: GCS_BUCKET not set");
         return;
     };
 
     let backend =
-        ObjectStoreBackend::new_azure(&config, "test-multipart".to_string(), 5 * 1024 * 1024)
-            .expect("create Azure backend");
+        ObjectStoreBackend::new_gcs(&config, "test-multipart".to_string(), 5 * 1024 * 1024)
+            .expect("create GCS backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -115,28 +89,28 @@ async fn test_azure_multipart_large_file() {
 
     backend.delete(&test_path).await.expect("delete");
 
-    println!("Azure multipart large file test passed (20MB uploaded)");
+    println!("GCS multipart large file test passed (20MB uploaded)");
 }
 
-/// Test Azure with full archive writer and compression
+/// Test GCS with full archive writer and compression
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
-async fn test_azure_archive_roundtrip() {
+#[ignore = "requires GCS credentials - run with --ignored"]
+async fn test_gcs_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = if let Some(c) = get_azure_config() {
+    let gcs_config = if let Some(c) = get_gcs_config() {
         c
     } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        eprintln!("Skipping: GCS_BUCKET not set");
         return;
     };
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/test-archive", azure_config.container),
+        destination: format!("gs://{}/test-archive", gcs_config.bucket),
         path_template: "data/{timestamp}".to_string(),
         file_extension: "jsonl".to_string(),
-        azure: Some(azure_config),
+        gcs: Some(gcs_config),
         ..Default::default()
     };
 
@@ -157,30 +131,30 @@ async fn test_azure_archive_roundtrip() {
 
     writer.close().await.expect("close");
 
-    println!("Azure archive roundtrip test passed");
+    println!("GCS archive roundtrip test passed");
 }
 
-/// Test Azure rolling by size
+/// Test GCS rolling by size
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
-async fn test_azure_rolling_by_size() {
+#[ignore = "requires GCS credentials - run with --ignored"]
+async fn test_gcs_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = if let Some(c) = get_azure_config() {
+    let gcs_config = if let Some(c) = get_gcs_config() {
         c
     } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        eprintln!("Skipping: GCS_BUCKET not set");
         return;
     };
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/{test_prefix}", azure_config.container),
+        destination: format!("gs://{}/{test_prefix}", gcs_config.bucket),
         path_template: "data/{timestamp}".to_string(),
         file_extension: "jsonl".to_string(),
-        azure: Some(azure_config.clone()),
+        gcs: Some(gcs_config.clone()),
         ..Default::default()
     };
 
@@ -206,7 +180,7 @@ async fn test_azure_rolling_by_size() {
     writer.close().await.expect("close");
 
     let verify_backend =
-        ObjectStoreBackend::new_azure(&azure_config, test_prefix.clone(), 8 * 1024 * 1024)
+        ObjectStoreBackend::new_gcs(&gcs_config, test_prefix.clone(), 8 * 1024 * 1024)
             .expect("create verify backend");
 
     let objects = verify_backend
@@ -221,7 +195,7 @@ async fn test_azure_rolling_by_size() {
     );
 
     println!(
-        "Azure rolling by size created {} files (500 byte threshold)",
+        "GCS rolling by size created {} files (500 byte threshold)",
         objects.len()
     );
 
@@ -234,25 +208,25 @@ async fn test_azure_rolling_by_size() {
     }
 }
 
-/// Test `create_backend` with az:// URL
+/// Test `create_backend` with gs:// URL
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
-async fn test_create_backend_azure_url() {
-    let azure_config = if let Some(c) = get_azure_config() {
+#[ignore = "requires GCS credentials - run with --ignored"]
+async fn test_create_backend_gcs_url() {
+    let gcs_config = if let Some(c) = get_gcs_config() {
         c
     } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+        eprintln!("Skipping: GCS_BUCKET not set");
         return;
     };
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/prefix", azure_config.container),
-        azure: Some(azure_config),
+        destination: format!("gs://{}/prefix", gcs_config.bucket),
+        gcs: Some(gcs_config),
         ..Default::default()
     };
 
     let backend = create_backend(&archive_config).expect("create backend");
-    assert_eq!(backend.name(), "azure");
+    assert_eq!(backend.name(), "gcs");
 
-    println!("create_backend with az:// URL test passed");
+    println!("create_backend with gs:// URL test passed");
 }

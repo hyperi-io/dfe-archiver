@@ -1,32 +1,15 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/s3_test.rs
-// Purpose:   Integration tests for AWS S3 storage backend
+// File:      crates/archiver/tests/e2e/s3.rs
+// Purpose:   E2E tests for AWS S3 storage backend
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used, clippy::manual_let_else)]
+// Requires AWS credentials. Run with: cargo nextest run --test e2e -- --ignored
 
-//! Integration tests for AWS S3 storage backend.
-//!
-//! These tests require AWS credentials (via SSO, env vars, or instance profile).
-//!
-//! Setup:
-//! ```bash
-//! aws sso login --profile hypersec-internet-services
-//! aws s3 mb s3://dfe-archiver-test --region ap-southeast-2 --profile hypersec-internet-services
-//! ```
-//!
-//! Run with:
-//! ```bash
-//! S3_BUCKET=dfe-archiver-test S3_REGION=ap-southeast-2 \
-//!   AWS_PROFILE=hypersec-internet-services \
-//!   cargo test --test s3_test -- --ignored
-//! ```
-
-mod common;
-
+#[allow(unused_imports)]
+use crate::common;
 use dfe_archiver::config::{ArchiveConfig, S3Config};
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;

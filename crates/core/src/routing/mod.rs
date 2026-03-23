@@ -148,4 +148,55 @@ mod tests {
         let dest = router.route(&message).expect("route");
         assert_eq!(dest.as_str(), "events/security");
     }
+
+    #[test]
+    fn test_route_empty_payload() {
+        let config = RoutingConfig {
+            mode: "topic".to_string(),
+            ..Default::default()
+        };
+        let router = Router::new(config);
+        let msg = KafkaMessage::for_test(vec![], "events", 0, 0);
+        let dest = router.route(&msg).expect("route empty payload");
+        assert_eq!(dest.as_str(), "events");
+    }
+
+    #[test]
+    fn test_route_non_json_with_expression_returns_error() {
+        let config = RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: vec!["org_id".to_string()],
+            default_segment: "fallback".to_string(),
+        };
+        let router = Router::new(config);
+        let msg = make_message("events", "this is not json");
+        let result = router.route(&msg);
+        assert!(result.is_err(), "non-JSON payload should return Err");
+    }
+
+    #[test]
+    fn test_route_deeply_nested_field() {
+        let config = RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: vec!["a.b.c.d".to_string()],
+            default_segment: "missing".to_string(),
+        };
+        let router = Router::new(config);
+        let msg = make_message("events", r#"{"a":{"b":{"c":{"d":"deep"}}}}"#);
+        let dest = router.route(&msg).expect("route deep");
+        assert_eq!(dest.as_str(), "events/deep");
+    }
+
+    #[test]
+    fn test_route_deeply_nested_missing() {
+        let config = RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: vec!["a.b.c.d.e.f".to_string()],
+            default_segment: "nope".to_string(),
+        };
+        let router = Router::new(config);
+        let msg = make_message("events", r#"{"a":{"b":"leaf"}}"#);
+        let dest = router.route(&msg).expect("route deep missing");
+        assert_eq!(dest.as_str(), "events/nope");
+    }
 }

@@ -444,7 +444,18 @@ impl Archiver {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
-    // Integration tests require running infrastructure (Kafka, MinIO)
-    // See tests/ directory for integration test files
+    use crate::config::validate_config;
+    use dfe_archiver_core::config::Config;
+
+    #[test]
+    fn test_cleared_brokers_fails_validation() {
+        let mut config = Config::default();
+        config.kafka.brokers.clear();
+        assert!(
+            validate_config(&config).is_err(),
+            "empty brokers should fail"
+        );
+    }
 }

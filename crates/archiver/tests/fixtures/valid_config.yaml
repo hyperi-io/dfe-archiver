@@ -1,0 +1,40 @@
+---
+kafka:
+  brokers:
+    - localhost:9092
+  group_id: dfe-archiver
+  topics:
+    - events
+  batch_size: 1000
+  security_protocol: PLAINTEXT
+
+archive:
+  destination: file:///var/data/archive
+  path_template: "{topic}/{year}/{month}/{day}/{hour}/archive"
+  file_extension: jsonl
+  roll_size_bytes: 1073741824
+  roll_interval_secs: 3600
+
+buffer:
+  flush_bytes: 67108864
+  flush_age_secs: 60
+  flush_records: 100000
+  writer_parallelism: 4
+
+memory:
+  limit_bytes: 1073741824
+  pressure_threshold: 0.85
+  tracking_enabled: true
+
+routing:
+  mode: topic
+  default_segment: unknown
+
+compression:
+  codec: zstd
+  level: 3
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+  path: /metrics
