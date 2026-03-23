@@ -239,4 +239,266 @@ impl ArchiveWriter {
 
         Ok(())
     }
+
+    /// Expose `generate_path` for testing
+    #[cfg(test)]
+    pub fn test_generate_path(&self, timestamp: &DateTime<Utc>) -> String {
+        self.generate_path(timestamp)
+    }
+
+    /// Expose `should_roll` for testing
+    #[cfg(test)]
+    pub fn test_should_roll(&self) -> bool {
+        self.should_roll()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::compression::create_compressor;
+    use crate::storage::StorageBackend;
+    use async_trait::async_trait;
+    use chrono::TimeZone;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    /// In-memory storage backend for unit tests (no disk, no network)
+    struct MemoryBackend {
+        files: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl MemoryBackend {
+        fn new() -> Self {
+            Self {
+                files: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn file_count(&self) -> usize {
+            self.files.lock().expect("lock").len()
+        }
+
+        fn total_bytes(&self) -> usize {
+            self.files
+                .lock()
+                .expect("lock")
+                .values()
+                .map(Vec::len)
+                .sum()
+        }
+    }
+
+    #[async_trait]
+    impl StorageBackend for MemoryBackend {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.files
+                .lock()
+                .expect("lock")
+                .insert(path.to_string(), Vec::new());
+            Ok(())
+        }
+
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.files
+                .lock()
+                .expect("lock")
+                .get_mut(path)
+                .expect("file exists")
+                .extend_from_slice(data);
+            Ok(())
+        }
+
+        async fn close(&self, _path: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn exists(&self, path: &str) -> Result<bool> {
+            Ok(self.files.lock().expect("lock").contains_key(path))
+        }
+
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.files.lock().expect("lock").remove(path);
+            Ok(())
+        }
+
+        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+            Ok(self
+                .files
+                .lock()
+                .expect("lock")
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+
+        fn name(&self) -> &'static str {
+            "memory"
+        }
+    }
+
+    fn test_writer(policy: RollingPolicy, codec: &str) -> (ArchiveWriter, Arc<MemoryBackend>) {
+        let config = ArchiveConfig {
+            destination: "memory://test".to_string(),
+            path_template: "{topic}/{year}/{month}/{day}/{hour}/archive".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor(codec, 0).expect("compressor");
+        let backend = Arc::new(MemoryBackend::new());
+        let writer = ArchiveWriter::new(
+            config,
+            policy,
+            compressor,
+            Box::new(MemoryBackendRef(Arc::clone(&backend))),
+        );
+        (writer, backend)
+    }
+
+    /// Wrapper to use Arc<MemoryBackend> as Box<dyn StorageBackend>
+    struct MemoryBackendRef(Arc<MemoryBackend>);
+
+    #[async_trait]
+    impl StorageBackend for MemoryBackendRef {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.0.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.0.append(path, data).await
+        }
+        async fn close(&self, path: &str) -> Result<()> {
+            self.0.close(path).await
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.0.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.0.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix).await
+        }
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+    }
+
+    #[test]
+    fn test_path_template_expansion() {
+        let config = ArchiveConfig {
+            path_template: "{topic}/{year}/{month}/{day}/{hour}/archive".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor("none", 0).expect("compressor");
+        let backend = Box::new(MemoryBackend::new());
+        let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
+
+        let ts = Utc.with_ymd_and_hms(2026, 3, 15, 14, 30, 0).unwrap();
+        let path = writer.test_generate_path(&ts);
+
+        assert!(path.contains("2026"), "year missing: {path}");
+        assert!(path.contains("03"), "month missing: {path}");
+        assert!(path.contains("15"), "day missing: {path}");
+        assert!(path.contains("14"), "hour missing: {path}");
+        assert!(path.contains(".jsonl"), "extension missing: {path}");
+    }
+
+    #[test]
+    fn test_path_template_with_compression_extension() {
+        let config = ArchiveConfig {
+            path_template: "data/{timestamp}".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor("zstd", 3).expect("compressor");
+        let backend = Box::new(MemoryBackend::new());
+        let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
+
+        let ts = Utc::now();
+        let path = writer.test_generate_path(&ts);
+
+        assert!(path.ends_with(".jsonl.zst"), "should have .zst ext: {path}");
+    }
+
+    #[test]
+    fn test_should_roll_false_when_no_state() {
+        let (writer, _) = test_writer(RollingPolicy::default(), "none");
+        assert!(!writer.test_should_roll());
+    }
+
+    #[tokio::test]
+    async fn test_write_record_creates_file() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 3600,
+            },
+            "none",
+        );
+
+        writer.write_record(b"hello world").await.expect("write");
+        writer.close().await.expect("close");
+
+        assert_eq!(backend.file_count(), 1);
+        assert!(backend.total_bytes() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_close_without_write() {
+        let (mut writer, backend) = test_writer(RollingPolicy::default(), "none");
+        writer.close().await.expect("close on empty writer");
+        assert_eq!(backend.file_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_flush_on_empty_writer() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "none");
+        writer.flush().await.expect("flush on empty writer");
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_record() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 3600,
+            },
+            "none",
+        );
+
+        writer.write_record(b"").await.expect("write empty");
+        writer.close().await.expect("close");
+
+        assert_eq!(backend.file_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rolling_by_size_in_memory() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 100,
+                max_age_secs: 3600,
+            },
+            "none",
+        );
+
+        for batch in 0..5 {
+            for i in 0..10 {
+                let record = format!("record-{batch}-{i}");
+                writer.write_record(record.as_bytes()).await.expect("write");
+            }
+            writer.flush().await.expect("flush");
+        }
+        writer.close().await.expect("close");
+
+        assert!(
+            backend.file_count() >= 3,
+            "expected multiple rolled files, got {}",
+            backend.file_count()
+        );
+    }
 }

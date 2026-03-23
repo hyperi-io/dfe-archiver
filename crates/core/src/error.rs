@@ -101,3 +101,106 @@ impl Error {
         self.category() == ErrorCategory::Transient
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_formats() {
+        let e = Error::Config("bad value".to_string());
+        assert_eq!(format!("{e}"), "configuration error: bad value");
+
+        let e = Error::Kafka("connection refused".to_string());
+        assert_eq!(format!("{e}"), "kafka error: connection refused");
+
+        let e = Error::Storage("permission denied".to_string());
+        assert_eq!(format!("{e}"), "storage error: permission denied");
+
+        let e = Error::Shutdown;
+        assert_eq!(format!("{e}"), "shutdown requested");
+
+        let e = Error::BufferOverflow {
+            message: "exceeded 64MB".to_string(),
+        };
+        assert_eq!(format!("{e}"), "buffer overflow: exceeded 64MB");
+    }
+
+    #[test]
+    fn test_error_categories() {
+        assert_eq!(
+            Error::Kafka("timeout".into()).category(),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            Error::Storage("network".into()).category(),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            Error::Runtime("panic".into()).category(),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            Error::BufferOverflow {
+                message: "oom".into()
+            }
+            .category(),
+            ErrorCategory::Transient
+        );
+
+        assert_eq!(
+            Error::Routing("no field".into()).category(),
+            ErrorCategory::Data
+        );
+        assert_eq!(
+            Error::Compression("corrupt".into()).category(),
+            ErrorCategory::Data
+        );
+
+        assert_eq!(
+            Error::Config("missing".into()).category(),
+            ErrorCategory::Fatal
+        );
+        assert_eq!(Error::Shutdown.category(), ErrorCategory::Fatal);
+    }
+
+    #[test]
+    fn test_io_error_categories() {
+        let e = Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert_eq!(e.category(), ErrorCategory::Fatal);
+
+        let e = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert_eq!(e.category(), ErrorCategory::Fatal);
+
+        let e = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert_eq!(e.category(), ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn test_is_retryable() {
+        assert!(Error::Kafka("timeout".into()).is_retryable());
+        assert!(!Error::Config("bad".into()).is_retryable());
+        assert!(!Error::Routing("no dest".into()).is_retryable());
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = std::io::Error::other("disk full");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err: Error = json_err.into();
+        assert!(matches!(err, Error::Serialization(_)));
+    }
+}

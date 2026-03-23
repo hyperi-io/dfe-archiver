@@ -596,4 +596,35 @@ mod tests {
         let pairs = parse_sas_pairs("sv=2021-08-06&ss=b");
         assert_eq!(pairs.len(), 2);
     }
+
+    #[test]
+    fn test_create_backend_file_url() {
+        let config = ArchiveConfig {
+            destination: "file:///tmp/test-archive".to_string(),
+            ..Default::default()
+        };
+        let backend = create_backend(&config).expect("create file backend");
+        assert_eq!(backend.name(), "file");
+    }
+
+    #[test]
+    fn test_create_backend_bare_path_falls_back_to_file() {
+        let config = ArchiveConfig {
+            destination: "/tmp/bare-path".to_string(),
+            ..Default::default()
+        };
+        let backend = create_backend(&config).expect("bare path -> file backend");
+        assert_eq!(backend.name(), "file");
+    }
+
+    #[test]
+    fn test_create_backend_minio_requires_config() {
+        let config = ArchiveConfig {
+            destination: "minio://bucket/prefix".to_string(),
+            minio: None,
+            ..Default::default()
+        };
+        let result = create_backend(&config);
+        assert!(result.is_err(), "minio:// without config should fail");
+    }
 }

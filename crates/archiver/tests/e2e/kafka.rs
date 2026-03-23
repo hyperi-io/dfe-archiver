@@ -1,24 +1,13 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/kafka_test.rs
-// Purpose:   Integration tests against real Kafka (remote or docker-local)
+// File:      crates/archiver/tests/e2e/kafka.rs
+// Purpose:   E2E tests against real Kafka (remote or docker-local)
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used, clippy::doc_markdown)]
-
-//! Integration tests for Kafka transport.
-//!
-//! Supports dual-mode via `TEST_MODE` in `.env`:
-//! - `remote` — DevEx Kafka with SASL_SSL (default)
-//! - `docker` — dfe-docker Redpanda on localhost:19092 (PLAINTEXT)
-//!
-//! Run with: `cargo test --test kafka_test -- --ignored`
-
-mod common;
-
-use common::kafka_test_config;
+use crate::common::kafka_test_config;
+use crate::skip_if_no_kafka;
 use dfe_archiver::config::KafkaConfig;
 use dfe_archiver::io::TransportAdapter;
 

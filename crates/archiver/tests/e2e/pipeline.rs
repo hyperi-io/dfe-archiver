@@ -1,27 +1,13 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/e2e_test.rs
-// Purpose:   End-to-end test: produce to Kafka, archive to file, verify output
+// File:      crates/archiver/tests/e2e/pipeline.rs
+// Purpose:   E2E: produce to Kafka, archive to file, verify output
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used, clippy::panic)]
-
-//! End-to-end archiver pipeline tests.
-//!
-//! Produces messages to Kafka, runs the archiver pipeline, and verifies
-//! that messages are written to archive files on disk.
-//!
-//! Supports dual-mode via `TEST_MODE` in `.env`:
-//! - `remote` — devex Kafka with `SASL_SSL`
-//! - `docker` — dfe-docker Redpanda on `localhost:19092`
-//!
-//! Run with: `cargo test --test e2e_test -- --ignored`
-
-mod common;
-
-use common::{kafka_test_config, test_json_message, test_topic_name};
+use crate::common::{self, kafka_test_config, test_json_message, test_topic_name};
+use crate::skip_if_no_kafka;
 use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::{ArchiveConfig, KafkaConfig};
