@@ -1,3 +1,11 @@
+# [1.3.0-dev.10](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.9...v1.3.0-dev.10) (2026-03-25)
+
+
+### Bug Fixes
+
+* add SensitiveString, config registry, bump rustlib 1.19.6 ([74e8abc](https://github.com/hyperi-io/dfe-archiver/commit/74e8abcaa2974041073095fa80d3fdfe10daae16))
+* restructure tests to match HyperI testing standard ([6b94663](https://github.com/hyperi-io/dfe-archiver/commit/6b94663ffd1e75a33159bb636550c0b448641843))
+
 # [1.3.0-dev.9](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.8...v1.3.0-dev.9) (2026-03-22)
 
 
