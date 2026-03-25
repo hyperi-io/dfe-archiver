@@ -243,4 +243,111 @@ mod tests {
         assert!(!to_flush.is_empty());
         assert_eq!(to_flush[0].1, FlushReason::Size);
     }
+
+    #[test]
+    fn test_flush_by_records() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 3600,
+            flush_records: 3,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        manager.push("dest1", make_message(b"a"));
+        manager.push("dest1", make_message(b"b"));
+        manager.push("dest1", make_message(b"c"));
+
+        let to_flush = manager.check_flush();
+        assert!(!to_flush.is_empty());
+        assert_eq!(to_flush[0].1, FlushReason::Records);
+    }
+
+    #[test]
+    fn test_flush_by_age() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 0, // immediate age trigger
+            flush_records: 1_000_000,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        manager.push("dest1", make_message(b"hello"));
+
+        let to_flush = manager.check_flush();
+        assert!(!to_flush.is_empty());
+        assert_eq!(to_flush[0].1, FlushReason::Age);
+    }
+
+    #[test]
+    fn test_drain_all() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 3600,
+            flush_records: 1_000_000,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        manager.push("dest1", make_message(b"a"));
+        manager.push("dest2", make_message(b"b"));
+        manager.push("dest3", make_message(b"c"));
+
+        assert_eq!(manager.destination_count(), 3);
+        assert_eq!(manager.total_records(), 3);
+
+        let all = manager.drain_all();
+        assert_eq!(all.len(), 3);
+        assert_eq!(manager.total_records(), 0);
+        assert_eq!(manager.total_bytes(), 0);
+    }
+
+    #[test]
+    fn test_drain_nonexistent_destination() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 3600,
+            flush_records: 1_000_000,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        let result = manager.drain("nonexistent");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_flush_no_triggers() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 3600,
+            flush_records: 1_000_000,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        manager.push("dest1", make_message(b"small"));
+
+        let to_flush = manager.check_flush();
+        assert!(to_flush.is_empty(), "nothing should trigger flush");
+    }
+
+    #[test]
+    fn test_total_bytes_tracking() {
+        let config = BufferConfig {
+            flush_bytes: 1_000_000,
+            flush_age_secs: 3600,
+            flush_records: 1_000_000,
+            writer_parallelism: 4,
+        };
+
+        let manager = BufferManager::new(config);
+        manager.push("dest1", make_message(b"hello")); // 5 bytes
+        manager.push("dest1", make_message(b"world")); // 5 bytes
+        assert_eq!(manager.total_bytes(), 10);
+
+        manager.drain("dest1");
+        assert_eq!(manager.total_bytes(), 0);
+    }
 }

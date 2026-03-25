@@ -1,37 +1,14 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/azure_test.rs
-// Purpose:   Integration tests for Azure Blob storage backend
+// File:      crates/archiver/tests/e2e/azure.rs
+// Purpose:   E2E tests for Azure Blob storage backend
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::manual_let_else,
-    clippy::unused_async
-)]
-
-//! Integration tests for Azure Blob storage backend.
-//!
-//! These tests require Azure credentials via env vars or .env file.
-//!
-//! Setup:
-//! ```bash
-//! az login
-//! az storage account create --name dfearchivertest --resource-group hyperstack \
-//!   --location australiaeast --sku Standard_LRS
-//! az storage container create --name archive-test --account-name dfearchivertest --auth-mode login
-//! ```
-//!
-//! Run with:
-//! ```bash
-//! cargo test --test azure_test -- --ignored
-//! ```
-
-mod common;
-
+// Requires Azure credentials. Run with: cargo nextest run --test e2e -- --ignored
+#[allow(unused_imports)]
+use crate::common;
 use dfe_archiver::config::{ArchiveConfig, AzureConfig};
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
@@ -42,7 +19,9 @@ fn get_azure_config() -> Option<AzureConfig> {
     let account_name = env::var("AZURE_STORAGE_ACCOUNT").ok()?;
     Some(AzureConfig {
         account_name,
-        account_key: env::var("AZURE_STORAGE_KEY").ok(),
+        account_key: env::var("AZURE_STORAGE_KEY")
+            .ok()
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         sas_token: None,
         container: env::var("AZURE_CONTAINER").unwrap_or_else(|_| "archive-test".to_string()),
         use_emulator: false,

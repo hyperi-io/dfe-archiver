@@ -49,6 +49,9 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
 
     validate_config(&config)?;
 
+    // Register all sections in the config registry for /config endpoint
+    config.register_in_registry();
+
     Ok(config)
 }
 
@@ -169,9 +172,91 @@ mod tests {
     fn test_normalize_infers_sasl_mechanism() {
         let mut config = Config::default();
         config.kafka.sasl_username = Some("user".to_string());
-        config.kafka.sasl_password = Some("pass".to_string());
+        config.kafka.sasl_password = Some(
+            dfe_archiver_core::config::sensitive::SensitiveString::from("pass"),
+        );
         config.normalize();
 
         assert_eq!(config.kafka.sasl_mechanism, Some("PLAIN".to_string()));
+    }
+
+    #[test]
+    fn test_empty_group_id_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.kafka.group_id = String::new();
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_empty_destination_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.destination = String::new();
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_sasl_mechanism_without_credentials_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.kafka.sasl_mechanism = Some("PLAIN".to_string());
+        config.kafka.sasl_username = None;
+        config.kafka.sasl_password = None;
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_zero_flush_bytes_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.flush_bytes = 0;
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_pressure_threshold_out_of_range() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+
+        config.memory.pressure_threshold = 0.0;
+        assert!(validate_config(&config).is_err());
+
+        config.memory.pressure_threshold = 1.5;
+        assert!(validate_config(&config).is_err());
+
+        config.memory.pressure_threshold = 0.85;
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_multipart_chunk_size_too_small() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.multipart_chunk_size = 1024; // 1KB < 5MB minimum
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_codec_case_sensitive() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+
+        config.compression.codec = "Zstd".to_string();
+        assert!(
+            validate_config(&config).is_err(),
+            "uppercase Zstd should fail"
+        );
+
+        config.compression.codec = "GZIP".to_string();
+        assert!(
+            validate_config(&config).is_err(),
+            "uppercase GZIP should fail"
+        );
     }
 }

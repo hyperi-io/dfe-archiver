@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver"
-version = "1.3.0-dev.7"
+version = "1.3.0-dev.9"
 dependencies = [
  "chrono",
  "clap",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-core"
-version = "1.3.0-dev.7"
+version = "1.3.0-dev.9"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1185,7 +1185,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hyperi-rustlib",
- "lz4_flex 0.13.0",
+ "lz4_flex",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-io"
-version = "1.3.0-dev.7"
+version = "1.3.0-dev.9"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1904,9 +1904,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.18.0"
+version = "1.19.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "377def3725b50b182f6b8af0364439be6f2f3e5efb957ed2dbd17c796fe298bd"
+checksum = "acb8754cd4fee6c3abd0411728078648403a17a346c2b1f928a8ace530affb10"
 dependencies = [
  "async-trait",
  "axum",
@@ -1916,7 +1916,7 @@ dependencies = [
  "dotenvy",
  "figment",
  "libc",
- "lz4_flex 0.12.1",
+ "lz4_flex",
  "metrics",
  "metrics-exporter-prometheus",
  "owo-colors",
@@ -2318,15 +2318,6 @@ name = "lz4_flex"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
-dependencies = [
- "twox-hash",
-]
-
-[[package]]
-name = "lz4_flex"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9a0d582c2874f68138a16ce1867e0ffde6c0bb0a0df85e1f36d04146db488a"
 dependencies = [
  "twox-hash",
 ]

@@ -1,31 +1,15 @@
 // Project:   dfe-archiver
-// File:      crates/archiver/tests/gcs_test.rs
-// Purpose:   Integration tests for Google Cloud Storage backend
+// File:      crates/archiver/tests/e2e/gcs.rs
+// Purpose:   E2E tests for Google Cloud Storage backend
 // Language:  Rust
 //
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-#![allow(clippy::expect_used, clippy::panic, clippy::manual_let_else)]
+// Requires GCS credentials. Run with: cargo nextest run --test e2e -- --ignored
 
-//! Integration tests for Google Cloud Storage backend.
-//!
-//! These tests require GCS credentials via service account key or ADC.
-//!
-//! Setup:
-//! ```bash
-//! gcloud auth application-default login --project=hyperi-dfe
-//! gcloud storage buckets create gs://hyperi-dfe-archiver-test \
-//!   --location=australia-southeast1 --uniform-bucket-level-access
-//! ```
-//!
-//! Run with:
-//! ```bash
-//! cargo test --test gcs_test -- --ignored
-//! ```
-
-mod common;
-
+#[allow(unused_imports)]
+use crate::common;
 use dfe_archiver::config::{ArchiveConfig, GcsConfig};
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
@@ -38,7 +22,9 @@ fn get_gcs_config() -> Option<GcsConfig> {
     Some(GcsConfig {
         bucket,
         project_id: None,
-        service_account_key: env::var("GCS_SERVICE_ACCOUNT_KEY").ok(),
+        service_account_key: env::var("GCS_SERVICE_ACCOUNT_KEY")
+            .ok()
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         credentials_path: env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
     })
 }
