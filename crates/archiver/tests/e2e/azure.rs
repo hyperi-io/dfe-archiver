@@ -19,7 +19,9 @@ fn get_azure_config() -> Option<AzureConfig> {
     let account_name = env::var("AZURE_STORAGE_ACCOUNT").ok()?;
     Some(AzureConfig {
         account_name,
-        account_key: env::var("AZURE_STORAGE_KEY").ok(),
+        account_key: env::var("AZURE_STORAGE_KEY")
+            .ok()
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         sas_token: None,
         container: env::var("AZURE_CONTAINER").unwrap_or_else(|_| "archive-test".to_string()),
         use_emulator: false,

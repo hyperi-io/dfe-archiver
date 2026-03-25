@@ -22,7 +22,9 @@ fn get_gcs_config() -> Option<GcsConfig> {
     Some(GcsConfig {
         bucket,
         project_id: None,
-        service_account_key: env::var("GCS_SERVICE_ACCOUNT_KEY").ok(),
+        service_account_key: env::var("GCS_SERVICE_ACCOUNT_KEY")
+            .ok()
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         credentials_path: env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
     })
 }

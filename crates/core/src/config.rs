@@ -7,8 +7,10 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
+use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
+pub use hyperi_rustlib::config::sensitive;
 pub use hyperi_rustlib::scaling::ScalingPressureConfig;
 
 /// Root configuration for dfe-archiver.
@@ -79,8 +81,8 @@ pub struct KafkaConfig {
     /// SASL username
     pub sasl_username: Option<String>,
 
-    /// SASL password
-    pub sasl_password: Option<String>,
+    /// SASL password (never serialised in plaintext)
+    pub sasl_password: Option<SensitiveString>,
 
     /// Batch size for `recv()`
     pub batch_size: usize,
@@ -167,7 +169,7 @@ pub struct S3Config {
     pub region: Option<String>,
     pub endpoint: Option<String>,
     pub access_key_id: Option<String>,
-    pub secret_access_key: Option<String>,
+    pub secret_access_key: Option<SensitiveString>,
     pub bucket: String,
 }
 
@@ -175,7 +177,7 @@ pub struct S3Config {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GcsConfig {
     pub project_id: Option<String>,
-    pub service_account_key: Option<String>,
+    pub service_account_key: Option<SensitiveString>,
     pub credentials_path: Option<String>,
     pub bucket: String,
 }
@@ -184,8 +186,8 @@ pub struct GcsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AzureConfig {
     pub account_name: String,
-    pub account_key: Option<String>,
-    pub sas_token: Option<String>,
+    pub account_key: Option<SensitiveString>,
+    pub sas_token: Option<SensitiveString>,
     pub container: String,
     pub use_emulator: bool,
     pub endpoint: Option<String>,
@@ -196,7 +198,7 @@ pub struct AzureConfig {
 pub struct MinioConfig {
     pub endpoint: String,
     pub access_key: String,
-    pub secret_key: String,
+    pub secret_key: SensitiveString,
     pub bucket: String,
     pub use_ssl: bool,
 }
@@ -355,7 +357,7 @@ impl ApplyFlatEnv for Config {
             self.kafka.sasl_username = Some(v);
         }
         if let Some(v) = flat_env::flat_env_string_sensitive("KAFKA", "SASL_PASSWORD") {
-            self.kafka.sasl_password = Some(v);
+            self.kafka.sasl_password = Some(SensitiveString::from(v));
         }
 
         // Archive
@@ -401,7 +403,7 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_string_sensitive("S3", "SECRET_ACCESS_KEY") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
-            s3.secret_access_key = Some(v);
+            s3.secret_access_key = Some(SensitiveString::from(v));
         }
         if let Some(v) = flat_env::flat_env_string("S3", "ENDPOINT") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
@@ -420,5 +422,23 @@ impl Normalize for Config {
         {
             self.kafka.sasl_mechanism = Some("PLAIN".to_string());
         }
+    }
+}
+
+impl Config {
+    /// Register all config sections in the rustlib config registry.
+    ///
+    /// Enables the `/config` admin endpoint to dump effective config
+    /// (with automatic redaction of sensitive fields like `sasl_password`).
+    pub fn register_in_registry(&self) {
+        use hyperi_rustlib::config::registry;
+        registry::register("kafka", &self.kafka);
+        registry::register("archive", &self.archive);
+        registry::register("buffer", &self.buffer);
+        registry::register("memory", &self.memory);
+        registry::register("routing", &self.routing);
+        registry::register("metrics", &self.metrics);
+        registry::register("compression", &self.compression);
+        registry::register("scaling", &self.scaling);
     }
 }

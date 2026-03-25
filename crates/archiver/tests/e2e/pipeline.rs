@@ -28,7 +28,9 @@ fn build_kafka_config(topic: &str) -> KafkaConfig {
         topics: vec![topic.to_string()],
         sasl_mechanism: kf.sasl_mechanism,
         sasl_username: kf.sasl_user,
-        sasl_password: kf.sasl_password,
+        sasl_password: kf
+            .sasl_password
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         security_protocol: kf.security_protocol,
         batch_size: 100,
         ..Default::default()

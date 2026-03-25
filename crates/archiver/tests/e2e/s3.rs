@@ -24,7 +24,9 @@ fn get_s3_config() -> Option<S3Config> {
             .ok()
             .or(Some("ap-southeast-2".to_string())),
         access_key_id: env::var("S3_ACCESS_KEY_ID").ok(),
-        secret_access_key: env::var("S3_SECRET_ACCESS_KEY").ok(),
+        secret_access_key: env::var("S3_SECRET_ACCESS_KEY")
+            .ok()
+            .map(dfe_archiver::config::sensitive::SensitiveString::from),
         endpoint: env::var("S3_ENDPOINT").ok(),
     })
 }

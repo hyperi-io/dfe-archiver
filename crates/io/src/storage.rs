@@ -164,7 +164,7 @@ impl ObjectStoreBackend {
             builder = builder.with_access_key_id(key_id);
         }
         if let Some(ref secret) = config.secret_access_key {
-            builder = builder.with_secret_access_key(secret);
+            builder = builder.with_secret_access_key(secret.expose());
         }
 
         let store = builder
@@ -196,7 +196,7 @@ impl ObjectStoreBackend {
             .with_bucket_name(&config.bucket)
             .with_endpoint(&endpoint)
             .with_access_key_id(&config.access_key)
-            .with_secret_access_key(&config.secret_key)
+            .with_secret_access_key(config.secret_key.expose())
             .with_region("us-east-1") // MinIO doesn't care but object_store requires it
             .with_allow_http(!config.use_ssl);
 
@@ -232,7 +232,7 @@ impl ObjectStoreBackend {
         let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&config.bucket);
 
         if let Some(ref key) = config.service_account_key {
-            builder = builder.with_service_account_key(key);
+            builder = builder.with_service_account_key(key.expose());
         }
         if let Some(ref path) = config.credentials_path {
             builder = builder.with_service_account_path(path);
@@ -261,10 +261,10 @@ impl ObjectStoreBackend {
             .with_container_name(&config.container);
 
         if let Some(ref key) = config.account_key {
-            builder = builder.with_access_key(key);
+            builder = builder.with_access_key(key.expose());
         }
         if let Some(ref sas) = config.sas_token {
-            builder = builder.with_sas_authorization(parse_sas_pairs(sas));
+            builder = builder.with_sas_authorization(parse_sas_pairs(sas.expose()));
         }
         if config.use_emulator {
             builder = builder.with_use_emulator(true);
