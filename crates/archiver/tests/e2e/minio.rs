@@ -42,7 +42,9 @@ fn get_minio_config() -> MinioConfig {
         endpoint: env::var("MINIO_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string()),
         access_key: env::var("MINIO_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
-        secret_key: env::var("MINIO_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
+        secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
+            env::var("MINIO_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
+        ),
         bucket: env::var("MINIO_BUCKET").unwrap_or_else(|_| "archive-test".to_string()),
         use_ssl: false,
     }

@@ -49,6 +49,9 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
 
     validate_config(&config)?;
 
+    // Register all sections in the config registry for /config endpoint
+    config.register_in_registry();
+
     Ok(config)
 }
 
@@ -169,7 +172,9 @@ mod tests {
     fn test_normalize_infers_sasl_mechanism() {
         let mut config = Config::default();
         config.kafka.sasl_username = Some("user".to_string());
-        config.kafka.sasl_password = Some("pass".to_string());
+        config.kafka.sasl_password = Some(
+            dfe_archiver_core::config::sensitive::SensitiveString::from("pass"),
+        );
         config.normalize();
 
         assert_eq!(config.kafka.sasl_mechanism, Some("PLAIN".to_string()));
