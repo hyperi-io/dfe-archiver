@@ -18,6 +18,32 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
+### Migration & Release (Current Sprint)
+
+- [ ] [IN PROGRESS] A: Migrate to single versioning on main
+  - [ ] A1: Convert `.releaserc.json` -> `.releaserc.yaml` (branches: [main], remove @semantic-release/github, add missing releaseRules)
+  - [ ] A2: Update CI workflow (add tag input, pass to reusable workflow)
+  - [ ] A3: Fix VERSION + Cargo.toml versions -> 1.5.2
+  - [ ] A4: Create `.githooks/commit-msg`
+  - [ ] A5: Delete old `.releaserc.json`
+- [ ] B: Migrate to hyperi-rustlib >= 1.20.0
+  - [ ] B1: Bump version + cargo update
+  - [ ] B2: Fix compilation
+  - [ ] B3: Wire `shutdown::install_signal_handler()` (replace manual SIGTERM/SIGINT)
+  - [ ] B4: Register health checks via `HealthRegistry`
+  - [ ] B5: Add health + shutdown features to Cargo.toml
+  - [ ] B6: Verify clippy + tests
+- [ ] C: Code review (/review)
+- [ ] D: Commit, push, release
+  - [ ] D1: Single atomic commit
+  - [ ] D2: Push to main
+  - [ ] D3: Force-tag v1.5.2 to HEAD
+  - [ ] D4: Wait for CI green
+  - [ ] D5: Delete stale remote branches (release, merge-to-release)
+  - [ ] D6: Release v1.5.3 via hyperi-ci
+
+### Metrics Wiring (Deferred)
+
 - [ ] Wire compression metrics into ArchiveWriter (record_bytes_compressed, record_compression_duration at flush site)
 - [ ] Wire archive roll trigger metrics (record_archive_roll with "size"/"age" at roll decision point)
 - [ ] Wire record_file_closed with compressed_bytes at writer close
@@ -104,6 +130,10 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Single-binary test pattern (integration.rs + e2e.rs with #[path] submodules)
 - [x] Added 49 new unit tests (79 total, up from 30): writer, metrics, error, types, buffer, compression, routing, config, storage
 - [x] Mandatory smoke test: startup components + deployment contract
+- [x] rdkafka StatsContext sidecar consumer for broker/partition metrics (KafkaStatsEmitter)
+- [x] EPS (events per second) gauge for KEDA autoscaling
+- [x] gRPC transport metrics (auto-emitted via rustlib transport-grpc feature)
+- [x] Bumped hyperi-rustlib to >=1.19.7 (SensitiveString, config registry)
 
 ---
 
@@ -118,7 +148,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 ### Medium Priority
 
 - [x] Hot-reload config watcher
-- [ ] Update hyperi-ai submodule to latest
+- [x] Update hyperi-ai submodule to latest
 - [ ] Documentation review using /doco skill (audit docs against code reality)
 - [ ] Rebuild and retest with updated hyperi-ci (prod/test change separation)
 - [ ] DLQ producer for failed records

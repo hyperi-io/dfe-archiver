@@ -10,7 +10,8 @@ use compact_str::CompactString;
 use dfe_archiver_core::config::KafkaConfig;
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
-use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, Transport};
+use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
+use rdkafka::consumer::Consumer;
 use tracing::{debug, info};
 
 /// Transport adapter wrapping hyperi-rustlib Kafka transport
@@ -108,6 +109,104 @@ impl TransportAdapter {
             .await
             .map_err(|e| Error::Kafka(format!("close failed: {e}")))?;
         Ok(())
+    }
+}
+
+/// Sidecar consumer that collects rdkafka statistics via `StatsContext`
+/// and emits them as Prometheus metrics.
+///
+/// Creates a lightweight `BaseConsumer` with `statistics.interval.ms=5000`
+/// in a separate consumer group (`{group_id}-stats`). A background tokio
+/// task polls the consumer every 5s (triggering stats callbacks) and calls
+/// `emit_prometheus_metrics()` to push rdkafka internal stats to the global
+/// Prometheus recorder.
+///
+/// Emitted metrics (per DFE metrics standard, `rdkafka_` prefix):
+/// - `rdkafka_global_msg_cnt` / `rdkafka_global_msg_size_bytes`
+/// - `rdkafka_broker_rtt_avg_seconds{broker}` / `rdkafka_broker_outbuf_cnt{broker}`
+/// - `rdkafka_topic_partition_consumer_lag{topic,partition}`
+/// - `rdkafka_topic_partition_committed_offset{topic,partition}`
+/// - `rdkafka_consumer_rebalance_count`
+pub struct KafkaStatsEmitter {
+    consumer: std::sync::Arc<
+        rdkafka::consumer::BaseConsumer<hyperi_rustlib::transport::kafka::StatsContext>,
+    >,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl KafkaStatsEmitter {
+    /// Create a stats emitter for the given Kafka config.
+    ///
+    /// # Errors
+    /// Returns error if the sidecar consumer cannot be created.
+    pub fn new(config: &KafkaConfig) -> Result<Self> {
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::Consumer;
+
+        let stats_ctx = hyperi_rustlib::transport::kafka::StatsContext::new();
+
+        let mut client_config = ClientConfig::new();
+        client_config.set("bootstrap.servers", config.brokers.join(","));
+        // Separate group so this consumer doesn't steal partitions
+        client_config.set("group.id", format!("{}-stats", config.group_id));
+        client_config.set("security.protocol", &config.security_protocol);
+        client_config.set("statistics.interval.ms", "5000");
+        client_config.set("enable.auto.commit", "false");
+
+        if let Some(ref mechanism) = config.sasl_mechanism {
+            client_config.set("sasl.mechanism", mechanism);
+        }
+        if let Some(ref user) = config.sasl_username {
+            client_config.set("sasl.username", user);
+        }
+        if let Some(ref pass) = config.sasl_password {
+            client_config.set("sasl.password", pass.expose());
+        }
+
+        let consumer: rdkafka::consumer::BaseConsumer<
+            hyperi_rustlib::transport::kafka::StatsContext,
+        > = client_config
+            .create_with_context(stats_ctx)
+            .map_err(|e| Error::Kafka(format!("stats consumer creation failed: {e}")))?;
+
+        // Subscribe to same topics so we get partition-level lag stats
+        let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
+        consumer
+            .subscribe(&topic_refs)
+            .map_err(|e| Error::Kafka(format!("stats subscribe failed: {e}")))?;
+
+        let consumer = std::sync::Arc::new(consumer);
+
+        // Background task: poll consumer (triggers stats callbacks) then emit metrics
+        let consumer_bg = std::sync::Arc::clone(&consumer);
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                // poll triggers internal librdkafka callbacks including stats
+                let _ = consumer_bg.poll(std::time::Duration::from_millis(0));
+                consumer_bg.context().emit_prometheus_metrics();
+            }
+        });
+
+        info!("Kafka stats emitter started (statistics.interval.ms=5000)");
+
+        Ok(Self {
+            consumer,
+            _task: task,
+        })
+    }
+
+    /// Get the current metrics snapshot.
+    #[must_use]
+    pub fn get_metrics(&self) -> hyperi_rustlib::transport::kafka::KafkaMetrics {
+        self.consumer.context().get_metrics()
+    }
+
+    /// Get total consumer lag across all partitions.
+    #[must_use]
+    pub fn total_lag(&self) -> i64 {
+        hyperi_rustlib::transport::kafka::total_consumer_lag(&self.consumer.context().get_metrics())
     }
 }
 
