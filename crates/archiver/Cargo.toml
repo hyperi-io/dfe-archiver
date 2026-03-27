@@ -8,11 +8,7 @@
 
 [package]
 name = "dfe-archiver"
-<<<<<<< HEAD
 version = "1.5.2"
-=======
-version = "1.5.2"
->>>>>>> f322200 (fix: migrate single versioning, bump rustlib 1.20, add rdkafka stats + EPS)
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
 edition.workspace = true
 rust-version.workspace = true

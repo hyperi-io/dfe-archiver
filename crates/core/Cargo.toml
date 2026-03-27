@@ -8,11 +8,7 @@
 
 [package]
 name = "dfe-archiver-core"
-<<<<<<< HEAD
 version = "1.5.2"
-=======
-version = "1.5.2"
->>>>>>> f322200 (fix: migrate single versioning, bump rustlib 1.20, add rdkafka stats + EPS)
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
 edition.workspace = true
 rust-version.workspace = true
