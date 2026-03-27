@@ -1,3 +1,10 @@
+## [1.5.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.2...v1.5.3) (2026-03-27)
+
+
+### Bug Fixes
+
+* add claude code rules, skills, and MCP config ([b32a4dd](https://github.com/hyperi-io/dfe-archiver/commit/b32a4dd4f75e3dfcc470512005f30332bc6bae31))
+
 # [1.3.0-dev.10](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.9...v1.3.0-dev.10) (2026-03-25)
 
 
