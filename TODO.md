@@ -20,27 +20,16 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 ### Migration & Release (Current Sprint)
 
-- [ ] [IN PROGRESS] A: Migrate to single versioning on main
-  - [ ] A1: Convert `.releaserc.json` -> `.releaserc.yaml` (branches: [main], remove @semantic-release/github, add missing releaseRules)
-  - [ ] A2: Update CI workflow (add tag input, pass to reusable workflow)
-  - [ ] A3: Fix VERSION + Cargo.toml versions -> 1.5.2
-  - [ ] A4: Create `.githooks/commit-msg`
-  - [ ] A5: Delete old `.releaserc.json`
-- [ ] B: Migrate to hyperi-rustlib >= 1.20.0
-  - [ ] B1: Bump version + cargo update
-  - [ ] B2: Fix compilation
-  - [ ] B3: Wire `shutdown::install_signal_handler()` (replace manual SIGTERM/SIGINT)
-  - [ ] B4: Register health checks via `HealthRegistry`
-  - [ ] B5: Add health + shutdown features to Cargo.toml
-  - [ ] B6: Verify clippy + tests
-- [ ] C: Code review (/review)
-- [ ] D: Commit, push, release
-  - [ ] D1: Single atomic commit
-  - [ ] D2: Push to main
-  - [ ] D3: Force-tag v1.5.2 to HEAD
-  - [ ] D4: Wait for CI green
-  - [ ] D5: Delete stale remote branches (release, merge-to-release)
-  - [ ] D6: Release v1.5.3 via hyperi-ci
+- [x] A: Migrate to single versioning on main
+- [x] B: Migrate to hyperi-rustlib >= 1.20.0
+- [x] C: Code review (/review)
+- [ ] D: Commit, push, release `[IN PROGRESS]`
+  - [x] D1: Commits pushed to main
+  - [x] D2: Force-tag v1.5.2 to HEAD
+  - [x] D3: CI green, semantic-release created v1.5.3
+  - [x] D4: Deleted stale branches (merge-to-release, chore/merge-to-release, feat/config-refresh-env-prefix)
+  - [ ] D5: Publish dispatch for v1.5.3 (GH Release + R2) — CI running
+  - [ ] D6: Delete release branch (after publish succeeds)
 
 ### Metrics Wiring (Deferred)
 
@@ -134,6 +123,11 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] EPS (events per second) gauge for KEDA autoscaling
 - [x] gRPC transport metrics (auto-emitted via rustlib transport-grpc feature)
 - [x] Bumped hyperi-rustlib to >=1.19.7 (SensitiveString, config registry)
+- [x] Migrated to single versioning on main (no release branch)
+- [x] Migrated to hyperi-rustlib >= 1.20.0 (transport trait split, shutdown, health)
+- [x] Unified shutdown via `shutdown::install_signal_handler()` (replaced manual SIGTERM/SIGINT)
+- [x] HealthRegistry integration for /readyz (kafka transport health check)
+- [x] v1.5.3 released
 
 ---
 
