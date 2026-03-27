@@ -1,3 +1,9 @@
+## [1.5.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.2...v1.5.3) (2026-03-27)
+
+
+### Bug Fixes
+
+
 # [1.3.0-dev.10](https://github.com/hyperi-io/dfe-archiver/compare/v1.3.0-dev.9...v1.3.0-dev.10) (2026-03-25)
 
 
