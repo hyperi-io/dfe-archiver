@@ -9,7 +9,7 @@
 pub mod kafka;
 pub mod storage;
 
-pub use kafka::TransportAdapter;
+pub use kafka::{KafkaStatsEmitter, TransportAdapter};
 pub use storage::{FileBackend, ObjectStoreBackend, create_backend};
 
 #[cfg(any(test, feature = "transport-memory"))]

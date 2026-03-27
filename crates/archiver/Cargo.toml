@@ -8,7 +8,11 @@
 
 [package]
 name = "dfe-archiver"
-version = "1.3.0-dev.10"
+<<<<<<< HEAD
+version = "1.5.2"
+=======
+version = "1.5.2"
+>>>>>>> f322200 (fix: migrate single versioning, bump rustlib 1.20, add rdkafka stats + EPS)
 description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
 edition.workspace = true
 rust-version.workspace = true
@@ -34,7 +38,7 @@ dfe-archiver-io = { workspace = true }
 hyperi-rustlib = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "metrics-dfe",
     "transport-kafka", "http-server", "tiered-sink", "spool",
-    "scaling", "deployment", "cli", "memory",
+    "scaling", "deployment", "cli", "memory", "health", "shutdown",
 ] }
 
 # Async

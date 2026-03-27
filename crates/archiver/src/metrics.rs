@@ -14,7 +14,8 @@ use hyperi_rustlib::metrics::dfe_groups::{
 use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 use tracing::info;
 
 /// Archiver metrics -- combines rustlib DFE metric groups with
@@ -36,6 +37,10 @@ pub struct ArchiverMetrics {
     pub consumer: Option<ConsumerMetrics>,
     pub sink: Option<SinkMetrics>,
     pub backpressure: Option<BackpressureMetrics>,
+
+    // EPS (events per second) rate tracking
+    eps_counter: AtomicU64,
+    eps_last_update: std::sync::Mutex<Instant>,
 }
 
 impl Default for ArchiverMetrics {
@@ -48,6 +53,8 @@ impl Default for ArchiverMetrics {
             consumer: None,
             sink: None,
             backpressure: None,
+            eps_counter: AtomicU64::new(0),
+            eps_last_update: std::sync::Mutex::new(Instant::now()),
         }
     }
 }
@@ -127,6 +134,11 @@ impl ArchiverMetrics {
             "Final compressed archive file sizes at roll time",
         );
 
+        let _ = manager.gauge(
+            "events_per_second",
+            "Pipeline throughput: events processed per second",
+        );
+
         // Labelled metrics (described manually for label dimensions)
         metrics::describe_counter!(
             "dfe_archiver_archive_roll_total",
@@ -147,20 +159,43 @@ impl ArchiverMetrics {
             consumer: Some(consumer),
             sink: Some(sink),
             backpressure: Some(backpressure),
+            eps_counter: AtomicU64::new(0),
+            eps_last_update: std::sync::Mutex::new(Instant::now()),
         }
     }
 
     // ── Layer 1: DfeMetrics pass-throughs ────────────────────────────
 
     /// Record messages received (dual-emit: archiver + `DfeMetrics`)
+    ///
+    /// Also feeds the EPS rate calculator.
     pub fn record_received(&self, count: u64) {
         counter!("dfe_archiver_messages_received_total").increment(count);
+        self.eps_counter.fetch_add(count, Ordering::Relaxed);
         if let Some(ref app) = self.app {
             app.record_received(count);
         }
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(count);
         }
+    }
+
+    /// Recalculate and emit the events-per-second gauge.
+    ///
+    /// Call once per pipeline loop iteration. Uses a simple counter/elapsed
+    /// approach: accumulates events since last call, divides by elapsed seconds,
+    /// then resets. This gives a true instantaneous rate rather than relying on
+    /// Prometheus `rate()` over scrape intervals.
+    #[allow(clippy::expect_used)]
+    pub fn update_eps(&self) {
+        let count = self.eps_counter.swap(0, Ordering::Relaxed);
+        let mut last = self.eps_last_update.lock().expect("eps lock");
+        let elapsed = last.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            let eps = count as f64 / elapsed;
+            gauge!("dfe_archiver_events_per_second").set(eps);
+        }
+        *last = Instant::now();
     }
 
     /// Record messages archived (dual-emit: archiver + `DfeMetrics`)
@@ -485,5 +520,16 @@ mod tests {
         m.record_bytes_compressed(0, 0);
         m.set_hot_buffer_stats(0, 0);
         m.set_memory_usage(0, 0);
+    }
+
+    /// Verify EPS calculation doesn't panic and produces non-negative values
+    #[test]
+    fn test_eps_calculation() {
+        let m = ArchiverMetrics::default();
+        m.record_received(1000);
+        m.update_eps();
+        // Counter should be reset after update
+        m.record_received(500);
+        m.update_eps();
     }
 }

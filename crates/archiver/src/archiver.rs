@@ -25,8 +25,8 @@ use dfe_archiver_core::compression::create_compressor;
 use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
-use dfe_archiver_io::TransportAdapter;
 use dfe_archiver_io::storage::create_backend;
+use dfe_archiver_io::{KafkaStatsEmitter, TransportAdapter};
 use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
@@ -62,6 +62,8 @@ pub struct Archiver {
     scaling: ScalingPressure,
     /// Cgroup-aware memory guard for backpressure
     memory_guard: MemoryGuard,
+    /// rdkafka stats emitter (sidecar consumer for broker/partition metrics)
+    _stats_emitter: Option<KafkaStatsEmitter>,
 }
 
 impl Archiver {
@@ -106,6 +108,15 @@ impl Archiver {
 
         let memory_guard = MemoryGuard::new(MemoryGuardConfig::from_env("DFE_ARCHIVER"));
 
+        // Start rdkafka stats sidecar (non-fatal if it fails)
+        let stats_emitter = match KafkaStatsEmitter::new(&config.kafka) {
+            Ok(emitter) => Some(emitter),
+            Err(e) => {
+                warn!(error = %e, "Failed to start Kafka stats emitter (non-fatal)");
+                None
+            }
+        };
+
         info!(
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
@@ -124,6 +135,7 @@ impl Archiver {
             cancel: CancellationToken::new(),
             scaling,
             memory_guard,
+            _stats_emitter: stats_emitter,
         })
     }
 
@@ -201,6 +213,7 @@ impl Archiver {
             }
 
             self.process_messages(messages).await;
+            self.metrics.update_eps();
         }
     }
 
@@ -440,6 +453,17 @@ impl Archiver {
     pub async fn is_healthy(&self) -> bool {
         let transport = self.transport.lock().await;
         transport.is_healthy() && !self.memory_guard.under_pressure()
+    }
+
+    /// Sync transport health check (for `HealthRegistry` callback).
+    ///
+    /// Uses `try_lock` to avoid blocking — returns true if lock is
+    /// contended (transport is actively being used, therefore healthy).
+    pub fn is_transport_healthy(&self) -> bool {
+        match self.transport.try_lock() {
+            Ok(transport) => transport.is_healthy(),
+            Err(_) => true, // Lock held = transport in active use
+        }
     }
 }
 

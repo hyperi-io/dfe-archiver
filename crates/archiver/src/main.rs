@@ -163,6 +163,19 @@ impl DfeApp for App {
             .await
             .map_err(|e| CliError::Service(e.to_string()))?;
 
+        // Register health checks
+        let archiver_health = Arc::clone(&archiver);
+        hyperi_rustlib::health::HealthRegistry::register("kafka", move || {
+            if archiver_health.is_transport_healthy() {
+                hyperi_rustlib::health::HealthStatus::Healthy
+            } else {
+                hyperi_rustlib::health::HealthStatus::Unhealthy
+            }
+        });
+
+        // Install unified shutdown handler (SIGTERM + SIGINT)
+        let shutdown_token = hyperi_rustlib::shutdown::install_signal_handler();
+
         // Mark pipeline ready
         archiver.metrics().set_pipeline_ready(true);
         info!("dfe-archiver ready");
@@ -174,15 +187,8 @@ impl DfeApp for App {
             }
         });
 
-        // Wait for SIGTERM (K8s) or SIGINT (Ctrl+C)
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map_err(|e| CliError::Service(format!("SIGTERM handler failed: {e}")))?;
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
-        }
-
+        // Wait for shutdown signal
+        shutdown_token.cancelled().await;
         info!("Shutdown signal received");
 
         // Signal shutdown and wait for drain
