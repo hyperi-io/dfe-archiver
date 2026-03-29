@@ -1,3 +1,15 @@
+# [1.6.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.3...v1.6.0) (2026-03-29)
+
+
+### Bug Fixes
+
+* wire compression, roll, close, and sink metrics into pipeline ([fb52298](https://github.com/hyperi-io/dfe-archiver/commit/fb52298353efa8111554afb46a1024649d82df37))
+
+
+### Features
+
+* add DLQ support via rustlib dlq module ([091abe4](https://github.com/hyperi-io/dfe-archiver/commit/091abe41098e66325dfcda03e2777682f5ffaa58))
+
 ## [1.5.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.2...v1.5.3) (2026-03-27)
 
 
