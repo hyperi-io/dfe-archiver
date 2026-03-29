@@ -18,12 +18,7 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-### Metrics Wiring
-
-- [ ] Wire compression metrics into ArchiveWriter (record_bytes_compressed, record_compression_duration at flush site)
-- [ ] Wire archive roll trigger metrics (record_archive_roll with "size"/"age" at roll decision point)
-- [ ] Wire record_file_closed with compressed_bytes at writer close
-- [ ] Wire record_sink_duration with backend label at storage write site
+No active tasks.
 
 ---
 
@@ -67,7 +62,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 4. [x] Graceful shutdown with buffer drain
 5. [x] Memory pressure handling (MemoryGuard with cgroup-aware backpressure)
 6. [x] DFE metrics standard adoption (metric groups, archiver-specific metrics)
-7. [ ] DLQ support for failed messages
+7. [x] DLQ support for failed messages (rustlib dlq module, file-only mode)
 
 ### Phase 4: Performance Optimization
 
@@ -115,6 +110,8 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 - [x] Unified shutdown via `shutdown::install_signal_handler()` (replaced manual SIGTERM/SIGINT)
 - [x] HealthRegistry integration for /readyz (kafka transport health check)
 - [x] v1.5.3 released
+- [x] Metrics wiring: compression duration/bytes, archive roll triggers, file close sizes, sink duration with backend label
+- [x] DLQ support via rustlib dlq module (file-only, cascade to Kafka configurable)
 
 ---
 
@@ -130,9 +127,9 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 - [x] Hot-reload config watcher
 - [x] Update hyperi-ai submodule to latest
-- [ ] Documentation review using /doco skill (audit docs against code reality)
+- [x] Documentation review using /doco skill
+- [x] DLQ producer for failed records
 - [ ] Rebuild and retest with updated hyperi-ci (prod/test change separation)
-- [ ] DLQ producer for failed records
 - [ ] Rate limiting/backpressure
 
 ### Low Priority
