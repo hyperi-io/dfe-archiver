@@ -146,6 +146,27 @@ pub struct ArchiveConfig {
     pub minio: Option<MinioConfig>,
 }
 
+impl ArchiveConfig {
+    /// Derive the storage backend name from the destination URL scheme.
+    ///
+    /// Used as the `backend` label on sink metrics.
+    #[must_use]
+    pub fn backend_name(&self) -> &'static str {
+        if self.destination.starts_with("s3://") {
+            "s3"
+        } else if self.destination.starts_with("gs://") || self.destination.starts_with("gcs://") {
+            "gcs"
+        } else if self.destination.starts_with("az://") || self.destination.starts_with("azure://")
+        {
+            "azure"
+        } else if self.minio.is_some() {
+            "minio"
+        } else {
+            "file"
+        }
+    }
+}
+
 impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {

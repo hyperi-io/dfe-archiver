@@ -18,20 +18,7 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-### Migration & Release (Current Sprint)
-
-- [x] A: Migrate to single versioning on main
-- [x] B: Migrate to hyperi-rustlib >= 1.20.0
-- [x] C: Code review (/review)
-- [ ] D: Commit, push, release `[IN PROGRESS]`
-  - [x] D1: Commits pushed to main
-  - [x] D2: Force-tag v1.5.2 to HEAD
-  - [x] D3: CI green, semantic-release created v1.5.3
-  - [x] D4: Deleted stale branches (merge-to-release, chore/merge-to-release, feat/config-refresh-env-prefix)
-  - [ ] D5: Publish dispatch for v1.5.3 (GH Release + R2) — CI running
-  - [ ] D6: Delete release branch (after publish succeeds)
-
-### Metrics Wiring (Deferred)
+### Metrics Wiring
 
 - [ ] Wire compression metrics into ArchiveWriter (record_bytes_compressed, record_compression_duration at flush site)
 - [ ] Wire archive roll trigger metrics (record_archive_roll with "size"/"age" at roll decision point)
