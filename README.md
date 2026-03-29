@@ -15,7 +15,7 @@ High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 ## Features
 
 - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
-- **Compression**: Zstd (default), LZ4, Snappy, Gzip
+- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none
 - **Smart routing**: By topic or JSON field expressions (e.g., `org_id`)
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
 - **At-least-once delivery**: Kafka offset commit only after successful archive write
@@ -30,6 +30,14 @@ Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
   Batch recv      Per-dest       Compressed       File/S3/GCS/
   (10K msgs)      buffering      rolling files    Azure/MinIO
 ```
+
+### Workspace Structure
+
+The project is a Rust workspace with three crates:
+
+- **`crates/core`** — Types, configuration, compression codecs, buffer manager, routing, archive writer
+- **`crates/io`** — Kafka transport adapter, storage backends (File, S3, GCS, Azure, MinIO)
+- **`crates/archiver`** — Binary entry point, pipeline orchestrator, metrics, CLI, deployment contract
 
 ### Tiered Buffer Design
 
@@ -124,6 +132,25 @@ metrics:
   address: 0.0.0.0:9090
 ```
 
+### Hot-Reload Configuration
+
+The archiver supports hot-reloading configuration without restart via SIGHUP
+or file polling (5-second interval).
+
+**Hot-reloaded (takes effect on next batch):**
+- `kafka.batch_size`
+- `buffer.flush_bytes`, `buffer.flush_age_secs`, `buffer.flush_records`
+- `memory.limit_bytes`, `memory.pressure_threshold`
+- `scaling.enabled`, `scaling.memory_gate_threshold`
+- `archive.roll_size_bytes`, `archive.roll_interval_secs`
+
+**Requires pod restart:**
+- `kafka.*` (except `batch_size`) — transport connection established at startup
+- `archive.destination`, `archive.path_template`, `archive.s3/gcs/azure/minio`
+- `routing.*` — archive path structure must be atomic
+- `compression.*` — file format consistency across rolling set
+- `metrics.*` — HTTP server binds at startup
+
 ## Storage Backends
 
 ### Local File
@@ -189,57 +216,60 @@ When limits are exceeded, `push()` returns an error (backpressure), causing Kafk
 
 ## Metrics
 
-Prometheus metrics are exposed at `/metrics`:
+Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dfe_archiver_messages_received_total` | Counter | Messages received from Kafka |
-| `dfe_archiver_messages_archived_total` | Counter | Messages successfully archived |
-| `dfe_archiver_bytes_written_total` | Counter | Uncompressed bytes written |
-| `dfe_archiver_bytes_compressed_total` | Counter | Compressed bytes written |
-| `dfe_archiver_files_created_total` | Counter | Archive files created |
-| `dfe_archiver_files_closed_total` | Counter | Archive files closed (rolled) |
-| `dfe_archiver_disk_pressure_events_total` | Counter | Backpressure events |
-| `dfe_archiver_buffer_bytes` | Gauge | Current buffer size |
-| `dfe_archiver_kafka_lag` | Gauge | Consumer lag |
-| `dfe_archiver_hot_buffers_active` | Gauge | Active hot buffers |
-| `dfe_archiver_spool_bytes` | Gauge | Current spool size |
+**Platform** (`dfe_*`): `records_received_total`, `records_delivered_total`, `transport_sent_total`, `scaling_pressure` — auto-emitted by rustlib.
 
-Health endpoints:
-- `/healthz` - Liveness probe
-- `/readyz` - Readiness probe
+**Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend), `BackpressureMetrics`.
+
+**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`.
+
+**rdkafka stats** (`rdkafka_*`): `broker_rtt_avg_seconds{broker}`, `topic_partition_consumer_lag{topic,partition}`, `consumer_rebalance_count` — collected via sidecar `StatsContext` consumer.
+
+**Health endpoints:** `/healthz` (liveness), `/readyz` (readiness via `HealthRegistry`)
 
 ## Development
 
 ### Prerequisites
 
-- Rust 1.94+
-- Docker (for local testing)
+- Rust 1.94+ (edition 2024)
+- Docker (for local Kafka via `dfe-docker`)
+- `hyperi-ci` for CI validation
 
-### Local Testing
+### Testing
 
 ```bash
-# Start local Kafka + MinIO
-docker compose -f docker-compose.dev.yaml up -d
-
-# Run tests
+# Unit + integration tests (no external services)
 cargo nextest run
 
-# Run with local services
-cargo run -- --config config.dev.yaml
+# E2E tests against Docker-local Kafka
+TEST_MODE=docker cargo nextest run -- --ignored
+
+# E2E tests against remote devex Kafka
+TEST_MODE=remote cargo nextest run -- --ignored
+
+# Pre-push validation
+hyperi-ci check
 ```
 
 ### Building
 
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
 cargo build --release
 
 # With specific allocator
 cargo build --release --features mimalloc
+```
+
+### CLI Commands
+
+```bash
+dfe-archiver                      # Run the archiver service
+dfe-archiver --config config.yaml # With explicit config
+dfe-archiver emit-contract        # Print deployment contract JSON
+dfe-archiver emit-dockerfile      # Generate Dockerfile
+dfe-archiver emit-helm chart/     # Generate Helm chart
+dfe-archiver version              # Version info
 ```
 
 ## License
