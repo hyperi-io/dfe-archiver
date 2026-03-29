@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "chrono",
  "clap",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-core"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-io"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1400,6 +1400,16 @@ dependencies = [
  "toml 0.8.23",
  "uncased",
  "version_check",
+]
+
+[[package]]
+name = "file-rotate"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8e2fa049328a1f3295991407a88585805d126dfaadf74b9fe8c194c730aafc"
+dependencies = [
+ "chrono",
+ "flate2",
 ]
 
 [[package]]
@@ -1911,11 +1921,13 @@ checksum = "4b8dc89125f702eb17fae7ab778ea34888432cc0ed719b6da31f4c036ad1a7ae"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "dirs",
  "dotenvy",
  "figment",
+ "file-rotate",
  "libc",
  "lz4_flex",
  "metrics",
