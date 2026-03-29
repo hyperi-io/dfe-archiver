@@ -11,6 +11,7 @@ use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 pub use hyperi_rustlib::config::sensitive;
+pub use hyperi_rustlib::dlq::DlqConfig;
 pub use hyperi_rustlib::scaling::ScalingPressureConfig;
 
 /// Root configuration for dfe-archiver.
@@ -57,6 +58,9 @@ pub struct Config {
 
     /// Scaling pressure configuration for KEDA autoscaling
     pub scaling: ScalingPressureConfig,
+
+    /// Dead letter queue configuration
+    pub dlq: DlqConfig,
 }
 
 /// Kafka consumer configuration

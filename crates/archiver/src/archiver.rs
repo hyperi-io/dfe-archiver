@@ -64,6 +64,8 @@ pub struct Archiver {
     memory_guard: MemoryGuard,
     /// rdkafka stats emitter (sidecar consumer for broker/partition metrics)
     _stats_emitter: Option<KafkaStatsEmitter>,
+    /// Dead letter queue for failed messages
+    dlq: Arc<hyperi_rustlib::dlq::Dlq>,
 }
 
 impl Archiver {
@@ -117,6 +119,13 @@ impl Archiver {
             }
         };
 
+        // Create DLQ (file-only mode — cascade to Kafka is optional via config)
+        let dlq = hyperi_rustlib::dlq::Dlq::file_only(&config.dlq, "dfe-archiver")
+            .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
+        if config.dlq.enabled {
+            info!(mode = ?config.dlq.mode, "DLQ enabled");
+        }
+
         info!(
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
@@ -136,6 +145,7 @@ impl Archiver {
             scaling,
             memory_guard,
             _stats_emitter: stats_emitter,
+            dlq: Arc::new(dlq),
         })
     }
 
@@ -255,6 +265,7 @@ impl Archiver {
                                 "Failed to write batch"
                             );
                             self.metrics.record_error();
+                            self.send_to_dlq(&batch.destination, &batch.data, &e).await;
                             continue;
                         }
 
@@ -283,6 +294,7 @@ impl Archiver {
                         "Failed to write aged batch"
                     );
                     self.metrics.record_error();
+                    self.send_to_dlq(&batch.destination, &batch.data, &e).await;
                 } else {
                     offsets_to_commit.extend(batch.offsets);
                 }
@@ -469,6 +481,34 @@ impl Archiver {
 
         info!("Drain complete");
         Ok(())
+    }
+
+    /// Route failed batch data to the dead letter queue.
+    ///
+    /// Non-fatal: logs and records metrics on DLQ failure but does not
+    /// propagate the error (the original write error is the primary concern).
+    async fn send_to_dlq(&self, destination: &str, data: &[u8], error: &Error) {
+        if !self.dlq.is_enabled() {
+            return;
+        }
+
+        let entry = hyperi_rustlib::dlq::DlqEntry::new(
+            "dfe-archiver",
+            format!("storage_write_failed: {error}"),
+            data.to_vec(),
+        )
+        .with_destination(destination);
+
+        if let Err(dlq_err) = self.dlq.send(entry).await {
+            error!(error = %dlq_err, destination, "DLQ send also failed");
+        } else {
+            self.metrics.record_dlq(1);
+            hyperi_rustlib::logger::security::record_dlq(
+                "storage_write_failed",
+                &error.to_string(),
+                Some(destination),
+            );
+        }
     }
 
     /// Get metrics handle
