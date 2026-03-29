@@ -14,6 +14,26 @@ use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
+/// Stats returned from a flush operation (for metrics wiring)
+#[derive(Debug, Clone)]
+pub struct FlushStats {
+    /// Bytes after compression
+    pub compressed_bytes: u64,
+    /// Bytes before compression
+    pub uncompressed_bytes: u64,
+    /// Time spent in the compressor
+    pub compression_duration_secs: f64,
+}
+
+/// Stats returned from a roll/close operation (for metrics wiring)
+#[derive(Debug, Clone)]
+pub struct CloseStats {
+    /// Total compressed bytes in the closed file
+    pub compressed_bytes: u64,
+    /// Roll trigger reason (None for explicit close, Some for automatic roll)
+    pub trigger: Option<&'static str>,
+}
+
 /// Rolling policy for archive files
 #[derive(Debug, Clone)]
 pub struct RollingPolicy {
@@ -73,11 +93,13 @@ impl ArchiveWriter {
         }
     }
 
-    /// Write data to archive
-    pub async fn write(&mut self, data: &[u8]) -> Result<()> {
-        if self.should_roll() {
-            self.roll().await?;
-        }
+    /// Write data to archive. Returns `CloseStats` if a roll occurred.
+    pub async fn write(&mut self, data: &[u8]) -> Result<Option<CloseStats>> {
+        let roll_stats = if let Some(trigger) = self.should_roll() {
+            self.roll(trigger).await?
+        } else {
+            None
+        };
 
         if self.state.is_none() {
             self.open_new_file().await?;
@@ -91,52 +113,58 @@ impl ArchiveWriter {
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
         }
 
-        Ok(())
+        Ok(roll_stats)
     }
 
-    /// Write a single record (adds newline)
-    pub async fn write_record(&mut self, record: &[u8]) -> Result<()> {
-        self.write(record).await?;
-        self.write(b"\n").await?;
+    /// Write a single record (adds newline). Returns `CloseStats` if a roll occurred.
+    pub async fn write_record(&mut self, record: &[u8]) -> Result<Option<CloseStats>> {
+        let roll1 = self.write(record).await?;
+        let roll2 = self.write(b"\n").await?;
 
         if let Some(ref state) = self.state {
             state.records_written.fetch_add(1, Ordering::Relaxed);
         }
 
-        Ok(())
+        Ok(roll1.or(roll2))
     }
 
-    /// Flush buffer to storage
-    pub async fn flush(&mut self) -> Result<()> {
+    /// Flush buffer to storage. Returns compression stats if data was written.
+    pub async fn flush(&mut self) -> Result<Option<FlushStats>> {
         if self.buffer.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
+        let uncompressed_len = self.buffer.len() as u64;
+        let compress_start = std::time::Instant::now();
         let compressed = self.compressor.compress(&self.buffer)?;
+        let compression_duration = compress_start.elapsed().as_secs_f64();
+        let compressed_len = compressed.len() as u64;
 
         if let Some(ref state) = self.state {
             self.storage.append(&state.path, &compressed).await?;
             state
                 .compressed_bytes
-                .fetch_add(compressed.len() as u64, Ordering::Relaxed);
+                .fetch_add(compressed_len, Ordering::Relaxed);
             debug!(
                 path = %state.path,
-                uncompressed = self.buffer.len(),
-                compressed = compressed.len(),
+                uncompressed = uncompressed_len,
+                compressed = compressed_len,
                 total_file_size = state.compressed_bytes.load(Ordering::Relaxed),
                 "Flushed buffer to storage"
             );
         }
 
         self.buffer.clear();
-        Ok(())
+        Ok(Some(FlushStats {
+            compressed_bytes: compressed_len,
+            uncompressed_bytes: uncompressed_len,
+            compression_duration_secs: compression_duration,
+        }))
     }
 
-    /// Check if file should be rolled (based on final compressed file size)
-    fn should_roll(&self) -> bool {
-        let Some(ref state) = self.state else {
-            return false;
-        };
+    /// Check if file should be rolled. Returns the trigger reason if so.
+    fn should_roll(&self) -> Option<&'static str> {
+        let state = self.state.as_ref()?;
 
         let file_size = state.compressed_bytes.load(Ordering::Relaxed);
         if file_size >= self.policy.max_size_bytes {
@@ -145,7 +173,7 @@ impl ArchiveWriter {
                 max = self.policy.max_size_bytes,
                 "Rolling: final file size exceeded"
             );
-            return true;
+            return Some("size");
         }
 
         let age = Utc::now().signed_duration_since(state.created_at);
@@ -156,28 +184,37 @@ impl ArchiveWriter {
                 max = self.policy.max_age_secs,
                 "Rolling: age exceeded"
             );
-            return true;
+            return Some("age");
         }
 
-        false
+        None
     }
 
-    /// Roll to a new file
-    async fn roll(&mut self) -> Result<()> {
+    /// Roll to a new file. Returns stats for the closed file.
+    async fn roll(&mut self, trigger: &'static str) -> Result<Option<CloseStats>> {
         self.flush().await?;
 
-        if let Some(state) = self.state.take() {
+        let close_stats = if let Some(state) = self.state.take() {
+            let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
             self.storage.close(&state.path).await?;
             info!(
                 path = %state.path,
-                file_size = state.compressed_bytes.load(Ordering::Relaxed),
+                file_size = compressed_bytes,
                 uncompressed = state.uncompressed_bytes.load(Ordering::Relaxed),
                 records = state.records_written.load(Ordering::Relaxed),
+                trigger,
                 "Closed archive file"
             );
-        }
+            Some(CloseStats {
+                compressed_bytes,
+                trigger: Some(trigger),
+            })
+        } else {
+            None
+        };
 
-        self.open_new_file().await
+        self.open_new_file().await?;
+        Ok(close_stats)
     }
 
     /// Open a new archive file
@@ -222,22 +259,29 @@ impl ArchiveWriter {
         }
     }
 
-    /// Close the writer
-    pub async fn close(&mut self) -> Result<()> {
+    /// Close the writer. Returns stats for the closed file (if any was open).
+    pub async fn close(&mut self) -> Result<Option<CloseStats>> {
         self.flush().await?;
 
-        if let Some(state) = self.state.take() {
+        let close_stats = if let Some(state) = self.state.take() {
+            let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
             self.storage.close(&state.path).await?;
             info!(
                 path = %state.path,
-                file_size = state.compressed_bytes.load(Ordering::Relaxed),
+                file_size = compressed_bytes,
                 uncompressed = state.uncompressed_bytes.load(Ordering::Relaxed),
                 records = state.records_written.load(Ordering::Relaxed),
                 "Closed archive writer"
             );
-        }
+            Some(CloseStats {
+                compressed_bytes,
+                trigger: None,
+            })
+        } else {
+            None
+        };
 
-        Ok(())
+        Ok(close_stats)
     }
 
     /// Expose `generate_path` for testing
@@ -248,7 +292,7 @@ impl ArchiveWriter {
 
     /// Expose `should_roll` for testing
     #[cfg(test)]
-    pub fn test_should_roll(&self) -> bool {
+    pub fn test_should_roll(&self) -> Option<&'static str> {
         self.should_roll()
     }
 }
@@ -425,9 +469,9 @@ mod tests {
     }
 
     #[test]
-    fn test_should_roll_false_when_no_state() {
+    fn test_should_roll_none_when_no_state() {
         let (writer, _) = test_writer(RollingPolicy::default(), "none");
-        assert!(!writer.test_should_roll());
+        assert!(writer.test_should_roll().is_none());
     }
 
     #[tokio::test]

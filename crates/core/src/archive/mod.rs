@@ -8,4 +8,4 @@
 
 mod writer;
 
-pub use writer::{ArchiveWriter, RollingPolicy};
+pub use writer::{ArchiveWriter, CloseStats, FlushStats, RollingPolicy};

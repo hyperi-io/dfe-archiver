@@ -23,16 +23,13 @@ git-fetch-with-cli = true
 # Uncomment if mold is installed:
 # rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
-# Limit parallel jobs to avoid overwhelming the system
-jobs = 2
-
 # =============================================================================
 # TARGET-SPECIFIC SETTINGS
 # =============================================================================
 
 [target.x86_64-unknown-linux-gnu]
 # Enable frame pointers for profiling
-rustflags = ["-C", "force-frame-pointers=yes"]
+rustflags = ["-C", "force-frame-pointers=yes", "-C", "link-arg=-fuse-ld=mold"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "force-frame-pointers=yes"]

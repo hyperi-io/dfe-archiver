@@ -356,22 +356,42 @@ impl Archiver {
                 .ok_or_else(|| Error::Storage("writer not found after insert".to_string()))?
         };
 
-        writer.write(&batch.data).await?;
-        writer.flush().await?;
+        // Write data (may trigger a roll)
+        if let Some(close_stats) = writer.write(&batch.data).await? {
+            if let Some(trigger) = close_stats.trigger {
+                self.metrics.record_archive_roll(trigger);
+            }
+            self.metrics
+                .record_file_closed(close_stats.compressed_bytes);
+        }
+
+        // Flush buffer to storage (returns compression stats)
+        if let Some(flush_stats) = writer.flush().await? {
+            self.metrics
+                .record_compression_duration(flush_stats.compression_duration_secs);
+            self.metrics.record_bytes_compressed(
+                flush_stats.compressed_bytes,
+                flush_stats.uncompressed_bytes,
+            );
+        }
 
         // Release bytes from memory guard after successful write
         self.memory_guard.release(batch.data.len() as u64);
 
         let duration = start.elapsed();
+        let backend = self.startup_config.archive.backend_name();
         self.metrics.record_flush(duration.as_secs_f64(), "size");
         self.metrics.record_bytes_written(batch.data.len() as u64);
         self.metrics.record_batch_size(batch.data.len() as u64);
+        self.metrics
+            .record_sink_duration(backend, duration.as_secs_f64());
 
         debug!(
             destination = %batch.destination,
             records = batch.record_count,
             bytes = batch.data.len(),
             duration_ms = duration.as_millis(),
+            backend,
             "Wrote batch to archive"
         );
 
@@ -432,8 +452,15 @@ impl Archiver {
 
         let mut writers = self.writers.lock().await;
         for (dest, mut writer) in writers.drain() {
-            if let Err(e) = writer.close().await {
-                error!(error = %e, destination = %dest, "Failed to close writer");
+            match writer.close().await {
+                Ok(Some(close_stats)) => {
+                    self.metrics
+                        .record_file_closed(close_stats.compressed_bytes);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!(error = %e, destination = %dest, "Failed to close writer");
+                }
             }
         }
 
