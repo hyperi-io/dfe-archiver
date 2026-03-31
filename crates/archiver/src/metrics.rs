@@ -149,7 +149,7 @@ impl ArchiverMetrics {
             "Failed Kafka offset commits"
         );
 
-        let dfe = DfeMetrics::register();
+        let dfe = DfeMetrics::register(manager);
 
         Self {
             dfe: Some(dfe),
