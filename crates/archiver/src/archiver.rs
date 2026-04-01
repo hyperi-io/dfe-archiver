@@ -54,8 +54,10 @@ pub struct Archiver {
     router: Router,
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
-    /// Active archive writers per destination
-    writers: Mutex<HashMap<String, ArchiveWriter>>,
+    /// Active archive writers per destination.
+    /// RwLock on the map (read for lookup, write for insert new destination).
+    /// Each writer has its own tokio::Mutex for independent async I/O.
+    writers: parking_lot::RwLock<HashMap<String, Arc<Mutex<ArchiveWriter>>>>,
     /// Cancellation token for graceful shutdown
     cancel: CancellationToken,
     /// KEDA scaling pressure calculator
@@ -140,7 +142,7 @@ impl Archiver {
             router,
             buffer,
             metrics,
-            writers: Mutex::new(HashMap::new()),
+            writers: parking_lot::RwLock::new(HashMap::new()),
             cancel: CancellationToken::new(),
             scaling,
             memory_guard,
@@ -365,9 +367,8 @@ impl Archiver {
             .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
         self.metrics.set_spool_bytes(stats.current_spool_bytes);
 
-        let writers = self.writers.lock().await;
-        self.metrics.set_unique_destinations(writers.len());
-        drop(writers);
+        let writer_count = self.writers.read().len();
+        self.metrics.set_unique_destinations(writer_count);
 
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
@@ -390,16 +391,27 @@ impl Archiver {
     async fn write_batch(&self, batch: &dfe_archiver_core::buffer::StagedBatch) -> Result<()> {
         let start = std::time::Instant::now();
 
-        let mut writers = self.writers.lock().await;
-        let writer = if let Some(w) = writers.get_mut(batch.destination.as_str()) {
-            w
-        } else {
-            let writer = self.create_writer(&batch.destination)?;
-            writers.insert(batch.destination.to_string(), writer);
-            writers
-                .get_mut(batch.destination.as_str())
-                .ok_or_else(|| Error::Storage("writer not found after insert".to_string()))?
+        // Get or create per-destination writer (read lock for lookup, write lock for insert)
+        let writer_arc = {
+            let readers = self.writers.read();
+            if let Some(w) = readers.get(batch.destination.as_str()) {
+                Arc::clone(w)
+            } else {
+                drop(readers); // release read lock before taking write lock
+                let mut writers = self.writers.write();
+                // Double-check after acquiring write lock (another thread may have inserted)
+                if let Some(w) = writers.get(batch.destination.as_str()) {
+                    Arc::clone(w)
+                } else {
+                    let writer = Arc::new(Mutex::new(self.create_writer(&batch.destination)?));
+                    writers.insert(batch.destination.to_string(), Arc::clone(&writer));
+                    writer
+                }
+            }
         };
+
+        // Lock only THIS destination's writer — other destinations can write concurrently
+        let mut writer = writer_arc.lock().await;
 
         // Write data (may trigger a roll)
         if let Some(close_stats) = writer.write(&batch.data).await? {
@@ -495,8 +507,12 @@ impl Archiver {
             }
         }
 
-        let mut writers = self.writers.lock().await;
-        for (dest, mut writer) in writers.drain() {
+        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
+            let mut map = self.writers.write();
+            map.drain().collect()
+        };
+        for (dest, writer_arc) in writers {
+            let mut writer = writer_arc.lock().await;
             match writer.close().await {
                 Ok(Some(close_stats)) => {
                     self.metrics
