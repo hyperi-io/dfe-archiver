@@ -166,6 +166,14 @@ impl Archiver {
     pub async fn run(&self) -> Result<()> {
         info!("Starting archiver main loop");
 
+        // Independent flush timer — ensures aged batches flush even when no data is flowing.
+        // Without this, flush_aged() only runs inside process_messages() which requires
+        // new Kafka data to arrive (fixes #14).
+        let flush_age_secs = self.shared_config.with(|c| c.buffer.flush_age_secs);
+        let mut flush_interval = tokio::time::interval(Duration::from_secs(flush_age_secs.max(1)));
+        // Consume the immediate first tick so we don't flush at startup
+        flush_interval.tick().await;
+
         loop {
             // Pattern B: pause consumption when under memory pressure
             // Consumer lag rises, KEDA scales up replicas. No data loss.
@@ -189,12 +197,45 @@ impl Archiver {
                 info!("Memory pressure recovered — resuming Kafka consumption");
             }
 
-            // Race recv against cancellation — exit immediately on shutdown
-            let messages = tokio::select! {
+            tokio::select! {
+                biased; // Prioritise shutdown over data processing
+
                 () = self.cancel.cancelled() => {
                     info!("Shutdown requested, exiting main loop");
                     return Ok(());
                 }
+
+                // Independent flush timer: flush aged batches even when no data is flowing.
+                // Without this, aged data sits in memory until new Kafka data arrives (fixes #14).
+                _ = flush_interval.tick() => {
+                    let aged_batches = self.buffer.flush_aged();
+                    if !aged_batches.is_empty() {
+                        debug!(count = aged_batches.len(), "Flushing aged batches (timer)");
+                        let mut offsets_to_commit = Vec::new();
+                        for batch in aged_batches {
+                            if let Err(e) = self.write_batch(&batch).await {
+                                error!(
+                                    error = %e,
+                                    destination = %batch.destination,
+                                    "Failed to write aged batch (timer)"
+                                );
+                                self.metrics.record_error();
+                                self.send_to_dlq(&batch.destination, &batch.data, &e).await;
+                            } else {
+                                offsets_to_commit.extend(batch.offsets);
+                            }
+                        }
+                        if !offsets_to_commit.is_empty() {
+                            let transport = self.transport.lock().await;
+                            if let Err(e) = transport.commit(&offsets_to_commit).await {
+                                self.metrics.record_commit_error();
+                                error!(error = %e, "Failed to commit offsets (timer flush)");
+                            }
+                            self.metrics.record_commit(offsets_to_commit.len() as u64);
+                        }
+                    }
+                }
+
                 result = async {
                     let batch_size = self.shared_config.with(|c| c.kafka.batch_size);
                     let recv_start = std::time::Instant::now();
@@ -204,26 +245,23 @@ impl Archiver {
                     result
                 } => {
                     match result {
-                        Ok(msgs) => msgs,
+                        Ok(msgs) if !msgs.is_empty() => {
+                            self.process_messages(msgs).await;
+                            self.metrics.update_eps();
+                        }
+                        Ok(_) => {
+                            // Empty batch — no messages available
+                        }
                         Err(e) => {
                             if log_debounced(&RECV_ERROR_LAST, 5000) {
                                 error!(error = %e, "Failed to receive from Kafka (debounced, max 1/5s)");
                             }
                             self.metrics.record_error();
                             tokio::time::sleep(Duration::from_secs(1)).await;
-                            continue;
                         }
                     }
                 }
-            };
-
-            if messages.is_empty() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
             }
-
-            self.process_messages(messages).await;
-            self.metrics.update_eps();
         }
     }
 

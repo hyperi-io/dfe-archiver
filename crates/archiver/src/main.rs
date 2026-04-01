@@ -97,7 +97,11 @@ impl DfeApp for App {
         load_config(path).map_err(|e| CliError::Config(e.to_string()))
     }
 
-    async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
+    async fn run_service(
+        &self,
+        config: Self::Config,
+        _runtime: hyperi_rustlib::cli::ServiceRuntime,
+    ) -> Result<(), CliError> {
         info!(
             kafka_brokers = %config.kafka.brokers.join(","),
             kafka_topics = %config.kafka.topics.join(","),
