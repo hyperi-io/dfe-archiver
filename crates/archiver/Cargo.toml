@@ -34,7 +34,7 @@ dfe-archiver-io = { workspace = true }
 hyperi-rustlib = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "metrics-dfe",
     "transport-kafka", "http-server", "tiered-sink", "spool",
-    "scaling", "deployment", "cli", "memory", "health", "shutdown", "dlq",
+    "scaling", "deployment", "cli", "memory", "health", "shutdown", "dlq", "worker",
 ] }
 
 # Async

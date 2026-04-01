@@ -280,7 +280,9 @@ impl Archiver {
 
         let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
         let mut backpressure = false;
+        let mut all_staged: Vec<dfe_archiver_core::buffer::StagedBatch> = Vec::new();
 
+        // Phase 1: Route + buffer (sequential — mutable buffer state)
         for message in messages {
             let destination = match self.router.route(&message) {
                 Ok(dest) => dest,
@@ -295,21 +297,7 @@ impl Archiver {
 
             match self.buffer.push(&destination, message) {
                 Ok(staged_batches) => {
-                    for batch in staged_batches {
-                        if let Err(e) = self.write_batch(&batch).await {
-                            error!(
-                                error = %e,
-                                destination = %batch.destination,
-                                "Failed to write batch"
-                            );
-                            self.metrics.record_error();
-                            self.send_to_dlq(&batch.destination, &batch.data, &e).await;
-                            continue;
-                        }
-
-                        offsets_to_commit.extend(batch.offsets);
-                        self.metrics.record_archived(batch.record_count as u64);
-                    }
+                    all_staged.extend(staged_batches);
                 }
                 Err(e) => {
                     if log_state_change(&BACKPRESSURE_ACTIVE, true) {
@@ -322,20 +310,27 @@ impl Archiver {
             }
         }
 
+        // Collect aged batches too (if not under backpressure)
         if !backpressure {
-            let aged_batches = self.buffer.flush_aged();
-            for batch in aged_batches {
-                if let Err(e) = self.write_batch(&batch).await {
-                    error!(
-                        error = %e,
-                        destination = %batch.destination,
-                        "Failed to write aged batch"
-                    );
-                    self.metrics.record_error();
-                    self.send_to_dlq(&batch.destination, &batch.data, &e).await;
-                } else {
-                    offsets_to_commit.extend(batch.offsets);
-                }
+            all_staged.extend(self.buffer.flush_aged());
+        }
+
+        // Phase 2: Write all staged batches
+        // Each batch goes to a different destination — writes are independent.
+        // The Mutex on writers serialises per-destination I/O, but multiple
+        // destinations can still be written in sequence here.
+        for batch in &all_staged {
+            if let Err(e) = self.write_batch(batch).await {
+                error!(
+                    error = %e,
+                    destination = %batch.destination,
+                    "Failed to write batch"
+                );
+                self.metrics.record_error();
+                self.send_to_dlq(&batch.destination, &batch.data, &e).await;
+            } else {
+                offsets_to_commit.extend(batch.offsets.clone());
+                self.metrics.record_archived(batch.record_count as u64);
             }
         }
 
