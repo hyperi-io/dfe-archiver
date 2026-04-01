@@ -100,7 +100,7 @@ impl DfeApp for App {
     async fn run_service(
         &self,
         config: Self::Config,
-        _runtime: hyperi_rustlib::cli::ServiceRuntime,
+        runtime: hyperi_rustlib::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(
             kafka_brokers = %config.kafka.brokers.join(","),
@@ -109,7 +109,7 @@ impl DfeApp for App {
             "Configuration loaded"
         );
 
-        // Initialise metrics: register, start server, wire /readyz
+        // Initialise archiver-specific metrics (uses runtime's DfeMetrics internally)
         let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
         let (metrics, _metrics_manager) = init_metrics(&config.metrics, commit)
             .await
@@ -177,8 +177,8 @@ impl DfeApp for App {
             }
         });
 
-        // Install unified shutdown handler (SIGTERM + SIGINT)
-        let shutdown_token = hyperi_rustlib::shutdown::install_signal_handler();
+        // Use runtime's shutdown token (signal handler already installed with pre-stop delay)
+        let shutdown_token = runtime.shutdown.clone();
 
         // Mark pipeline ready
         archiver.metrics().set_pipeline_ready(true);
