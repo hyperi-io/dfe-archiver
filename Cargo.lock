@@ -1934,6 +1934,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "owo-colors",
  "parking_lot",
+ "rayon",
  "rdkafka",
  "rmp-serde",
  "serde",
