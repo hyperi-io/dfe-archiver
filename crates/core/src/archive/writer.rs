@@ -387,7 +387,7 @@ mod tests {
     fn test_writer(policy: RollingPolicy, codec: &str) -> (ArchiveWriter, Arc<MemoryBackend>) {
         let config = ArchiveConfig {
             destination: "memory://test".to_string(),
-            path_template: "{topic}/{year}/{month}/{day}/{hour}/archive".to_string(),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
             file_extension: "jsonl".to_string(),
             ..Default::default()
         };
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn test_path_template_expansion() {
         let config = ArchiveConfig {
-            path_template: "{topic}/{year}/{month}/{day}/{hour}/archive".to_string(),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
             file_extension: "jsonl".to_string(),
             ..Default::default()
         };

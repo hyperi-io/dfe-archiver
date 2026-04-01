@@ -175,7 +175,9 @@ impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {
             destination: "file:///var/data/archive".to_string(),
-            path_template: "{topic}/{year}/{month}/{day}/{hour}".to_string(),
+            // Topic is already prepended as a directory by the archiver (per-topic writers).
+            // Do not include {topic} here — it would result in double topic paths.
+            path_template: "{year}/{month}/{day}/{hour}".to_string(),
             file_extension: "jsonl".to_string(),
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size
             roll_interval_secs: 3600,            // 1 hour

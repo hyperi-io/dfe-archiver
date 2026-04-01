@@ -218,10 +218,7 @@ fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfi
         topics: config.topics.clone(),
         sasl_mechanism: config.sasl_mechanism.clone(),
         sasl_username: config.sasl_username.clone(),
-        sasl_password: config
-            .sasl_password
-            .as_ref()
-            .map(|s| s.expose().to_string()),
+        sasl_password: config.sasl_password.clone(),
         security_protocol: config.security_protocol.clone(),
         session_timeout_ms: config.session_timeout_ms,
         max_poll_interval_ms: config.max_poll_interval_ms,
