@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 // Log spam guards for disk pressure conditions
 static SPOOL_FULL: AtomicBool = AtomicBool::new(false);
@@ -296,6 +296,12 @@ impl TieredBufferManager {
             && let Some((_, mut buffer)) = self.hot_buffers.remove(&evict_key)
             && !buffer.is_empty()
         {
+            debug!(
+                evicted_dest = %evict_key,
+                records = buffer.messages.len(),
+                bytes = buffer.size,
+                "LRU eviction triggered"
+            );
             let (messages, offsets) = buffer.drain();
             batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
             self.stats
@@ -317,9 +323,29 @@ impl TieredBufferManager {
             .fetch_add(payload_size, Ordering::Relaxed);
         self.stats.hot_buffer_hits.fetch_add(1, Ordering::Relaxed);
 
+        trace!(
+            destination = %key,
+            buffer_size = entry.size,
+            buffer_records = entry.messages.len(),
+            buffer_age_secs = entry.age_secs(),
+            "Buffer state after push"
+        );
+
         if entry.size >= self.config.hot_buffer_size
             || entry.age_secs() >= self.config.hot_buffer_age_secs
         {
+            let trigger = if entry.size >= self.config.hot_buffer_size {
+                "size"
+            } else {
+                "age"
+            };
+            debug!(
+                destination = %key,
+                trigger,
+                records = entry.messages.len(),
+                bytes = entry.size,
+                "Hot buffer flush"
+            );
             let (messages, offsets) = entry.drain();
             self.stats.current_hot_bytes.fetch_sub(
                 messages.iter().map(std::vec::Vec::len).sum::<usize>(),
@@ -335,11 +361,18 @@ impl TieredBufferManager {
     pub fn flush_all(&self) -> Vec<StagedBatch> {
         let mut batches = Vec::new();
         let keys: Vec<_> = self.hot_buffers.iter().map(|e| e.key().clone()).collect();
+        debug!(buffer_count = keys.len(), "Flushing all hot buffers");
 
         for key in keys {
             if let Some(mut entry) = self.hot_buffers.get_mut(&key)
                 && !entry.is_empty()
             {
+                trace!(
+                    destination = %key,
+                    records = entry.messages.len(),
+                    bytes = entry.size,
+                    "Flushing hot buffer"
+                );
                 let (messages, offsets) = entry.drain();
                 batches.push(self.create_staged_batch(key.clone(), messages, offsets));
             }
@@ -356,6 +389,13 @@ impl TieredBufferManager {
         for mut entry in self.hot_buffers.iter_mut() {
             if entry.age_secs() >= max_age && !entry.is_empty() {
                 let key = entry.key().clone();
+                debug!(
+                    destination = %key,
+                    age_secs = entry.age_secs(),
+                    records = entry.messages.len(),
+                    bytes = entry.size,
+                    "Flushing aged hot buffer"
+                );
                 let (messages, offsets) = entry.drain();
                 batches.push(self.create_staged_batch(key, messages, offsets));
             }

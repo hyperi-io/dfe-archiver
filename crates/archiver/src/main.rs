@@ -31,7 +31,7 @@ use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
 use hyperi_rustlib::logger::security;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{debug, info};
 
 /// DFE Archiver - High-volume Kafka-to-storage archiver
 #[derive(Parser, Debug)]
@@ -97,6 +97,7 @@ impl DfeApp for App {
         load_config(path).map_err(|e| CliError::Config(e.to_string()))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_service(
         &self,
         config: Self::Config,
@@ -104,9 +105,29 @@ impl DfeApp for App {
     ) -> Result<(), CliError> {
         info!(
             kafka_brokers = %config.kafka.brokers.join(","),
+            kafka_group_id = %config.kafka.group_id,
             kafka_topics = %config.kafka.topics.join(","),
             destination = %config.archive.destination,
+            storage_backend = %config.archive.backend_name(),
+            compression_codec = %config.compression.codec,
+            compression_level = config.compression.level,
             "Configuration loaded"
+        );
+        debug!(
+            kafka_batch_size = config.kafka.batch_size,
+            kafka_session_timeout_ms = config.kafka.session_timeout_ms,
+            kafka_max_poll_interval_ms = config.kafka.max_poll_interval_ms,
+            buffer_flush_bytes = config.buffer.flush_bytes,
+            buffer_flush_age_secs = config.buffer.flush_age_secs,
+            buffer_writer_parallelism = config.buffer.writer_parallelism,
+            archive_roll_size_bytes = config.archive.roll_size_bytes,
+            archive_roll_interval_secs = config.archive.roll_interval_secs,
+            archive_path_template = %config.archive.path_template,
+            routing_mode = %config.routing.mode,
+            metrics_enabled = config.metrics.enabled,
+            metrics_address = %config.metrics.address,
+            dlq_enabled = config.dlq.enabled,
+            "Detailed configuration"
         );
 
         // Initialise archiver-specific metrics (uses runtime's DfeMetrics internally)
