@@ -17,5 +17,6 @@ out/
 test-results/
 coverage/
 .tmp/
+target
 target/
 docs/superpowers/
