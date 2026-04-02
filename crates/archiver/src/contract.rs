@@ -7,7 +7,7 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use hyperi_rustlib::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
+    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract, OciLabels,
 };
 
 /// Build the deployment contract for dfe-archiver.
@@ -18,6 +18,7 @@ use hyperi_rustlib::deployment::{
 #[must_use]
 pub fn deployment_contract() -> DeploymentContract {
     DeploymentContract {
+        schema_version: 2,
         app_name: "dfe-archiver".into(),
         binary_name: "dfe-archiver".into(),
         description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines".into(),
@@ -39,6 +40,11 @@ pub fn deployment_contract() -> DeploymentContract {
             "ubuntu:24.04",
         ),
         image_profile: ImageProfile::Production,
+        oci_labels: OciLabels {
+            description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
+                .into(),
+            ..OciLabels::default()
+        },
     }
 }
 
