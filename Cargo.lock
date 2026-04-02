@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1152,6 +1152,7 @@ dependencies = [
  "dfe-archiver-core",
  "dfe-archiver-io",
  "dotenvy",
+ "futures",
  "hyperi-rustlib",
  "metrics",
  "mimalloc",
@@ -1175,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-core"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1202,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-archiver-io"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "async-trait",
  "aws-config",
