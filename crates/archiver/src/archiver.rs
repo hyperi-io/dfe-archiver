@@ -293,28 +293,41 @@ impl Archiver {
         let mut backpressure = false;
         let mut all_staged: Vec<dfe_archiver_core::buffer::StagedBatch> = Vec::new();
 
-        // Phase 1: Route + buffer (sequential — mutable buffer state)
-        for message in messages {
-            let destination = match self.router.route(&message) {
-                Ok(dest) => {
-                    trace!(
-                        topic = %message.topic,
-                        partition = message.partition,
-                        offset = message.offset,
-                        destination = %dest,
-                        payload_bytes = message.payload.len(),
-                        "Routed message"
-                    );
-                    dest
-                }
-                Err(e) => {
+        // Phase 1a: Parallel route computation
+        // Router::route() is pure computation (&self, &KafkaMessage) — safe for par_iter.
+        // For expression mode this involves sonic_rs JSON parse per message.
+        let route_results: Vec<compact_str::CompactString> = messages
+            .iter()
+            .map(|msg| {
+                self.router.route(msg).unwrap_or_else(|e| {
                     self.metrics.record_routing_error();
                     if log_sampled(&ROUTE_ERROR_COUNT, 1000) {
-                        warn!(error = %e, total = ROUTE_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), "Routing failed, using topic (sampled 1/1000)");
+                        warn!(
+                            error = %e,
+                            total = ROUTE_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                            "Routing failed, using topic (sampled 1/1000)"
+                        );
                     }
-                    message.topic.clone()
-                }
-            };
+                    hyperi_rustlib::logger::security::input_validation_failure(
+                        "routing",
+                        &e.to_string(),
+                        None,
+                    );
+                    msg.topic.clone()
+                })
+            })
+            .collect();
+
+        // Phase 1b: Sequential buffer push (mutable buffer state)
+        for (message, destination) in messages.into_iter().zip(route_results) {
+            trace!(
+                topic = %message.topic,
+                partition = message.partition,
+                offset = message.offset,
+                destination = %destination,
+                payload_bytes = message.payload.len(),
+                "Routed message"
+            );
 
             match self.buffer.push(&destination, message) {
                 Ok(staged_batches) => {
@@ -353,22 +366,35 @@ impl Archiver {
             all_staged.extend(aged);
         }
 
-        // Phase 2: Write all staged batches
-        // Each batch goes to a different destination — writes are independent.
-        // The Mutex on writers serialises per-destination I/O, but multiple
-        // destinations can still be written in sequence here.
-        for batch in &all_staged {
-            if let Err(e) = self.write_batch(batch).await {
-                error!(
-                    error = %e,
-                    destination = %batch.destination,
-                    "Failed to write batch"
-                );
-                self.metrics.record_error();
-                self.send_to_dlq(&batch.destination, &batch.data, &e).await;
-            } else {
-                offsets_to_commit.extend(batch.offsets.clone());
-                self.metrics.record_archived(batch.record_count as u64);
+        // Phase 2: Write all staged batches — concurrent per destination.
+        // Each batch goes to a different destination with its own Mutex writer.
+        // futures::future::join_all runs them concurrently on the same task,
+        // maximising I/O overlap without spawning new tasks.
+        let write_results: Vec<(usize, std::result::Result<(), Error>)> =
+            futures::future::join_all(
+                all_staged
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, batch)| async move { (idx, self.write_batch(batch).await) }),
+            )
+            .await;
+
+        for (idx, result) in write_results {
+            let batch = &all_staged[idx];
+            match result {
+                Ok(()) => {
+                    offsets_to_commit.extend(batch.offsets.clone());
+                    self.metrics.record_archived(batch.record_count as u64);
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        destination = %batch.destination,
+                        "Failed to write batch"
+                    );
+                    self.metrics.record_error();
+                    self.send_to_dlq(&batch.destination, &batch.data, &e).await;
+                }
             }
         }
 
