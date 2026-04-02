@@ -64,7 +64,7 @@ impl ArchiverMetrics {
     ///
     /// Uses a single `MetricsManager` for both metric registration and the
     /// HTTP server. Combines rustlib DFE groups with archiver-specific metrics.
-    fn register(manager: &MetricsManager, commit: &str) -> Self {
+    pub fn register(manager: &MetricsManager, commit: &str) -> Self {
         // Layer 2: Metric groups (auto-prefixed with dfe_archiver_)
         let app = AppMetrics::new(manager, env!("CARGO_PKG_VERSION"), commit);
         let buffer = BufferMetrics::new(manager);
@@ -162,6 +162,15 @@ impl ArchiverMetrics {
             eps_counter: AtomicU64::new(0),
             eps_last_update: std::sync::Mutex::new(Instant::now()),
         }
+    }
+
+    /// Wire the pipeline readiness flag to a `MetricsManager` `/readyz` endpoint.
+    ///
+    /// Call once after construction to connect the flag to the HTTP server's
+    /// readiness check. With `ServiceRuntime`, this is called on `runtime.metrics`.
+    pub fn wire_readiness(&self, manager: &mut MetricsManager) {
+        let ready_flag = Arc::clone(&self.ready);
+        manager.set_readiness_check(move || ready_flag.load(std::sync::atomic::Ordering::Acquire));
     }
 
     // ── Layer 1: DfeMetrics pass-throughs ────────────────────────────

@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // Log spam guards
 static RECV_ERROR_LAST: AtomicU64 = AtomicU64::new(0);
@@ -55,8 +55,8 @@ pub struct Archiver {
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
     /// Active archive writers per destination.
-    /// RwLock on the map (read for lookup, write for insert new destination).
-    /// Each writer has its own tokio::Mutex for independent async I/O.
+    /// `RwLock` on the map (read for lookup, write for insert new destination).
+    /// Each writer has its own `tokio::Mutex` for independent async I/O.
     writers: parking_lot::RwLock<HashMap<String, Arc<Mutex<ArchiveWriter>>>>,
     /// Cancellation token for graceful shutdown
     cancel: CancellationToken,
@@ -268,10 +268,19 @@ impl Archiver {
     }
 
     /// Process a batch of messages: route, buffer, write, commit offsets, update metrics
+    #[allow(clippy::too_many_lines)]
     async fn process_messages(&self, messages: Vec<dfe_archiver_core::KafkaMessage>) {
         let batch_len = messages.len();
+        let topics: Vec<&str> = if tracing::enabled!(tracing::Level::DEBUG) {
+            let mut t: Vec<&str> = messages.iter().map(|m| m.topic.as_str()).collect();
+            t.sort_unstable();
+            t.dedup();
+            t
+        } else {
+            Vec::new()
+        };
         self.metrics.record_received(batch_len as u64);
-        debug!(count = batch_len, "Received batch from Kafka");
+        debug!(count = batch_len, topics = ?topics, "Received batch from Kafka");
 
         // Track incoming bytes in memory guard
         let batch_bytes: u64 = messages.iter().map(|m| m.payload.len() as u64).sum();
@@ -287,7 +296,17 @@ impl Archiver {
         // Phase 1: Route + buffer (sequential — mutable buffer state)
         for message in messages {
             let destination = match self.router.route(&message) {
-                Ok(dest) => dest,
+                Ok(dest) => {
+                    trace!(
+                        topic = %message.topic,
+                        partition = message.partition,
+                        offset = message.offset,
+                        destination = %dest,
+                        payload_bytes = message.payload.len(),
+                        "Routed message"
+                    );
+                    dest
+                }
                 Err(e) => {
                     self.metrics.record_routing_error();
                     if log_sampled(&ROUTE_ERROR_COUNT, 1000) {
@@ -299,6 +318,15 @@ impl Archiver {
 
             match self.buffer.push(&destination, message) {
                 Ok(staged_batches) => {
+                    for batch in &staged_batches {
+                        debug!(
+                            destination = %batch.destination,
+                            records = batch.record_count,
+                            bytes = batch.data.len(),
+                            trigger = "size_or_eviction",
+                            "Buffer staged batch"
+                        );
+                    }
                     all_staged.extend(staged_batches);
                 }
                 Err(e) => {
@@ -314,7 +342,15 @@ impl Archiver {
 
         // Collect aged batches too (if not under backpressure)
         if !backpressure {
-            all_staged.extend(self.buffer.flush_aged());
+            let aged = self.buffer.flush_aged();
+            if !aged.is_empty() {
+                debug!(
+                    count = aged.len(),
+                    total_bytes = aged.iter().map(|b| b.data.len()).sum::<usize>(),
+                    "Flushing aged batches in process_messages"
+                );
+            }
+            all_staged.extend(aged);
         }
 
         // Phase 2: Write all staged batches
@@ -339,9 +375,10 @@ impl Archiver {
         if !offsets_to_commit.is_empty() {
             let transport = self.transport.lock().await;
             let commit_count = offsets_to_commit.len() as u64;
+            debug!(count = commit_count, "Committing Kafka offsets");
             if let Err(e) = transport.commit(&offsets_to_commit).await {
                 self.metrics.record_commit_error();
-                error!(error = %e, "Failed to commit offsets");
+                error!(error = %e, count = commit_count, "Failed to commit offsets");
             }
             self.metrics.record_commit(commit_count);
         }
@@ -355,11 +392,11 @@ impl Archiver {
             }
         }
 
-        self.update_pipeline_metrics().await;
+        self.update_pipeline_metrics();
     }
 
     /// Update buffer stats, scaling pressure, and pipeline gauges
-    async fn update_pipeline_metrics(&self) {
+    fn update_pipeline_metrics(&self) {
         self.metrics.set_last_batch_timestamp();
 
         let stats = self.buffer.stats();
@@ -390,6 +427,13 @@ impl Archiver {
     #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
     async fn write_batch(&self, batch: &dfe_archiver_core::buffer::StagedBatch) -> Result<()> {
         let start = std::time::Instant::now();
+        trace!(
+            destination = %batch.destination,
+            records = batch.record_count,
+            bytes = batch.data.len(),
+            offsets = batch.offsets.len(),
+            "Starting batch write"
+        );
 
         // Get or create per-destination writer (read lock for lookup, write lock for insert)
         let writer_arc = {
@@ -403,6 +447,7 @@ impl Archiver {
                 if let Some(w) = writers.get(batch.destination.as_str()) {
                     Arc::clone(w)
                 } else {
+                    debug!(destination = %batch.destination, "Creating new archive writer");
                     let writer = Arc::new(Mutex::new(self.create_writer(&batch.destination)?));
                     writers.insert(batch.destination.to_string(), Arc::clone(&writer));
                     writer
@@ -416,6 +461,12 @@ impl Archiver {
         // Write data (may trigger a roll)
         if let Some(close_stats) = writer.write(&batch.data).await? {
             if let Some(trigger) = close_stats.trigger {
+                debug!(
+                    destination = %batch.destination,
+                    trigger,
+                    compressed_bytes = close_stats.compressed_bytes,
+                    "Archive file rolled"
+                );
                 self.metrics.record_archive_roll(trigger);
             }
             self.metrics
@@ -424,6 +475,19 @@ impl Archiver {
 
         // Flush buffer to storage (returns compression stats)
         if let Some(flush_stats) = writer.flush().await? {
+            let ratio = if flush_stats.uncompressed_bytes > 0 {
+                flush_stats.compressed_bytes as f64 / flush_stats.uncompressed_bytes as f64
+            } else {
+                1.0
+            };
+            debug!(
+                destination = %batch.destination,
+                uncompressed_bytes = flush_stats.uncompressed_bytes,
+                compressed_bytes = flush_stats.compressed_bytes,
+                compression_ratio = format!("{ratio:.3}"),
+                duration_ms = format!("{:.1}", flush_stats.compression_duration_secs * 1000.0),
+                "Compression complete"
+            );
             self.metrics
                 .record_compression_duration(flush_stats.compression_duration_secs);
             self.metrics.record_bytes_compressed(
@@ -494,9 +558,12 @@ impl Archiver {
     /// Drain all buffers and close writers (for shutdown)
     #[instrument(skip(self))]
     pub async fn drain(&self) -> Result<()> {
-        info!("Draining buffers...");
-
         let batches = self.buffer.flush_all();
+        info!(
+            batches = batches.len(),
+            total_bytes = batches.iter().map(|b| b.data.len()).sum::<usize>(),
+            "Draining buffers"
+        );
         for batch in batches {
             if let Err(e) = self.write_batch(&batch).await {
                 error!(
@@ -511,14 +578,22 @@ impl Archiver {
             let mut map = self.writers.write();
             map.drain().collect()
         };
+        debug!(writer_count = writers.len(), "Closing archive writers");
         for (dest, writer_arc) in writers {
             let mut writer = writer_arc.lock().await;
             match writer.close().await {
                 Ok(Some(close_stats)) => {
+                    debug!(
+                        destination = %dest,
+                        compressed_bytes = close_stats.compressed_bytes,
+                        "Closed archive writer"
+                    );
                     self.metrics
                         .record_file_closed(close_stats.compressed_bytes);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    debug!(destination = %dest, "Closed empty archive writer");
+                }
                 Err(e) => {
                     error!(error = %e, destination = %dest, "Failed to close writer");
                 }
@@ -538,8 +613,15 @@ impl Archiver {
     /// propagate the error (the original write error is the primary concern).
     async fn send_to_dlq(&self, destination: &str, data: &[u8], error: &Error) {
         if !self.dlq.is_enabled() {
+            trace!(destination, "DLQ disabled, skipping failed batch");
             return;
         }
+        debug!(
+            destination,
+            data_bytes = data.len(),
+            error = %error,
+            "Sending failed batch to DLQ"
+        );
 
         let entry = hyperi_rustlib::dlq::DlqEntry::new(
             "dfe-archiver",
