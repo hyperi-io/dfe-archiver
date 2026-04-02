@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Default multipart chunk size: 8MB
 const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 8 * 1024 * 1024;
@@ -74,6 +74,8 @@ impl StorageBackend for FileBackend {
 
         file.write_all(data).await?;
         file.flush().await?;
+
+        trace!(path = %full_path.display(), bytes = data.len(), "Appended to file");
 
         Ok(())
     }
@@ -386,6 +388,8 @@ impl StorageBackend for ObjectStoreBackend {
             return Ok(());
         };
 
+        debug!(path = %path, backend = self.backend_name, "Completing multipart upload");
+        let start = std::time::Instant::now();
         write.finish().await.map_err(|e| {
             Error::Storage(format!(
                 "{}: multipart complete failed for {path}: {e}",
@@ -393,9 +397,11 @@ impl StorageBackend for ObjectStoreBackend {
             ))
         })?;
 
+        let duration = start.elapsed();
         info!(
             path = %path,
             backend = self.backend_name,
+            duration_ms = duration.as_millis(),
             "Completed multipart upload"
         );
         Ok(())

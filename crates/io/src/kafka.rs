@@ -12,7 +12,7 @@ use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
 use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
 use rdkafka::consumer::Consumer;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Transport adapter wrapping hyperi-rustlib Kafka transport
 pub struct TransportAdapter {
@@ -53,12 +53,19 @@ impl TransportAdapter {
 
         debug!(count = messages.len(), "Received messages from Kafka");
 
-        Ok(messages
+        let converted: Vec<KafkaMessage> = messages
             .into_iter()
             .map(|msg| {
                 let topic = CompactString::from(msg.token.topic.as_ref());
                 let partition = msg.token.partition;
                 let offset = msg.token.offset;
+                trace!(
+                    topic = %topic,
+                    partition,
+                    offset,
+                    payload_bytes = msg.payload.len(),
+                    "Received Kafka message"
+                );
                 KafkaMessage::new(
                     msg.key.clone(),
                     msg.payload.clone(),
@@ -69,7 +76,9 @@ impl TransportAdapter {
                     msg.token,
                 )
             })
-            .collect())
+            .collect();
+
+        Ok(converted)
     }
 
     /// Commit offsets for processed messages

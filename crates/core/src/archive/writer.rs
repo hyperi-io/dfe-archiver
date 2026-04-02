@@ -12,7 +12,7 @@ use crate::config::ArchiveConfig;
 use crate::storage::StorageBackend;
 use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Stats returned from a flush operation (for metrics wiring)
 #[derive(Debug, Clone)]
@@ -111,6 +111,14 @@ impl ArchiveWriter {
             state
                 .uncompressed_bytes
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
+            trace!(
+                path = %state.path,
+                write_bytes = data.len(),
+                buffer_bytes = self.buffer.len(),
+                total_uncompressed = state.uncompressed_bytes.load(Ordering::Relaxed),
+                total_compressed = state.compressed_bytes.load(Ordering::Relaxed),
+                "Buffered write to archive"
+            );
         }
 
         Ok(roll_stats)

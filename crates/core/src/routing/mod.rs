@@ -11,6 +11,7 @@ use crate::types::KafkaMessage;
 use crate::{Error, Result};
 use compact_str::CompactString;
 use sonic_rs::JsonValueTrait;
+use tracing::trace;
 
 /// Router for determining archive destination
 pub struct Router {
@@ -47,7 +48,9 @@ impl Router {
 
         for field_path in &self.config.expression_fields {
             let value = extract_field(&json, field_path);
-            segments.push(value.unwrap_or_else(|| self.config.default_segment.clone()));
+            let resolved = value.unwrap_or_else(|| self.config.default_segment.clone());
+            trace!(field = %field_path, value = %resolved, "Expression routing field");
+            segments.push(resolved);
         }
 
         Ok(CompactString::from(segments.join("/")))
