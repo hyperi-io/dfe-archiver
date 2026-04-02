@@ -1,3 +1,18 @@
+## [1.6.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.0...v1.6.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* add comprehensive debug/trace logging across all pipeline stages ([44d1749](https://github.com/hyperi-io/dfe-archiver/commit/44d17495c05e0029dd97b8f29a89b6aa6cddacf9))
+* add independent flush timer + fix {topic} path template ([4b87a4c](https://github.com/hyperi-io/dfe-archiver/commit/4b87a4c41d860a50e6fa7623afda34cfa23ba319))
+* bump hyperi-rustlib to >=2.4.3 ([5c40044](https://github.com/hyperi-io/dfe-archiver/commit/5c4004470e7616436b24504bfbd6d00d4af148e8))
+* per-destination writer locks — concurrent writes to different destinations ([f18a6df](https://github.com/hyperi-io/dfe-archiver/commit/f18a6df10029a70a60653cb0739c8c632ed92cc3))
+* remove tracked target symlink — breaks CI runners ([059720e](https://github.com/hyperi-io/dfe-archiver/commit/059720e5dc7f4b939523057c7ea86def8ceb93b2))
+* resolve rustlib v2.4.3 compile errors — MemoryGuardConfig import, DeploymentContract fields ([a77cc2c](https://github.com/hyperi-io/dfe-archiver/commit/a77cc2c3b0a1c593ea7f7f9db8689ce5dd55506a))
+* separate route+buffer from write phase for future parallel compression ([3007549](https://github.com/hyperi-io/dfe-archiver/commit/3007549f9c820a8fc457fc4328953295d2a1a565))
+* update DfeMetrics::register() to pass &MetricsManager for manifest ([af3cd11](https://github.com/hyperi-io/dfe-archiver/commit/af3cd11213ea18dd2a551355ca1478049f33198b))
+* update to rustlib v2.x ServiceRuntime + releaserc breaking rule ([f65b724](https://github.com/hyperi-io/dfe-archiver/commit/f65b724ce7c8d519ce4a5312321f489dcd302b20)), closes [hyperi-ci#14](https://github.com/hyperi-ci/issues/14)
+
 # [1.6.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.5.3...v1.6.0) (2026-03-29)
 
 
