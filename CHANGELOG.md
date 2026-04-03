@@ -1,3 +1,10 @@
+## [1.6.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.1...v1.6.2) (2026-04-03)
+
+
+### Bug Fixes
+
+* concurrent batch writes, parallel routing, SOC2 audit logging ([12bc9de](https://github.com/hyperi-io/dfe-archiver/commit/12bc9de4cd59710db7d29b5eea42a561a99c6b03))
+
 ## [1.6.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.0...v1.6.1) (2026-04-02)
 
 
