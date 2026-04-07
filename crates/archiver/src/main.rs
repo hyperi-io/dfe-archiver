@@ -101,7 +101,7 @@ impl DfeApp for App {
     async fn run_service(
         &self,
         config: Self::Config,
-        runtime: hyperi_rustlib::cli::ServiceRuntime,
+        mut runtime: hyperi_rustlib::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(
             kafka_brokers = %config.kafka.brokers.join(","),
@@ -130,11 +130,9 @@ impl DfeApp for App {
             "Detailed configuration"
         );
 
-        // Initialise archiver-specific metrics (uses runtime's DfeMetrics internally)
+        // Register archiver-specific metrics on the runtime's existing manager
         let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
-        let (metrics, _metrics_manager) = init_metrics(&config.metrics, commit)
-            .await
-            .map_err(|e| CliError::Service(format!("metrics init failed: {e}")))?;
+        let metrics = init_metrics(&mut runtime.metrics, commit);
 
         // Wrap config in SharedConfig for hot-reload
         let shared_config = SharedConfig::new(config);
