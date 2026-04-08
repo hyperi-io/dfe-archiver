@@ -6,8 +6,6 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use dfe_archiver_core::Result;
-use dfe_archiver_core::config::MetricsConfig;
 use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics,
 };
@@ -16,7 +14,6 @@ use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
-use tracing::info;
 
 /// Archiver metrics -- combines rustlib DFE metric groups with
 /// archiver-specific counters/gauges/histograms.
@@ -437,36 +434,19 @@ impl ArchiverMetrics {
 /// Returns the `ArchiverMetrics` handle (wrapped in `Arc`) and the
 /// `MetricsManager` (which owns the server task).
 ///
-/// # Errors
-/// Returns error if the HTTP server fails to bind.
-pub async fn init_metrics(
-    config: &MetricsConfig,
-    commit: &str,
-) -> Result<(Arc<ArchiverMetrics>, MetricsManager)> {
-    let mut manager = MetricsManager::new("dfe_archiver");
-
-    let metrics = ArchiverMetrics::register(&manager, commit);
+/// Register archiver-specific metrics on the runtime's existing manager.
+///
+/// The `ServiceRuntime` already installs the global Prometheus recorder and
+/// starts the metrics HTTP server. This function only registers app-specific
+/// counters/gauges/histograms on that manager — no duplicate recorder.
+pub fn init_metrics(manager: &mut MetricsManager, commit: &str) -> Arc<ArchiverMetrics> {
+    let metrics = ArchiverMetrics::register(manager, commit);
 
     // Wire /readyz to the pipeline readiness flag
     let ready_flag = Arc::clone(&metrics.ready);
     manager.set_readiness_check(move || ready_flag.load(Ordering::Acquire));
 
-    if config.enabled {
-        manager
-            .start_server(&config.address)
-            .await
-            .map_err(|e| dfe_archiver_core::Error::Config(format!("metrics server failed: {e}")))?;
-
-        info!(
-            address = %config.address,
-            path = %config.path,
-            "Metrics server started (hyperi-rustlib)"
-        );
-    } else {
-        info!("Metrics server disabled");
-    }
-
-    Ok((Arc::new(metrics), manager))
+    Arc::new(metrics)
 }
 
 #[cfg(test)]
