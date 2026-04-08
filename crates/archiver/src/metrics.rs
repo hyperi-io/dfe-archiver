@@ -6,8 +6,6 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use dfe_archiver_core::Result;
-use dfe_archiver_core::config::MetricsConfig;
 use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics,
 };
@@ -16,7 +14,6 @@ use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
-use tracing::info;
 
 /// Archiver metrics -- combines rustlib DFE metric groups with
 /// archiver-specific counters/gauges/histograms.
