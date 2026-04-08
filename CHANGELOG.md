@@ -1,3 +1,11 @@
+## [1.6.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.2...v1.6.3) (2026-04-08)
+
+
+### Bug Fixes
+
+* remove double Prometheus recorder installation on startup ([e4b9a53](https://github.com/hyperi-io/dfe-archiver/commit/e4b9a5379c981a0bb2959c4d5be037e9ad9aa197))
+* Remove unused imports (ci fix) ([6ea0c24](https://github.com/hyperi-io/dfe-archiver/commit/6ea0c24dd5658e66ac32bfae79e46adb29ed13b7))
+
 ## [1.6.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.1...v1.6.2) (2026-04-03)
 
 
