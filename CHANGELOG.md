@@ -1,3 +1,22 @@
+## [1.6.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.3...v1.6.4) (2026-04-09)
+
+
+### Bug Fixes
+
+* consume staged batches by value, eliminate offset clones ([554dd5d](https://github.com/hyperi-io/dfe-archiver/commit/554dd5d1f647fb7fe4b0f62ad9376c0b43592235))
+* direct-append hot buffer eliminates serialisation phase ([36b6c76](https://github.com/hyperi-io/dfe-archiver/commit/36b6c7613ae56e2f6ec906d8f957111573b92562))
+* remove double Prometheus recorder installation on startup ([130c6cd](https://github.com/hyperi-io/dfe-archiver/commit/130c6cd07a250ad0fe6c64c02f39f26e9f3c0cab)), closes [#16](https://github.com/hyperi-io/dfe-archiver/issues/16)
+* replace LRU VecDeque linear scan with IndexMap hash lookup ([fa00f6f](https://github.com/hyperi-io/dfe-archiver/commit/fa00f6feff3a771c5aa8c37e4bf6f11b7ed4c2e1))
+* slim KafkaOffset to newtype around KafkaToken ([e197e19](https://github.com/hyperi-io/dfe-archiver/commit/e197e19da4d7744389752ceeb12df324bda074d3))
+* suppress cast_possible_wrap clippy lint in test assertion ([1523bfe](https://github.com/hyperi-io/dfe-archiver/commit/1523bfec3cacd97b740f5c6c99663d9b728d8e6a))
+* zero-copy kafka recv, move-based commit ([9ea19ca](https://github.com/hyperi-io/dfe-archiver/commit/9ea19ca49e76dd42cbee4a18bfb65a8a062cc7a7))
+
+
+### Performance Improvements
+
+* offload compression to spawn_blocking ([8df77cc](https://github.com/hyperi-io/dfe-archiver/commit/8df77cc40dbcdf0ec2760fe0e12f6bcd727a8b37))
+* parallel message routing via rayon par_iter ([6e63357](https://github.com/hyperi-io/dfe-archiver/commit/6e63357170dfd21b29b17511f0da160f7d6cfdb3))
+
 ## [1.6.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.2...v1.6.3) (2026-04-08)
 
 
