@@ -11,8 +11,8 @@ use crate::{Error, Result};
 use compact_str::CompactString;
 use dashmap::DashMap;
 use hyperi_rustlib::logger::helpers::log_state_change;
+use indexmap::IndexMap;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -116,27 +116,27 @@ impl HotBuffer {
     }
 }
 
-/// LRU tracking for hot buffers
+/// LRU tracking for hot buffers.
+/// Lookup is O(1) via hash. Removal uses shift_remove (O(n) index shift)
+/// but this is a fast memmove on a small array (max_hot_buffers, typically 64).
 struct LruTracker {
-    order: VecDeque<CompactString>,
+    order: IndexMap<CompactString, ()>,
     capacity: usize,
 }
 
 impl LruTracker {
     fn new(capacity: usize) -> Self {
         Self {
-            order: VecDeque::with_capacity(capacity),
+            order: IndexMap::with_capacity(capacity),
             capacity,
         }
     }
 
     fn access(&mut self, key: &CompactString) -> Option<CompactString> {
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
-        }
-        self.order.push_back(key.clone());
+        self.order.shift_remove(key);
+        self.order.insert(key.clone(), ());
         if self.order.len() > self.capacity {
-            self.order.pop_front()
+            self.order.shift_remove_index(0).map(|(k, _)| k)
         } else {
             None
         }
@@ -558,5 +558,45 @@ mod tests {
 
         let batches = manager.flush_all();
         assert_eq!(batches.len(), 3, "should flush all");
+    }
+
+    #[test]
+    fn test_lru_access_order() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 3,
+            hot_buffer_size: 100_000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        manager.push("a", make_message(b"1", "t", 0)).expect("push");
+        manager.push("b", make_message(b"2", "t", 1)).expect("push");
+        manager.push("c", make_message(b"3", "t", 2)).expect("push");
+        manager.push("a", make_message(b"4", "t", 3)).expect("push"); // touch "a"
+        let batches = manager.push("d", make_message(b"5", "t", 4)).expect("push");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].destination.as_str(), "b"); // "b" evicted, not "a"
+    }
+
+    #[test]
+    fn test_lru_repeated_access_no_eviction() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 2,
+            hot_buffer_size: 100_000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        manager.push("a", make_message(b"1", "t", 0)).expect("push");
+        manager.push("b", make_message(b"2", "t", 1)).expect("push");
+        for i in 2..100 {
+            let batches = manager
+                .push(
+                    if i % 2 == 0 { "a" } else { "b" },
+                    make_message(b"x", "t", i),
+                )
+                .expect("push");
+            assert!(batches.is_empty(), "no eviction for existing keys at i={i}");
+        }
     }
 }
