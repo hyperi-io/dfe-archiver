@@ -650,7 +650,10 @@ mod tests {
         let batches = manager.flush_all();
         assert_eq!(batches[0].offsets.len(), 5);
         for (i, offset) in batches[0].offsets.iter().enumerate() {
-            assert_eq!(offset.offset(), i as i64);
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                assert_eq!(offset.offset(), i as i64);
+            }
             assert_eq!(offset.topic(), "topic");
         }
     }
