@@ -229,11 +229,12 @@ impl Archiver {
                         }
                         if !offsets_to_commit.is_empty() {
                             let transport = self.transport.lock().await;
-                            if let Err(e) = transport.commit(&offsets_to_commit).await {
+                            let commit_count = offsets_to_commit.len() as u64;
+                            if let Err(e) = transport.commit(offsets_to_commit).await {
                                 self.metrics.record_commit_error();
                                 error!(error = %e, "Failed to commit offsets (timer flush)");
                             }
-                            self.metrics.record_commit(offsets_to_commit.len() as u64);
+                            self.metrics.record_commit(commit_count);
                         }
                     }
                 }
@@ -370,21 +371,18 @@ impl Archiver {
         // Each batch goes to a different destination with its own Mutex writer.
         // futures::future::join_all runs them concurrently on the same task,
         // maximising I/O overlap without spawning new tasks.
-        let write_results: Vec<(usize, std::result::Result<(), Error>)> =
-            futures::future::join_all(
-                all_staged
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, batch)| async move { (idx, self.write_batch(batch).await) }),
-            )
-            .await;
+        let write_results: Vec<std::result::Result<(), Error>> = futures::future::join_all(
+            all_staged
+                .iter()
+                .map(|batch| async move { self.write_batch(batch).await }),
+        )
+        .await;
 
-        for (idx, result) in write_results {
-            let batch = &all_staged[idx];
+        for (batch, result) in all_staged.into_iter().zip(write_results) {
             match result {
                 Ok(()) => {
-                    offsets_to_commit.extend(batch.offsets.clone());
                     self.metrics.record_archived(batch.record_count as u64);
+                    offsets_to_commit.extend(batch.offsets); // MOVE, no clone
                 }
                 Err(e) => {
                     error!(
@@ -402,7 +400,7 @@ impl Archiver {
             let transport = self.transport.lock().await;
             let commit_count = offsets_to_commit.len() as u64;
             debug!(count = commit_count, "Committing Kafka offsets");
-            if let Err(e) = transport.commit(&offsets_to_commit).await {
+            if let Err(e) = transport.commit(offsets_to_commit).await {
                 self.metrics.record_commit_error();
                 error!(error = %e, count = commit_count, "Failed to commit offsets");
             }

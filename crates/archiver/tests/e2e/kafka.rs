@@ -71,7 +71,7 @@ async fn test_kafka_consume() {
     // Commit if we got any
     if !messages.is_empty() {
         let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
-        transport.commit(&offsets).await.expect("commit");
+        transport.commit(offsets).await.expect("commit");
     }
 
     transport.close().await.expect("close");

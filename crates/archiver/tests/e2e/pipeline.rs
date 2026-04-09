@@ -183,7 +183,7 @@ async fn test_e2e_kafka_to_file_archive() {
 
         // Commit offsets
         let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
-        transport.commit(&offsets).await.expect("commit");
+        transport.commit(offsets).await.expect("commit");
 
         attempts = 0; // reset on successful recv
     }
@@ -280,7 +280,7 @@ async fn test_e2e_kafka_to_compressed_archive() {
         total_received += messages.len() as u64;
 
         let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
-        transport.commit(&offsets).await.expect("commit");
+        transport.commit(offsets).await.expect("commit");
         attempts = 0;
     }
 

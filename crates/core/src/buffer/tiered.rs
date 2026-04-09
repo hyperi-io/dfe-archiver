@@ -126,8 +126,8 @@ impl HotBuffer {
 }
 
 /// LRU tracking for hot buffers.
-/// Lookup is O(1) via hash. Removal uses shift_remove (O(n) index shift)
-/// but this is a fast memmove on a small array (max_hot_buffers, typically 64).
+/// Lookup is O(1) via hash. Removal uses `shift_remove` (O(n) index shift)
+/// but this is a fast memmove on a small array (`max_hot_buffers`, typically 64).
 struct LruTracker {
     order: IndexMap<CompactString, ()>,
     capacity: usize,
@@ -145,7 +145,7 @@ impl LruTracker {
         self.order.shift_remove(key);
         self.order.insert(key.clone(), ());
         if self.order.len() > self.capacity {
-            self.order.shift_remove_index(0).map(|(k, _)| k)
+            self.order.shift_remove_index(0).map(|(k, ())| k)
         } else {
             None
         }
