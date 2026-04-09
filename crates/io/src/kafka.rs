@@ -67,8 +67,8 @@ impl TransportAdapter {
                     "Received Kafka message"
                 );
                 KafkaMessage::new(
-                    msg.key.clone(),
-                    msg.payload.clone(),
+                    msg.key,
+                    msg.payload,
                     topic,
                     partition,
                     offset,
@@ -88,19 +88,20 @@ impl TransportAdapter {
     ///
     /// # Errors
     /// Returns error if commit fails
-    pub async fn commit(&self, offsets: &[KafkaOffset]) -> Result<()> {
+    pub async fn commit(&self, offsets: Vec<KafkaOffset>) -> Result<()> {
         if offsets.is_empty() {
             return Ok(());
         }
 
-        let tokens: Vec<KafkaToken> = offsets.iter().map(|o| o.token().clone()).collect();
+        let count = offsets.len();
+        let tokens: Vec<KafkaToken> = offsets.into_iter().map(KafkaOffset::into_token).collect();
 
         self.transport
             .commit(&tokens)
             .await
             .map_err(|e| Error::Kafka(format!("commit failed: {e}")))?;
 
-        debug!(count = offsets.len(), "Committed offsets to Kafka");
+        debug!(count, "Committed offsets to Kafka");
         Ok(())
     }
 
@@ -286,7 +287,7 @@ impl MemoryTransportAdapter {
     }
 
     /// Commit is a no-op for memory transport
-    pub const fn commit(&self, _offsets: &[KafkaOffset]) {
+    pub fn commit(&self, _offsets: Vec<KafkaOffset>) {
         // No-op
     }
 }
