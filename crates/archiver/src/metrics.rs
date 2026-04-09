@@ -161,15 +161,6 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Wire the pipeline readiness flag to a `MetricsManager` `/readyz` endpoint.
-    ///
-    /// Call once after construction to connect the flag to the HTTP server's
-    /// readiness check. With `ServiceRuntime`, this is called on `runtime.metrics`.
-    pub fn wire_readiness(&self, manager: &mut MetricsManager) {
-        let ready_flag = Arc::clone(&self.ready);
-        manager.set_readiness_check(move || ready_flag.load(std::sync::atomic::Ordering::Acquire));
-    }
-
     // ── Layer 1: DfeMetrics pass-throughs ────────────────────────────
 
     /// Record messages received (dual-emit: archiver + `DfeMetrics`)
@@ -428,12 +419,6 @@ impl ArchiverMetrics {
     }
 }
 
-/// Initialise the metrics subsystem: register metrics, start HTTP server,
-/// wire `/readyz` to pipeline readiness.
-///
-/// Returns the `ArchiverMetrics` handle (wrapped in `Arc`) and the
-/// `MetricsManager` (which owns the server task).
-///
 /// Register archiver-specific metrics on the runtime's existing manager.
 ///
 /// The `ServiceRuntime` already installs the global Prometheus recorder and
