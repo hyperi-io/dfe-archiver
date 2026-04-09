@@ -72,6 +72,7 @@ bytes = ">=1.11"
 chrono = { version = ">=0.4.43", features = ["serde"] }
 uuid = { version = ">=1.18", features = ["v4", "serde"] }
 parking_lot = ">=0.12"
+rayon = ">=1.10"
 dashmap = ">=6.1"
 compact_str = ">=0.8"
 rustc-hash = ">=2.1"

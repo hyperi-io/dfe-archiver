@@ -59,6 +59,7 @@ chrono = { workspace = true }
 compact_str = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
