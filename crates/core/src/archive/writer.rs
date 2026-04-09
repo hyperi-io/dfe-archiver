@@ -11,6 +11,7 @@ use crate::compression::Compressor;
 use crate::config::ArchiveConfig;
 use crate::storage::StorageBackend;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
@@ -67,7 +68,7 @@ pub struct ArchiveState {
 pub struct ArchiveWriter {
     config: ArchiveConfig,
     policy: RollingPolicy,
-    compressor: Box<dyn Compressor + Send + Sync>,
+    compressor: Arc<dyn Compressor + Send + Sync>,
     storage: Box<dyn StorageBackend + Send + Sync>,
     state: Option<ArchiveState>,
     buffer: Vec<u8>,
@@ -85,7 +86,7 @@ impl ArchiveWriter {
         Self {
             config,
             policy,
-            compressor,
+            compressor: Arc::from(compressor),
             storage,
             state: None,
             buffer: Vec::with_capacity(1024 * 1024),
@@ -143,8 +144,17 @@ impl ArchiveWriter {
         }
 
         let uncompressed_len = self.buffer.len() as u64;
+
+        // Swap buffer with a pre-allocated replacement (avoids re-alloc on next write cycle)
+        let buffer = std::mem::replace(&mut self.buffer, Vec::with_capacity(1024 * 1024));
+        let compressor = Arc::clone(&self.compressor);
+
         let compress_start = std::time::Instant::now();
-        let compressed = self.compressor.compress(&self.buffer)?;
+        let compressed = tokio::task::spawn_blocking(move || compressor.compress(&buffer))
+            .await
+            .map_err(|e| {
+                crate::Error::Compression(format!("compression task join failed: {e}"))
+            })??;
         let compression_duration = compress_start.elapsed().as_secs_f64();
         let compressed_len = compressed.len() as u64;
 
@@ -162,7 +172,6 @@ impl ArchiveWriter {
             );
         }
 
-        self.buffer.clear();
         Ok(Some(FlushStats {
             compressed_bytes: compressed_len,
             uncompressed_bytes: uncompressed_len,
@@ -552,5 +561,59 @@ mod tests {
             "expected multiple rolled files, got {}",
             backend.file_count()
         );
+    }
+
+    #[tokio::test]
+    async fn test_flush_with_spawn_blocking_compression() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 3600,
+            },
+            "zstd",
+        );
+        let data = "x".repeat(10_000);
+        writer.write(data.as_bytes()).await.expect("write");
+        let stats = writer
+            .flush()
+            .await
+            .expect("flush")
+            .expect("should have stats");
+        assert!(
+            stats.compressed_bytes < stats.uncompressed_bytes,
+            "zstd should compress"
+        );
+        assert!(stats.compression_duration_secs >= 0.0);
+        writer.close().await.expect("close");
+        assert_eq!(backend.file_count(), 1);
+        assert!(backend.total_bytes() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_flush_cycles() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 3600,
+            },
+            "lz4",
+        );
+        for _ in 0..5 {
+            writer
+                .write(b"repeated data for compression test\n")
+                .await
+                .expect("write");
+            let stats = writer.flush().await.expect("flush");
+            assert!(stats.is_some(), "each flush should produce stats");
+        }
+        writer.close().await.expect("close");
+        assert_eq!(backend.file_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_flush_empty_is_noop() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "zstd");
+        let result = writer.flush().await.expect("flush empty");
+        assert!(result.is_none(), "flushing empty buffer should return None");
     }
 }
