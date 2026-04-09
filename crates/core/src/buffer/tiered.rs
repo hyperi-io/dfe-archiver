@@ -71,40 +71,49 @@ impl Default for TieredBufferConfig {
     }
 }
 
-/// Hot buffer for a single destination (Tier 1)
+/// Hot buffer for a single destination (Tier 1).
+/// Appends payload+newline directly during push to avoid a separate
+/// serialisation phase at flush time. Flush is a zero-cost `std::mem::take`.
 struct HotBuffer {
-    messages: Vec<Vec<u8>>,
+    data: Vec<u8>,
     offsets: Vec<KafkaOffset>,
-    size: usize,
+    record_count: usize,
     last_access: Instant,
     created_at: Instant,
 }
 
 impl HotBuffer {
-    fn new(_key: CompactString) -> Self {
+    fn new() -> Self {
         Self {
-            messages: Vec::with_capacity(1024),
+            data: Vec::with_capacity(1024 * 1024),
             offsets: Vec::with_capacity(1024),
-            size: 0,
+            record_count: 0,
             last_access: Instant::now(),
             created_at: Instant::now(),
         }
     }
 
-    fn push(&mut self, payload: Vec<u8>, offset: KafkaOffset) {
-        self.size += payload.len();
-        self.messages.push(payload);
+    fn push(&mut self, payload: &[u8], offset: KafkaOffset) {
+        self.data.extend_from_slice(payload);
+        self.data.push(b'\n');
         self.offsets.push(offset);
+        self.record_count += 1;
         self.last_access = Instant::now();
     }
 
-    fn drain(&mut self) -> (Vec<Vec<u8>>, Vec<KafkaOffset>) {
-        self.size = 0;
+    fn drain(&mut self) -> (Vec<u8>, Vec<KafkaOffset>, usize) {
         self.created_at = Instant::now();
+        let count = self.record_count;
+        self.record_count = 0;
         (
-            std::mem::take(&mut self.messages),
+            std::mem::take(&mut self.data),
             std::mem::take(&mut self.offsets),
+            count,
         )
+    }
+
+    fn size(&self) -> usize {
+        self.data.len()
     }
 
     fn age_secs(&self) -> u64 {
@@ -112,7 +121,7 @@ impl HotBuffer {
     }
 
     fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.data.is_empty()
     }
 }
 
@@ -280,8 +289,7 @@ impl TieredBufferManager {
     /// Buffer a message for a destination
     pub fn push(&self, destination: &str, message: KafkaMessage) -> Result<Vec<StagedBatch>> {
         let key = CompactString::from(destination);
-        let offset = KafkaOffset::from(&message);
-        let payload = message.payload;
+        let (payload, offset) = message.into_parts();
 
         self.stats.messages_buffered.fetch_add(1, Ordering::Relaxed);
 
@@ -298,12 +306,21 @@ impl TieredBufferManager {
         {
             debug!(
                 evicted_dest = %evict_key,
-                records = buffer.messages.len(),
-                bytes = buffer.size,
+                records = buffer.record_count,
+                bytes = buffer.size(),
                 "LRU eviction triggered"
             );
-            let (messages, offsets) = buffer.drain();
-            batches_to_write.push(self.create_staged_batch(evict_key, messages, offsets));
+            self.stats
+                .current_hot_bytes
+                .fetch_sub(buffer.size(), Ordering::Relaxed);
+            let (data, offsets, record_count) = buffer.drain();
+            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+            batches_to_write.push(StagedBatch {
+                destination: evict_key,
+                data,
+                offsets,
+                record_count,
+            });
             self.stats
                 .hot_buffer_evictions
                 .fetch_add(1, Ordering::Relaxed);
@@ -313,11 +330,12 @@ impl TieredBufferManager {
             self.stats
                 .current_hot_buffers
                 .fetch_add(1, Ordering::Relaxed);
-            HotBuffer::new(key.clone())
+            HotBuffer::new()
         });
 
-        let payload_size = payload.len();
-        entry.push(payload, offset);
+        let payload_size = payload.len() + 1; // payload + newline
+        entry.push(&payload, offset);
+        drop(payload); // free Kafka allocation immediately
         self.stats
             .current_hot_bytes
             .fetch_add(payload_size, Ordering::Relaxed);
@@ -325,16 +343,16 @@ impl TieredBufferManager {
 
         trace!(
             destination = %key,
-            buffer_size = entry.size,
-            buffer_records = entry.messages.len(),
+            buffer_size = entry.size(),
+            buffer_records = entry.record_count,
             buffer_age_secs = entry.age_secs(),
             "Buffer state after push"
         );
 
-        if entry.size >= self.config.hot_buffer_size
+        if entry.size() >= self.config.hot_buffer_size
             || entry.age_secs() >= self.config.hot_buffer_age_secs
         {
-            let trigger = if entry.size >= self.config.hot_buffer_size {
+            let trigger = if entry.size() >= self.config.hot_buffer_size {
                 "size"
             } else {
                 "age"
@@ -342,16 +360,22 @@ impl TieredBufferManager {
             debug!(
                 destination = %key,
                 trigger,
-                records = entry.messages.len(),
-                bytes = entry.size,
+                records = entry.record_count,
+                bytes = entry.size(),
                 "Hot buffer flush"
             );
-            let (messages, offsets) = entry.drain();
-            self.stats.current_hot_bytes.fetch_sub(
-                messages.iter().map(std::vec::Vec::len).sum::<usize>(),
-                Ordering::Relaxed,
-            );
-            batches_to_write.push(self.create_staged_batch(key, messages, offsets));
+            let flush_bytes = entry.size();
+            let (data, offsets, record_count) = entry.drain();
+            self.stats
+                .current_hot_bytes
+                .fetch_sub(flush_bytes, Ordering::Relaxed);
+            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+            batches_to_write.push(StagedBatch {
+                destination: key,
+                data,
+                offsets,
+                record_count,
+            });
         }
 
         Ok(batches_to_write)
@@ -369,12 +393,18 @@ impl TieredBufferManager {
             {
                 trace!(
                     destination = %key,
-                    records = entry.messages.len(),
-                    bytes = entry.size,
+                    records = entry.record_count,
+                    bytes = entry.size(),
                     "Flushing hot buffer"
                 );
-                let (messages, offsets) = entry.drain();
-                batches.push(self.create_staged_batch(key.clone(), messages, offsets));
+                let (data, offsets, record_count) = entry.drain();
+                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+                batches.push(StagedBatch {
+                    destination: key.clone(),
+                    data,
+                    offsets,
+                    record_count,
+                });
             }
         }
 
@@ -392,12 +422,18 @@ impl TieredBufferManager {
                 debug!(
                     destination = %key,
                     age_secs = entry.age_secs(),
-                    records = entry.messages.len(),
-                    bytes = entry.size,
+                    records = entry.record_count,
+                    bytes = entry.size(),
                     "Flushing aged hot buffer"
                 );
-                let (messages, offsets) = entry.drain();
-                batches.push(self.create_staged_batch(key, messages, offsets));
+                let (data, offsets, record_count) = entry.drain();
+                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+                batches.push(StagedBatch {
+                    destination: key,
+                    data,
+                    offsets,
+                    record_count,
+                });
             }
         }
 
@@ -412,33 +448,6 @@ impl TieredBufferManager {
             .acquire_owned()
             .await
             .expect("semaphore closed")
-    }
-
-    /// Create staged batch from buffered messages
-    fn create_staged_batch(
-        &self,
-        destination: CompactString,
-        messages: Vec<Vec<u8>>,
-        offsets: Vec<KafkaOffset>,
-    ) -> StagedBatch {
-        let record_count = messages.len();
-
-        let total_size: usize = messages.iter().map(|m| m.len() + 1).sum();
-        let mut data = Vec::with_capacity(total_size);
-
-        for msg in messages {
-            data.extend_from_slice(&msg);
-            data.push(b'\n');
-        }
-
-        self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-
-        StagedBatch {
-            destination,
-            data,
-            offsets,
-            record_count,
-        }
     }
 
     /// Get current stats snapshot
@@ -598,5 +607,91 @@ mod tests {
                 .expect("push");
             assert!(batches.is_empty(), "no eviction for existing keys at i={i}");
         }
+    }
+
+    #[test]
+    fn test_direct_append_ndjson_format() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 100_000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        manager
+            .push("dest", make_message(b"line1", "t", 0))
+            .expect("push");
+        manager
+            .push("dest", make_message(b"line2", "t", 1))
+            .expect("push");
+        manager
+            .push("dest", make_message(b"line3", "t", 2))
+            .expect("push");
+        let batches = manager.flush_all();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].record_count, 3);
+        assert_eq!(batches[0].data, b"line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_direct_append_preserves_offsets() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 100_000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        for i in 0..5 {
+            manager
+                .push("dest", make_message(b"msg", "topic", i))
+                .expect("push");
+        }
+        let batches = manager.flush_all();
+        assert_eq!(batches[0].offsets.len(), 5);
+        for (i, offset) in batches[0].offsets.iter().enumerate() {
+            assert_eq!(offset.offset(), i as i64);
+            assert_eq!(offset.topic(), "topic");
+        }
+    }
+
+    #[test]
+    fn test_size_flush_triggers_at_buffer_limit() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 20,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        let batches = manager
+            .push("dest", make_message(b"fifteen_bytes!!", "t", 0))
+            .expect("push");
+        assert!(batches.is_empty(), "should not flush yet");
+        let batches = manager
+            .push("dest", make_message(b"more!", "t", 1))
+            .expect("push");
+        assert_eq!(batches.len(), 1, "should flush on size trigger");
+        assert_eq!(batches[0].record_count, 2);
+    }
+
+    #[test]
+    fn test_empty_payload_handling() {
+        let config = TieredBufferConfig {
+            max_hot_buffers: 10,
+            hot_buffer_size: 100_000,
+            hot_buffer_age_secs: 3600,
+            ..Default::default()
+        };
+        let manager = TieredBufferManager::new(config).expect("create");
+        manager
+            .push("dest", make_message(b"", "t", 0))
+            .expect("push");
+        manager
+            .push("dest", make_message(b"data", "t", 1))
+            .expect("push");
+        let batches = manager.flush_all();
+        assert_eq!(batches[0].data, b"\ndata\n");
+        assert_eq!(batches[0].record_count, 2);
     }
 }
