@@ -75,32 +75,58 @@ impl KafkaMessage {
             token: KafkaToken::new(Arc::from(topic), partition, offset),
         }
     }
+
+    /// Destructure into payload and offset, moving the payload without copying
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<u8>, KafkaOffset) {
+        (self.payload, KafkaOffset::new(self.token))
+    }
 }
 
-/// Kafka offset for commit tracking (wraps hyperi-rustlib token)
+/// Kafka offset for commit tracking (newtype around hyperi-rustlib token)
 #[derive(Debug, Clone)]
-pub struct KafkaOffset {
-    pub topic: CompactString,
-    pub partition: i32,
-    pub offset: i64,
-    pub(crate) token: KafkaToken,
-}
+pub struct KafkaOffset(KafkaToken);
 
 impl KafkaOffset {
-    /// Get the commit token (for transport layer)
+    /// Create a new offset from a commit token
+    #[must_use]
+    pub fn new(token: KafkaToken) -> Self {
+        Self(token)
+    }
+
+    /// Topic name
+    #[must_use]
+    pub fn topic(&self) -> &str {
+        &self.0.topic
+    }
+
+    /// Partition number
+    #[must_use]
+    pub fn partition(&self) -> i32 {
+        self.0.partition
+    }
+
+    /// Offset value
+    #[must_use]
+    pub fn offset(&self) -> i64 {
+        self.0.offset
+    }
+
+    /// Consume the offset and return the inner commit token
+    #[must_use]
+    pub fn into_token(self) -> KafkaToken {
+        self.0
+    }
+
+    /// Get a reference to the commit token (for transport layer)
     pub fn token(&self) -> &KafkaToken {
-        &self.token
+        &self.0
     }
 }
 
 impl From<&KafkaMessage> for KafkaOffset {
     fn from(msg: &KafkaMessage) -> Self {
-        Self {
-            topic: msg.topic.clone(),
-            partition: msg.partition,
-            offset: msg.offset,
-            token: msg.token.clone(),
-        }
+        Self(msg.token.clone())
     }
 }
 
@@ -124,9 +150,9 @@ mod tests {
         let msg = KafkaMessage::for_test(b"data".to_vec(), "events", 3, 100);
         let offset = KafkaOffset::from(&msg);
 
-        assert_eq!(offset.topic.as_str(), "events");
-        assert_eq!(offset.partition, 3);
-        assert_eq!(offset.offset, 100);
+        assert_eq!(offset.topic(), "events");
+        assert_eq!(offset.partition(), 3);
+        assert_eq!(offset.offset(), 100);
     }
 
     #[test]
@@ -136,5 +162,26 @@ mod tests {
         assert_eq!(cloned.topic, msg.topic);
         assert_eq!(cloned.offset, msg.offset);
         assert_eq!(cloned.payload, msg.payload);
+    }
+
+    #[test]
+    fn test_into_parts_moves_payload() {
+        let payload = vec![1, 2, 3, 4, 5];
+        let msg = KafkaMessage::for_test(payload.clone(), "t", 0, 42);
+        let (extracted_payload, offset) = msg.into_parts();
+        assert_eq!(extracted_payload, payload);
+        assert_eq!(offset.topic(), "t");
+        assert_eq!(offset.partition(), 0);
+        assert_eq!(offset.offset(), 42);
+    }
+
+    #[test]
+    fn test_into_token_roundtrip() {
+        let msg = KafkaMessage::for_test(b"x".to_vec(), "events", 5, 99);
+        let offset = KafkaOffset::from(&msg);
+        let token = offset.into_token();
+        assert_eq!(token.topic.as_ref(), "events");
+        assert_eq!(token.partition, 5);
+        assert_eq!(token.offset, 99);
     }
 }
