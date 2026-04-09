@@ -44,6 +44,7 @@ dashmap = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
 fs2 = { workspace = true }
+indexmap = { workspace = true }
 
 # Async
 tokio = { workspace = true }
