@@ -30,6 +30,7 @@ use dfe_archiver_io::{KafkaStatsEmitter, TransportAdapter};
 use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -298,7 +299,7 @@ impl Archiver {
         // Router::route() is pure computation (&self, &KafkaMessage) — safe for par_iter.
         // For expression mode this involves sonic_rs JSON parse per message.
         let route_results: Vec<compact_str::CompactString> = messages
-            .iter()
+            .par_iter()
             .map(|msg| {
                 self.router.route(msg).unwrap_or_else(|e| {
                     self.metrics.record_routing_error();
