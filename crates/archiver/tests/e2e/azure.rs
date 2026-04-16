@@ -14,8 +14,11 @@ use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Get Azure configuration from environment
+/// Get Azure configuration from environment.
+///
+/// Loads `.env` from the project root first so tests use host-configured credentials.
 fn get_azure_config() -> Option<AzureConfig> {
+    common::load_dotenv();
     let account_name = env::var("AZURE_STORAGE_ACCOUNT").ok()?;
     Some(AzureConfig {
         account_name,

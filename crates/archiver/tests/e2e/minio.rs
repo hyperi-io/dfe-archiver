@@ -16,8 +16,11 @@ use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Check if `MinIO` is available (async version)
+/// Check if `MinIO` is available (async version).
+///
+/// Loads `.env` first so `MINIO_ENDPOINT` from project root is honoured.
 async fn minio_available() -> bool {
+    common::load_dotenv();
     let endpoint =
         env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
 
@@ -38,6 +41,7 @@ async fn minio_available() -> bool {
 
 /// Get `MinIO` configuration from environment or defaults
 fn get_minio_config() -> MinioConfig {
+    common::load_dotenv();
     MinioConfig {
         endpoint: env::var("MINIO_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string()),

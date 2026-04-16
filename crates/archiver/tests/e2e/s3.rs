@@ -15,8 +15,12 @@ use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Get S3 configuration from environment
+/// Get S3 configuration from environment.
+///
+/// Loads `.env` from the project root first so tests use host-configured
+/// credentials without needing them exported in the shell.
 fn get_s3_config() -> Option<S3Config> {
+    common::load_dotenv();
     let bucket = env::var("S3_BUCKET").ok()?;
     Some(S3Config {
         bucket,

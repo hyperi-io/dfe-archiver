@@ -17,7 +17,10 @@ use std::env;
 
 /// Get GCS configuration from environment.
 /// Prefers `GCS_SERVICE_ACCOUNT_KEY` (inline JSON) over `GOOGLE_APPLICATION_CREDENTIALS` (file path).
+///
+/// Loads `.env` from the project root first so tests use host-configured credentials.
 fn get_gcs_config() -> Option<GcsConfig> {
+    common::load_dotenv();
     let bucket = env::var("GCS_BUCKET").ok()?;
     Some(GcsConfig {
         bucket,
