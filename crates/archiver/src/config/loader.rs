@@ -259,4 +259,35 @@ mod tests {
             "uppercase GZIP should fail"
         );
     }
+
+    #[test]
+    fn test_s3_config_default_allow_http_is_false() {
+        // Security invariant: S3 config must default to HTTPS-only.
+        let cfg = dfe_archiver_core::config::S3Config::default();
+        assert!(
+            !cfg.allow_http,
+            "S3Config::default().allow_http must be false (HTTPS required)"
+        );
+    }
+
+    #[test]
+    fn test_s3_config_serde_round_trip_with_allow_http() {
+        use dfe_archiver_core::config::S3Config;
+        // Round-trip via YAML to ensure allow_http persists.
+        let mut cfg = S3Config {
+            bucket: "test-bucket".into(),
+            allow_http: true,
+            ..Default::default()
+        };
+        let yaml = serde_yaml_ng::to_string(&cfg).expect("serialise");
+        let parsed: S3Config = serde_yaml_ng::from_str(&yaml).expect("deserialise");
+        assert!(parsed.allow_http);
+        assert_eq!(parsed.bucket, "test-bucket");
+
+        // Absent field should deserialise to false (#[serde(default)]).
+        cfg.allow_http = false;
+        let yaml_no_flag = "bucket: test-bucket\n";
+        let parsed: S3Config = serde_yaml_ng::from_str(yaml_no_flag).expect("deserialise no flag");
+        assert!(!parsed.allow_http);
+    }
 }
