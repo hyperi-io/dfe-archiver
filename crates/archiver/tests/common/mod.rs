@@ -163,6 +163,133 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     Err("Kafka did not become healthy within 30s".into())
 }
 
+// ── MinIO lifecycle ──────────────────────────────────────────────────
+
+/// RAII guard that stops docker-compose services on drop — but only if the
+/// test started them. If services were already running, the guard leaves them
+/// alone so concurrent tests and dev workflows aren't disrupted.
+pub struct DockerGuard {
+    compose_file: String,
+    services: Vec<String>,
+    started_by_test: bool,
+}
+
+impl DockerGuard {
+    /// Mark that the guard doesn't own the containers (pre-existing).
+    pub fn noop(compose_file: impl Into<String>) -> Self {
+        Self {
+            compose_file: compose_file.into(),
+            services: Vec::new(),
+            started_by_test: false,
+        }
+    }
+}
+
+impl Drop for DockerGuard {
+    fn drop(&mut self) {
+        if !self.started_by_test || self.services.is_empty() {
+            return;
+        }
+        // Best-effort cleanup; don't panic in Drop.
+        let mut args = vec![
+            "compose".to_string(),
+            "-f".to_string(),
+            self.compose_file.clone(),
+            "down".to_string(),
+        ];
+        args.extend(self.services.iter().cloned());
+        let _ = std::process::Command::new("docker").args(&args).status();
+    }
+}
+
+/// Ensure `MinIO` is available for a test.
+///
+/// Order of preference:
+///   1. If `MINIO_ENDPOINT` is reachable — use it (no lifecycle management)
+///   2. Otherwise, try to start `MinIO` via `docker-compose.dev.yaml`
+///   3. If neither works, return `None` so the caller can skip the test
+///
+/// Returns a `DockerGuard` that stops the container on drop (only if this
+/// call actually started it).
+pub fn ensure_minio() -> Option<DockerGuard> {
+    load_dotenv();
+    let endpoint =
+        env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
+
+    // Quick reachability check (blocking reqwest would need runtime; use raw TCP)
+    let addr = endpoint
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:9000")
+        .to_string();
+    let host_port = if addr.contains(':') {
+        addr
+    } else {
+        format!("{addr}:9000")
+    };
+
+    let already_running = host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok());
+
+    if already_running {
+        return Some(DockerGuard::noop("docker-compose.dev.yaml"));
+    }
+
+    // Try to start via docker compose. The compose file lives at the workspace
+    // root, so resolve it relative to CARGO_MANIFEST_DIR (the crate root is
+    // crates/archiver — go up two levels).
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let compose_path = manifest
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|p| p.join("docker-compose.dev.yaml"))
+        .filter(|p| p.exists())?;
+    let compose_file = compose_path.to_string_lossy().into_owned();
+
+    let status = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            &compose_file,
+            "up",
+            "-d",
+            "minio",
+            "minio-init",
+        ])
+        .status()
+        .ok()?;
+
+    if !status.success() {
+        return None;
+    }
+
+    // Wait up to 30s for MinIO to become reachable
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_secs(1));
+        if host_port
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .is_some_and(|a| {
+                std::net::TcpStream::connect_timeout(&a, Duration::from_secs(1)).is_ok()
+            })
+        {
+            return Some(DockerGuard {
+                compose_file: compose_file.clone(),
+                services: vec!["minio".into(), "minio-init".into()],
+                started_by_test: true,
+            });
+        }
+    }
+
+    None
+}
+
 // ── Test data helpers ────────────────────────────────────────────────
 
 /// Generate unique topic name for tests

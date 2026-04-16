@@ -16,29 +16,6 @@ use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
 use std::env;
 
-/// Check if `MinIO` is available (async version).
-///
-/// Loads `.env` first so `MINIO_ENDPOINT` from project root is honoured.
-async fn minio_available() -> bool {
-    common::load_dotenv();
-    let endpoint =
-        env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok();
-
-    if let Some(client) = client {
-        let health_url = format!("{endpoint}/minio/health/live");
-        if let Ok(resp) = client.get(&health_url).send().await {
-            return resp.status().is_success();
-        }
-    }
-
-    false
-}
-
 /// Get `MinIO` configuration from environment or defaults
 fn get_minio_config() -> MinioConfig {
     common::load_dotenv();
@@ -58,11 +35,13 @@ fn get_minio_config() -> MinioConfig {
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_basic_operations() {
-    if !minio_available().await {
-        eprintln!("Skipping: MinIO not available at localhost:9000");
-        eprintln!("Start with: docker compose -f docker-compose.dev.yaml up -d minio");
+    let Some(_guard) = common::ensure_minio() else {
+        eprintln!(
+            "Skipping: MinIO not available and could not be started via docker-compose.dev.yaml"
+        );
         return;
-    }
+    };
+    // _guard stops MinIO on drop if this test started it; no-op if pre-existing.
 
     let config = get_minio_config();
     let backend =
@@ -97,10 +76,10 @@ async fn test_minio_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    if !minio_available().await {
+    let Some(_guard) = common::ensure_minio() else {
         eprintln!("Skipping: MinIO not available");
         return;
-    }
+    };
 
     let minio_config = get_minio_config();
 
@@ -136,10 +115,10 @@ async fn test_minio_archive_roundtrip() {
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_minio_large_file_upload() {
-    if !minio_available().await {
+    let Some(_guard) = common::ensure_minio() else {
         eprintln!("Skipping: MinIO not available");
         return;
-    }
+    };
 
     let config = get_minio_config();
     let backend = ObjectStoreBackend::new_minio(&config, "large-test".to_string(), 8 * 1024 * 1024)
@@ -173,10 +152,10 @@ async fn test_minio_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    if !minio_available().await {
+    let Some(_guard) = common::ensure_minio() else {
         eprintln!("Skipping: MinIO not available");
         return;
-    }
+    };
 
     let minio_config = get_minio_config();
     let test_prefix = format!("test-rolling-{}", std::process::id());
@@ -243,10 +222,10 @@ async fn test_minio_rolling_by_size() {
 #[tokio::test]
 #[ignore = "requires running MinIO - run with --ignored"]
 async fn test_create_backend_minio_url() {
-    if !minio_available().await {
+    let Some(_guard) = common::ensure_minio() else {
         eprintln!("Skipping: MinIO not available");
         return;
-    }
+    };
 
     let minio_config = get_minio_config();
 
