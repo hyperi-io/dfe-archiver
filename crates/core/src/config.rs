@@ -439,6 +439,10 @@ impl ApplyFlatEnv for Config {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.endpoint = Some(v);
         }
+        if let Some(v) = flat_env::flat_env_string("S3", "ALLOW_HTTP") {
+            let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
+            s3.allow_http = matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+        }
     }
 }
 
