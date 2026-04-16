@@ -1,3 +1,15 @@
+## [1.6.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.4...v1.6.5) (2026-04-16)
+
+
+### Bug Fixes
+
+* add ARCHIVER_S3_ALLOW_HTTP env var support ([7c3f831](https://github.com/hyperi-io/dfe-archiver/commit/7c3f8310ecd985d73153d7ed5effa30f5d8fc12b))
+* add tests for S3 allow_http default and serde round-trip ([0f88087](https://github.com/hyperi-io/dfe-archiver/commit/0f8808765009c5c1d98e7b07f8e00d0afdef62a1))
+* address security and robustness issues from code review ([e96b03a](https://github.com/hyperi-io/dfe-archiver/commit/e96b03ad795b2d99c17c97028bdd4fa68a5afe03))
+* ensure e2e tests stop docker containers they started ([1fc7e2c](https://github.com/hyperi-io/dfe-archiver/commit/1fc7e2ce4240975c3072c77e71a111853c6a6ed0))
+* load .env in e2e tests so they use host-configured credentials ([a615298](https://github.com/hyperi-io/dfe-archiver/commit/a6152980dd9b55391f5c635c35287a5962a2d3ab))
+* redact deleted AWS access key in TODO.md (gitleaks) ([347b821](https://github.com/hyperi-io/dfe-archiver/commit/347b82156d3454757bac3311c9817ed564ae261f))
+
 ## [1.6.4](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.3...v1.6.4) (2026-04-09)
 
 
