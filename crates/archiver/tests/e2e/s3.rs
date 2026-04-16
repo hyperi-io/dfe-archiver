@@ -28,6 +28,9 @@ fn get_s3_config() -> Option<S3Config> {
             .ok()
             .map(dfe_archiver::config::sensitive::SensitiveString::from),
         endpoint: env::var("S3_ENDPOINT").ok(),
+        allow_http: env::var("S3_ALLOW_HTTP")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
     })
 }
 

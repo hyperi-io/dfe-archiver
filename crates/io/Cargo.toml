@@ -37,6 +37,7 @@ futures = { workspace = true }
 # Utilities
 compact_str = { workspace = true }
 tracing = { workspace = true }
+percent-encoding = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

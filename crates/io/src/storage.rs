@@ -152,9 +152,10 @@ pub struct ObjectStoreBackend {
 impl ObjectStoreBackend {
     /// Create backend for AWS S3
     pub fn new_s3(config: &S3Config, prefix: String, chunk_size: usize) -> Result<Self> {
+        // `allow_http` defaults to false (HTTPS required). Only enable for local/dev endpoints.
         let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&config.bucket)
-            .with_allow_http(true);
+            .with_allow_http(config.allow_http);
 
         if let Some(ref region) = config.region {
             builder = builder.with_region(region);
@@ -307,7 +308,10 @@ impl ObjectStoreBackend {
     }
 }
 
-/// Parse SAS token query string into key-value pairs
+/// Parse SAS token query string into key-value pairs.
+///
+/// Values are percent-decoded so that Azure SDK receives the raw signature
+/// bytes (SAS tokens often contain `%3D`, `%20`, etc.).
 fn parse_sas_pairs(sas: &str) -> Vec<(String, String)> {
     let sas = sas.strip_prefix('?').unwrap_or(sas);
     sas.split('&')
@@ -315,7 +319,10 @@ fn parse_sas_pairs(sas: &str) -> Vec<(String, String)> {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next()?;
             let value = parts.next().unwrap_or("");
-            Some((key.to_string(), value.to_string()))
+            let decoded_value = percent_encoding::percent_decode_str(value)
+                .decode_utf8_lossy()
+                .into_owned();
+            Some((key.to_string(), decoded_value))
         })
         .collect()
 }
@@ -601,6 +608,27 @@ mod tests {
 
         let pairs = parse_sas_pairs("sv=2021-08-06&ss=b");
         assert_eq!(pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_sas_pairs_url_decodes_values() {
+        // Real SAS tokens contain percent-encoded signature/timestamp values
+        let pairs = parse_sas_pairs("?sig=abc%2Bdef%2Fghi%3D&se=2026-04-16T12%3A00%3A00Z&sp=rwdl");
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], ("sig".to_string(), "abc+def/ghi=".to_string()));
+        assert_eq!(
+            pairs[1],
+            ("se".to_string(), "2026-04-16T12:00:00Z".to_string())
+        );
+        assert_eq!(pairs[2], ("sp".to_string(), "rwdl".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sas_pairs_empty_value() {
+        let pairs = parse_sas_pairs("sv=&key=value");
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("sv".to_string(), String::new()));
+        assert_eq!(pairs[1], ("key".to_string(), "value".to_string()));
     }
 
     #[test]

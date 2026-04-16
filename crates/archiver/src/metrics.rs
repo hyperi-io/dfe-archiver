@@ -35,9 +35,11 @@ pub struct ArchiverMetrics {
     pub sink: Option<SinkMetrics>,
     pub backpressure: Option<BackpressureMetrics>,
 
-    // EPS (events per second) rate tracking
+    // EPS (events per second) rate tracking.
+    // parking_lot::Mutex used for poison-free locking (Instant::elapsed cannot panic,
+    // but belt-and-braces: a future caller that panics under the lock won't poison it).
     eps_counter: AtomicU64,
-    eps_last_update: std::sync::Mutex<Instant>,
+    eps_last_update: parking_lot::Mutex<Instant>,
 }
 
 impl Default for ArchiverMetrics {
@@ -51,7 +53,7 @@ impl Default for ArchiverMetrics {
             sink: None,
             backpressure: None,
             eps_counter: AtomicU64::new(0),
-            eps_last_update: std::sync::Mutex::new(Instant::now()),
+            eps_last_update: parking_lot::Mutex::new(Instant::now()),
         }
     }
 }
@@ -157,7 +159,7 @@ impl ArchiverMetrics {
             sink: Some(sink),
             backpressure: Some(backpressure),
             eps_counter: AtomicU64::new(0),
-            eps_last_update: std::sync::Mutex::new(Instant::now()),
+            eps_last_update: parking_lot::Mutex::new(Instant::now()),
         }
     }
 
@@ -183,10 +185,9 @@ impl ArchiverMetrics {
     /// approach: accumulates events since last call, divides by elapsed seconds,
     /// then resets. This gives a true instantaneous rate rather than relying on
     /// Prometheus `rate()` over scrape intervals.
-    #[allow(clippy::expect_used)]
     pub fn update_eps(&self) {
         let count = self.eps_counter.swap(0, Ordering::Relaxed);
-        let mut last = self.eps_last_update.lock().expect("eps lock");
+        let mut last = self.eps_last_update.lock();
         let elapsed = last.elapsed().as_secs_f64();
         if elapsed > 0.0 {
             let eps = count as f64 / elapsed;

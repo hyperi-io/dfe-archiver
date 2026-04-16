@@ -1211,6 +1211,7 @@ dependencies = [
  "futures",
  "hyperi-rustlib",
  "object_store",
+ "percent-encoding",
  "rdkafka",
  "tempfile",
  "tokio",

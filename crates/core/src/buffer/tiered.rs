@@ -440,14 +440,15 @@ impl TieredBufferManager {
         batches
     }
 
-    /// Get writer permit (blocks if max concurrent writers reached)
-    #[allow(clippy::expect_used)]
-    pub async fn acquire_writer_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+    /// Get writer permit (blocks if max concurrent writers reached).
+    ///
+    /// Returns `Err` if the semaphore has been closed (typically during shutdown).
+    pub async fn acquire_writer_permit(&self) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
         self.writer_semaphore
             .clone()
             .acquire_owned()
             .await
-            .expect("semaphore closed")
+            .map_err(|_| crate::Error::Runtime("writer semaphore closed".to_string()))
     }
 
     /// Get current stats snapshot

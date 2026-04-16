@@ -198,6 +198,9 @@ pub struct S3Config {
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<SensitiveString>,
     pub bucket: String,
+    /// Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS required).
+    #[serde(default)]
+    pub allow_http: bool,
 }
 
 /// GCS configuration
