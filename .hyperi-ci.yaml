@@ -24,11 +24,10 @@ quality:
     clippy: blocking        # Linting (cargo clippy)
     audit: warn             # Security audit (cargo audit) - warn only
     deny: warn              # License/advisory check (cargo deny)
-    # Feature sets to test with clippy (jemalloc and mimalloc are mutually exclusive)
+    # Feature sets to test with clippy (jemalloc-only per 2026-04-17 DFE policy)
     features:
       - "default"
-      - "default,jemalloc"
-      - "default,mimalloc"
+      - "jemalloc"
 
 # Testing
 test:
@@ -40,8 +39,7 @@ test:
     # Feature sets to test (match quality.rust.features for consistency)
     features:
       - "default"
-      - "default,jemalloc"
-      - "default,mimalloc"
+      - "jemalloc"
 
 # Building
 build:
@@ -55,7 +53,22 @@ build:
       - aarch64-unknown-linux-gnu
     # Feature sets to build (production builds use jemalloc)
     features:
-      - "default,jemalloc"
+      - "jemalloc"
+    # Channel-tiered release optimisation (hyperi-ci v1.12.1+).
+    # spike/alpha:    Tier 1 — jemalloc + thin LTO        (~4 min/arch)
+    # beta:           Tier 1 — jemalloc + fat LTO         (~10 min/arch)
+    # release:        Tier 2 — Tier 1 + PGO + BOLT        (~26 min/arch)
+    optimize:
+      pgo:
+        enabled: true
+        # Workload script must drive the actual hot path (consume → batch
+        # → compress → write) for ≥60s. Single-request curls or port-poll
+        # scripts produce NEGATIVE PGO gains. See dfe-loader Canary 2 +
+        # dfe-receiver Canary 1 lessons in TODO.md.
+        workload_cmd: "bash scripts/pgo-workload.sh"
+        duration_secs: 300
+      bolt:
+        enabled: true       # Linux-only, +5-15% on top of PGO. Requires pgo.
 
 # Publishing (on release)
 publish:
