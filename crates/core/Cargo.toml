@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-archiver-core"
-version = "1.6.5"
+version = "1.7.0"
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
 edition.workspace = true
 rust-version.workspace = true

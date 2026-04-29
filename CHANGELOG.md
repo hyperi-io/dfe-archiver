@@ -1,3 +1,16 @@
+# [1.7.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.5...v1.7.0) (2026-04-29)
+
+
+### Bug Fixes
+
+* **ci:** unblock hyperi-ci check — gitleaks/cargo-deny allowlists, infra status ([f3bf82a](https://github.com/hyperi-io/dfe-archiver/commit/f3bf82ad69191a0f5b59eb12bf4d839841349675))
+* code review batch — bound writers, drop Mutex, preserve error chain ([87c6254](https://github.com/hyperi-io/dfe-archiver/commit/87c6254cf1b52d7d3674fa6dd76665568e598237)), closes [hi#cardinality](https://github.com/hi/issues/cardinality) [hi#cardinality](https://github.com/hi/issues/cardinality)
+
+
+### Features
+
+* **ci:** wire hyperi-ci Tier 2 PGO + BOLT release optimisation ([9c9e5c0](https://github.com/hyperi-io/dfe-archiver/commit/9c9e5c0675312fcb353a6482c6a08c5ef93e1254))
+
 ## [1.6.5](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.4...v1.6.5) (2026-04-16)
 
 
