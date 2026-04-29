@@ -6,19 +6,12 @@
 // License:      FSL-1.1-ALv2
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-// Allocator selection (compile-time feature)
-// jemalloc takes priority if both features are enabled (e.g., --all-features)
-#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
+// Allocator selection: jemalloc (only allocator at all hyperi-ci channels per
+// 2026-04-17 DFE policy). hyperi-ci enables `--features jemalloc` per channel;
+// local `cargo build` uses the system allocator.
+#[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
-#[global_allocator]
-static GLOBAL_JEMALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
 use dfe_archiver::config::{

@@ -25,6 +25,11 @@ path = "src/lib.rs"
 name = "dfe-archiver"
 path = "src/main.rs"
 
+[[bin]]
+name = "pgo-driver"
+path = "src/bin/pgo-driver.rs"
+required-features = ["pgo-driver"]
+
 [lints]
 workspace = true
 
@@ -57,6 +62,7 @@ tracing = { workspace = true }
 # Utilities
 chrono = { workspace = true }
 compact_str = { workspace = true }
+lru = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
@@ -73,17 +79,19 @@ reqwest = { workspace = true }
 rdkafka = { workspace = true }
 
 [features]
-default = ["jemalloc"]
-jemalloc = ["tikv-jemallocator"]
-mimalloc = ["dep:mimalloc"]
+default = []
+jemalloc = ["dep:tikv-jemallocator"]
 transport-memory = ["dfe-archiver-core/transport-memory"]
+# Build the `pgo-driver` binary used by `scripts/pgo-workload.sh` to drive a
+# representative workload during PGO instrumentation. Default builds skip it.
+pgo-driver = ["dep:rdkafka"]
 full = ["jemalloc"]
 
 [dependencies.tikv-jemallocator]
 workspace = true
 optional = true
 
-[dependencies.mimalloc]
+[dependencies.rdkafka]
 workspace = true
 optional = true
 
