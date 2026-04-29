@@ -10,12 +10,16 @@
 useDefault = true
 
 # Project-specific allowlist
-# Uncomment and add entries as needed to exclude false positives.
 # The [allowlist] section requires at least one active check (paths, regexes,
 # commits, or stopwords) — do not add it with only commented-out entries.
-#
-# [allowlist]
-# description = "Project-specific false positive allowlist"
-# paths = [
-#     '''tests/fixtures/.*''',
-# ]
+
+[allowlist]
+description = "Project-specific false-positive allowlist"
+# Historical AWS access key in TODO.md at commit 2639714 (2026-04-16). The
+# key was deleted at AWS and 347b821 redacted later mentions, but gitleaks
+# scans full history so the original commit still trips. Allowlist by
+# commit-hash so we don't need the literal in this config (which would
+# itself trip Semgrep's hardcoded-credential detector).
+commits = [
+    "2639714081b0f13da87a6be6700139880ff90505",
+]

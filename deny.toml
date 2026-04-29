@@ -6,6 +6,20 @@
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
 [advisories]
+# Transitive rustls-webpki 0.101.7 vulnerabilities. Reachable only through
+# the AWS SDK chain (aws-smithy-http-client → rustls 0.21 → rustls-webpki
+# 0.101.7). Will clear when AWS SDK upgrades to rustls 0.23+. Tracked in
+# TODO.md → Dependabot Alerts. None are reachable in our config:
+#   - RUSTSEC-2026-0098 (DoS via CRL panic): we don't pass RevocationOptions
+#     to verify_for_usage(), so the vulnerable code path is unreachable.
+#   - RUSTSEC-2026-0099, -0104 (name-constraint corner cases): only relevant
+#     to apps that delegate cert chain validation to webpki directly with
+#     custom name constraints — AWS SDK does not.
+ignore = [
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
 
 [licenses]
 allow = [
