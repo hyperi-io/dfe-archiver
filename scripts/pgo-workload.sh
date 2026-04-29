@@ -7,6 +7,8 @@
 # License:   FSL-1.1-ALv2
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 #
+# Reference: dfe-loader Canary 2 (v1.17.5) PGO workload pattern.
+#
 # Usage:
 #   scripts/pgo-workload.sh <path-to-dfe-archiver-binary>
 #
