@@ -385,15 +385,21 @@ mod tests {
             Ok(())
         }
 
-        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-            Ok(self
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            let mut keys: Vec<String> = self
                 .files
                 .lock()
                 .expect("lock")
                 .keys()
                 .filter(|k| k.starts_with(prefix))
                 .cloned()
-                .collect())
+                .collect();
+            if let Some(cap) = limit
+                && keys.len() > cap
+            {
+                keys.truncate(cap);
+            }
+            Ok(keys)
         }
 
         fn name(&self) -> &'static str {
@@ -439,8 +445,8 @@ mod tests {
         async fn delete(&self, path: &str) -> Result<()> {
             self.0.delete(path).await
         }
-        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-            self.0.list_prefix(prefix).await
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix, limit).await
         }
         fn name(&self) -> &'static str {
             self.0.name()

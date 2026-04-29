@@ -151,13 +151,15 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
         return Err("docker compose --profile infra up -d failed".into());
     }
 
-    // Wait for Kafka to become reachable
-    for _ in 0..30 {
-        std::thread::sleep(Duration::from_secs(1));
-        let kf = kafka_test_config();
+    // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
+    // up to a 30s ceiling. Avoids blind 1s sleeps between probes — fast
+    // services no longer pay the worst-case wait.
+    let kf = kafka_test_config();
+    for _ in 0..120 {
         if kf.is_reachable() {
             return Ok(true);
         }
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     Err("Kafka did not become healthy within 30s".into())
@@ -268,15 +270,16 @@ pub fn ensure_minio() -> Option<DockerGuard> {
         return None;
     }
 
-    // Wait up to 30s for MinIO to become reachable
-    for _ in 0..30 {
-        std::thread::sleep(Duration::from_secs(1));
+    // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
+    // up to a 30s ceiling. Connect timeout reduced to 500ms — MinIO is
+    // local, anything slower is the container failing to bind.
+    for _ in 0..120 {
         if host_port
             .to_socket_addrs()
             .ok()
             .and_then(|mut a| a.next())
             .is_some_and(|a| {
-                std::net::TcpStream::connect_timeout(&a, Duration::from_secs(1)).is_ok()
+                std::net::TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_ok()
             })
         {
             return Some(DockerGuard {
@@ -285,6 +288,7 @@ pub fn ensure_minio() -> Option<DockerGuard> {
                 started_by_test: true,
             });
         }
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     None

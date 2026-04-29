@@ -20,9 +20,14 @@ use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, trace, warn};
 
-// Log spam guards for disk pressure conditions
-static SPOOL_FULL: AtomicBool = AtomicBool::new(false);
-static DISK_LOW: AtomicBool = AtomicBool::new(false);
+/// Per-instance log-spam guards for disk pressure conditions.
+/// Live on `TieredBufferManager` (not as module statics) so state does not
+/// leak across nextest test runs that share a process.
+#[derive(Default)]
+struct LogSpamGuards {
+    spool_full: AtomicBool,
+    disk_low: AtomicBool,
+}
 
 /// Configuration for tiered buffer manager
 #[derive(Debug, Clone)]
@@ -175,6 +180,7 @@ pub struct TieredBufferManager {
     lru: Mutex<LruTracker>,
     writer_semaphore: Arc<Semaphore>,
     stats: BufferStats,
+    log_guards: LogSpamGuards,
 }
 
 /// Buffer statistics
@@ -204,7 +210,7 @@ impl TieredBufferManager {
 
         let available = get_available_disk_space(&config.spool_dir).unwrap_or(0);
         if available < config.min_free_disk_bytes {
-            return Err(Error::Storage(format!(
+            return Err(Error::storage(format!(
                 "insufficient disk space: {} bytes available, {} required",
                 available, config.min_free_disk_bytes
             )));
@@ -226,6 +232,7 @@ impl TieredBufferManager {
             writer_semaphore,
             config,
             stats: BufferStats::default(),
+            log_guards: LogSpamGuards::default(),
         })
     }
 
@@ -236,7 +243,7 @@ impl TieredBufferManager {
             self.stats
                 .disk_pressure_events
                 .fetch_add(1, Ordering::Relaxed);
-            if log_state_change(&SPOOL_FULL, true) {
+            if log_state_change(&self.log_guards.spool_full, true) {
                 warn!(
                     current_spool,
                     write_size,
@@ -244,7 +251,7 @@ impl TieredBufferManager {
                     "Spool size limit reached — backpressure"
                 );
             }
-            return Err(Error::Storage(format!(
+            return Err(Error::storage(format!(
                 "spool full: {} + {} > {} bytes",
                 current_spool, write_size, self.config.max_spool_bytes
             )));
@@ -255,7 +262,7 @@ impl TieredBufferManager {
             self.stats
                 .disk_pressure_events
                 .fetch_add(1, Ordering::Relaxed);
-            if log_state_change(&DISK_LOW, true) {
+            if log_state_change(&self.log_guards.disk_low, true) {
                 warn!(
                     available,
                     write_size,
@@ -263,7 +270,7 @@ impl TieredBufferManager {
                     "Disk space low — backpressure"
                 );
             }
-            return Err(Error::Storage(format!(
+            return Err(Error::storage(format!(
                 "disk full: {} available, need {} + {} reserved",
                 available, write_size, self.config.min_free_disk_bytes
             )));

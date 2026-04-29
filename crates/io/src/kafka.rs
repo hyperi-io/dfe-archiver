@@ -35,7 +35,7 @@ impl TransportAdapter {
         let hs_config = convert_config(config);
         let transport = KafkaTransport::new(&hs_config)
             .await
-            .map_err(|e| Error::Kafka(format!("transport creation failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("transport creation failed", e))?;
 
         Ok(Self { transport })
     }
@@ -49,7 +49,7 @@ impl TransportAdapter {
             .transport
             .recv(max_messages)
             .await
-            .map_err(|e| Error::Kafka(format!("recv failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("recv failed", e))?;
 
         debug!(count = messages.len(), "Received messages from Kafka");
 
@@ -99,7 +99,7 @@ impl TransportAdapter {
         self.transport
             .commit(&tokens)
             .await
-            .map_err(|e| Error::Kafka(format!("commit failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("commit failed", e))?;
 
         debug!(count, "Committed offsets to Kafka");
         Ok(())
@@ -117,7 +117,7 @@ impl TransportAdapter {
         self.transport
             .close()
             .await
-            .map_err(|e| Error::Kafka(format!("close failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("close failed", e))?;
         Ok(())
     }
 }
@@ -177,13 +177,13 @@ impl KafkaStatsEmitter {
             hyperi_rustlib::transport::kafka::StatsContext,
         > = client_config
             .create_with_context(stats_ctx)
-            .map_err(|e| Error::Kafka(format!("stats consumer creation failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("stats consumer creation failed", e))?;
 
         // Subscribe to same topics so we get partition-level lag stats
         let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
         consumer
             .subscribe(&topic_refs)
-            .map_err(|e| Error::Kafka(format!("stats subscribe failed: {e}")))?;
+            .map_err(|e| Error::kafka_with("stats subscribe failed", e))?;
 
         let consumer = std::sync::Arc::new(consumer);
 

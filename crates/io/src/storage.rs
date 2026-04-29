@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dfe_archiver_core::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConfig, S3Config};
 use dfe_archiver_core::storage::StorageBackend;
 use dfe_archiver_core::{Error, Result};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -96,7 +96,7 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+    async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
         let search_dir = self.full_path(prefix);
         let base = &self.base_path;
         let mut results = Vec::new();
@@ -109,7 +109,7 @@ impl StorageBackend for FileBackend {
 
         if walk_dir.exists() {
             let mut stack = vec![walk_dir];
-            while let Some(dir) = stack.pop() {
+            'walk: while let Some(dir) = stack.pop() {
                 let mut entries = tokio::fs::read_dir(&dir).await?;
                 while let Some(entry) = entries.next_entry().await? {
                     let path = entry.path();
@@ -119,6 +119,11 @@ impl StorageBackend for FileBackend {
                         let rel_str = rel.to_string_lossy().to_string();
                         if rel_str.starts_with(prefix) {
                             results.push(rel_str);
+                            if let Some(cap) = limit
+                                && results.len() >= cap
+                            {
+                                break 'walk;
+                            }
                         }
                     }
                 }
@@ -172,7 +177,7 @@ impl ObjectStoreBackend {
 
         let store = builder
             .build()
-            .map_err(|e| Error::Storage(format!("failed to create S3 client: {e}")))?;
+            .map_err(|e| Error::storage_with("failed to create S3 client", e))?;
 
         info!(bucket = %config.bucket, prefix = %prefix, chunk_size, "S3 backend initialized");
 
@@ -205,7 +210,7 @@ impl ObjectStoreBackend {
 
         let store = builder
             .build()
-            .map_err(|e| Error::Storage(format!("failed to create MinIO client: {e}")))?;
+            .map_err(|e| Error::storage_with("failed to create MinIO client", e))?;
 
         info!(
             endpoint = %endpoint,
@@ -243,7 +248,7 @@ impl ObjectStoreBackend {
 
         let store = builder
             .build()
-            .map_err(|e| Error::Storage(format!("failed to create GCS client: {e}")))?;
+            .map_err(|e| Error::storage_with("failed to create GCS client", e))?;
 
         info!(bucket = %config.bucket, prefix = %prefix, "GCS backend initialized");
 
@@ -280,7 +285,7 @@ impl ObjectStoreBackend {
 
         let store = builder
             .build()
-            .map_err(|e| Error::Storage(format!("failed to create Azure client: {e}")))?;
+            .map_err(|e| Error::storage_with("failed to create Azure client", e))?;
 
         info!(
             account = %config.account_name,
@@ -333,10 +338,10 @@ impl StorageBackend for ObjectStoreBackend {
         let object_path = self.object_path(path);
 
         let upload = self.store.put_multipart(&object_path).await.map_err(|e| {
-            Error::Storage(format!(
-                "{}: multipart init failed for {path}: {e}",
-                self.backend_name
-            ))
+            Error::storage_with(
+                format!("{}: multipart init failed for {path}", self.backend_name),
+                e,
+            )
         })?;
 
         let write = WriteMultipart::new_with_chunk_size(upload, self.chunk_size);
@@ -352,7 +357,7 @@ impl StorageBackend for ObjectStoreBackend {
         let mut uploads = self.uploads.lock().await;
 
         let write = uploads.get_mut(path).ok_or_else(|| {
-            Error::Storage(format!(
+            Error::storage(format!(
                 "{}: no active upload for path: {path}",
                 self.backend_name
             ))
@@ -364,10 +369,10 @@ impl StorageBackend for ObjectStoreBackend {
             .wait_for_capacity(self.max_concurrency)
             .await
             .map_err(|e| {
-                Error::Storage(format!(
-                    "{}: part upload failed for {path}: {e}",
-                    self.backend_name
-                ))
+                Error::storage_with(
+                    format!("{}: part upload failed for {path}", self.backend_name),
+                    e,
+                )
             })?;
 
         debug!(
@@ -398,10 +403,13 @@ impl StorageBackend for ObjectStoreBackend {
         debug!(path = %path, backend = self.backend_name, "Completing multipart upload");
         let start = std::time::Instant::now();
         write.finish().await.map_err(|e| {
-            Error::Storage(format!(
-                "{}: multipart complete failed for {path}: {e}",
-                self.backend_name
-            ))
+            Error::storage_with(
+                format!(
+                    "{}: multipart complete failed for {path}",
+                    self.backend_name
+                ),
+                e,
+            )
         })?;
 
         let duration = start.elapsed();
@@ -419,40 +427,45 @@ impl StorageBackend for ObjectStoreBackend {
         match self.store.head(&object_path).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(Error::Storage(format!(
-                "{}: head failed for {path}: {e}",
-                self.backend_name
-            ))),
+            Err(e) => Err(Error::storage_with(
+                format!("{}: head failed for {path}", self.backend_name),
+                e,
+            )),
         }
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
         let object_path = self.object_path(path);
         self.store.delete(&object_path).await.map_err(|e| {
-            Error::Storage(format!(
-                "{}: delete failed for {path}: {e}",
-                self.backend_name
-            ))
+            Error::storage_with(
+                format!("{}: delete failed for {path}", self.backend_name),
+                e,
+            )
         })?;
         debug!(path = %object_path, backend = self.backend_name, "Deleted object");
         Ok(())
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+    async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
         let object_prefix = self.object_path(prefix);
         let list_prefix = Some(&object_prefix);
 
-        let objects: Vec<_> = self
-            .store
-            .list(list_prefix)
-            .try_collect()
-            .await
-            .map_err(|e| {
-                Error::Storage(format!(
-                    "{}: list failed for prefix {prefix}: {e}",
-                    self.backend_name
-                ))
-            })?;
+        // Stream the list and stop early at `limit` rather than collecting
+        // everything first. For S3/GCS/Azure this lets the caller cap the
+        // number of API pages fetched (object_store internally paginates).
+        let stream = self.store.list(list_prefix);
+        let stream = if let Some(cap) = limit {
+            futures::StreamExt::take(stream, cap).boxed()
+        } else {
+            stream
+        };
+
+        let objects: Vec<_> = stream.try_collect().await.map_err(|e| {
+            Error::storage_with(
+                format!("{}: list failed for prefix {prefix}", self.backend_name),
+                e,
+            )
+        })?;
 
         Ok(objects
             .into_iter()
@@ -586,6 +599,40 @@ mod tests {
 
         backend.delete("test/file.txt").await.expect("delete");
         assert!(!backend.exists("test/file.txt").await.expect("not exists"));
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_list_prefix_honours_limit() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let backend = FileBackend::new(temp_dir.path());
+
+        for i in 0..10 {
+            let path = format!("data/{i:02}.jsonl");
+            backend.create(&path).await.expect("create");
+            backend
+                .append(&path, format!("row{i}\n").as_bytes())
+                .await
+                .expect("append");
+            backend.close(&path).await.expect("close");
+        }
+
+        // Unbounded — gets all entries.
+        let all = backend.list_prefix("data/", None).await.expect("list all");
+        assert_eq!(all.len(), 10, "expected all 10 entries with limit=None");
+
+        // Capped — stops walking as soon as cap is met.
+        let capped = backend
+            .list_prefix("data/", Some(3))
+            .await
+            .expect("list capped");
+        assert_eq!(capped.len(), 3, "expected exactly 3 entries with limit=3");
+
+        // Limit larger than result set returns everything available.
+        let big_cap = backend
+            .list_prefix("data/", Some(100))
+            .await
+            .expect("list big cap");
+        assert_eq!(big_cap.len(), 10, "limit > available returns all");
     }
 
     #[tokio::test]

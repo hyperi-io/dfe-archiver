@@ -98,7 +98,7 @@ async fn ensure_topic(kf: &common::KafkaTestConfig, topic: &str) {
         }
     }
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
 /// Produce messages to a Kafka topic using rdkafka directly

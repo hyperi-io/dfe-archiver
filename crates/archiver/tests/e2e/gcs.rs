@@ -189,7 +189,7 @@ async fn test_gcs_rolling_by_size() {
             .expect("create verify backend");
 
     let objects = verify_backend
-        .list_prefix("data/")
+        .list_prefix("data/", None)
         .await
         .expect("list objects");
 

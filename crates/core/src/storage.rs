@@ -27,8 +27,14 @@ pub trait StorageBackend: Send + Sync {
     /// Delete file/object
     async fn delete(&self, path: &str) -> Result<()>;
 
-    /// List objects under a prefix
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>>;
+    /// List objects under a prefix.
+    ///
+    /// `limit`: when `Some(n)`, return at most `n` entries; the
+    /// implementation should stop walking / paginating as soon as the
+    /// limit is met to avoid materialising large result sets in memory.
+    /// `None` returns every match (use only for small prefixes — high-
+    /// cardinality prefixes can OOM the process).
+    async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>>;
 
     /// Get backend name
     fn name(&self) -> &'static str;

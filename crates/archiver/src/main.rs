@@ -176,7 +176,6 @@ impl DfeApp for App {
         // Verify Kafka connection
         archiver
             .check_connection()
-            .await
             .map_err(|e| CliError::Service(e.to_string()))?;
 
         // Register health checks

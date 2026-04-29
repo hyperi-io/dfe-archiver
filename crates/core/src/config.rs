@@ -137,6 +137,13 @@ pub struct ArchiveConfig {
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
     pub multipart_chunk_size: usize,
 
+    /// Maximum number of concurrent archive writers (one per unique routing
+    /// destination). When the cap is reached, the least-recently-used writer
+    /// is evicted and closed asynchronously. Caps file-handle use and bounds
+    /// the `dfe_archiver_unique_destinations` metric for expression-routed
+    /// pods on high-cardinality keys (e.g. per-org-id routing).
+    pub max_writers: usize,
+
     /// S3-specific configuration
     pub s3: Option<S3Config>,
 
@@ -182,6 +189,7 @@ impl Default for ArchiveConfig {
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size
             roll_interval_secs: 3600,            // 1 hour
             multipart_chunk_size: 8 * 1024 * 1024, // 8MB
+            max_writers: 1024,
             s3: None,
             gcs: None,
             azure: None,
@@ -248,6 +256,11 @@ pub struct BufferConfig {
 
     /// Number of concurrent archive writers
     pub writer_parallelism: usize,
+
+    /// How long to pause Kafka consumption after a backpressure trigger.
+    /// Lower values cycle faster but burn more CPU when downstream is slow;
+    /// higher values let buffers drain but increase tail latency.
+    pub backpressure_pause_secs: u64,
 }
 
 impl Default for BufferConfig {
@@ -257,6 +270,7 @@ impl Default for BufferConfig {
             flush_age_secs: 60,
             flush_records: 100_000,
             writer_parallelism: 4,
+            backpressure_pause_secs: 5,
         }
     }
 }

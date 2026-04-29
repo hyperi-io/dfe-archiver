@@ -233,6 +233,13 @@ impl ArchiverMetrics {
         counter!("dfe_archiver_archive_roll_total", "trigger" => trigger.to_string()).increment(1);
     }
 
+    /// Record an LRU eviction of a per-destination archive writer.
+    /// Increments a counter so operators can correlate sudden bumps with
+    /// `unique_destinations` saturating the configured `max_writers` cap.
+    pub fn record_writer_eviction(&self) {
+        counter!("dfe_archiver_writer_evictions_total").increment(1);
+    }
+
     /// Record bytes written (uncompressed input to writer)
     pub fn record_bytes_written(&self, bytes: u64) {
         counter!("dfe_archiver_bytes_written_total").increment(bytes);
@@ -371,8 +378,7 @@ impl ArchiverMetrics {
     pub fn set_last_batch_timestamp(&self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+            .map_or(0.0, |d| d.as_secs_f64());
         gauge!("dfe_archiver_pipeline_last_batch_timestamp_seconds").set(now);
     }
 

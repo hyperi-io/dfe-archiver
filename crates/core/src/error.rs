@@ -11,6 +11,11 @@ use thiserror::Error;
 /// Result type alias for archiver operations
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Boxed dynamic error source — preserves the original error chain so
+/// `tracing::error!(error = %e, ...)` plus `e.source()` walks reach the
+/// underlying rustlib / `object_store` / rdkafka diagnostic.
+pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Main error type for the archiver
 #[derive(Error, Debug)]
 pub enum Error {
@@ -18,13 +23,25 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
-    /// Kafka transport error
-    #[error("kafka error: {0}")]
-    Kafka(String),
+    /// Kafka transport error. `source` carries the underlying
+    /// `hyperi_rustlib::transport::TransportError` (or rdkafka error) when
+    /// the failure originated outside this crate.
+    #[error("kafka error: {message}")]
+    Kafka {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
 
-    /// Storage backend error
-    #[error("storage error: {0}")]
-    Storage(String),
+    /// Storage backend error. `source` carries the underlying
+    /// `object_store::Error`, `aws_sdk_s3` error, or filesystem error when
+    /// available.
+    #[error("storage error: {message}")]
+    Storage {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
 
     /// Compression error
     #[error("compression error: {0}")]
@@ -55,6 +72,40 @@ pub enum Error {
     Shutdown,
 }
 
+impl Error {
+    /// Construct a Kafka error without an underlying source.
+    pub fn kafka(message: impl Into<String>) -> Self {
+        Self::Kafka {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Construct a Kafka error wrapping the underlying error chain.
+    pub fn kafka_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Kafka {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Construct a Storage error without an underlying source.
+    pub fn storage(message: impl Into<String>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Construct a Storage error wrapping the underlying error chain.
+    pub fn storage_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+}
+
 /// Error category for retry/DLQ decisions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -72,9 +123,10 @@ impl Error {
     pub fn category(&self) -> ErrorCategory {
         match self {
             // Transient - retry
-            Self::Kafka(_) | Self::Storage(_) | Self::Runtime(_) | Self::BufferOverflow { .. } => {
-                ErrorCategory::Transient
-            }
+            Self::Kafka { .. }
+            | Self::Storage { .. }
+            | Self::Runtime(_)
+            | Self::BufferOverflow { .. } => ErrorCategory::Transient,
 
             // Data - DLQ
             Self::Serialization(_) | Self::Routing(_) | Self::Compression(_) => ErrorCategory::Data,
@@ -112,10 +164,10 @@ mod tests {
         let e = Error::Config("bad value".to_string());
         assert_eq!(format!("{e}"), "configuration error: bad value");
 
-        let e = Error::Kafka("connection refused".to_string());
+        let e = Error::kafka("connection refused");
         assert_eq!(format!("{e}"), "kafka error: connection refused");
 
-        let e = Error::Storage("permission denied".to_string());
+        let e = Error::storage("permission denied");
         assert_eq!(format!("{e}"), "storage error: permission denied");
 
         let e = Error::Shutdown;
@@ -129,12 +181,9 @@ mod tests {
 
     #[test]
     fn test_error_categories() {
+        assert_eq!(Error::kafka("timeout").category(), ErrorCategory::Transient);
         assert_eq!(
-            Error::Kafka("timeout".into()).category(),
-            ErrorCategory::Transient
-        );
-        assert_eq!(
-            Error::Storage("network".into()).category(),
+            Error::storage("network").category(),
             ErrorCategory::Transient
         );
         assert_eq!(
@@ -185,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_is_retryable() {
-        assert!(Error::Kafka("timeout".into()).is_retryable());
+        assert!(Error::kafka("timeout").is_retryable());
         assert!(!Error::Config("bad".into()).is_retryable());
         assert!(!Error::Routing("no dest".into()).is_retryable());
     }
@@ -202,5 +251,29 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
         let err: Error = json_err.into();
         assert!(matches!(err, Error::Serialization(_)));
+    }
+
+    #[test]
+    fn test_kafka_with_preserves_source_chain() {
+        use std::error::Error as _;
+
+        let inner = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "broker down");
+        let err = Error::kafka_with("recv failed", inner);
+
+        // Top-level message is the wrapper text only.
+        assert_eq!(format!("{err}"), "kafka error: recv failed");
+
+        // source() walks reach the underlying io::Error.
+        let src = err.source().expect("source set");
+        assert_eq!(src.to_string(), "broker down");
+    }
+
+    #[test]
+    fn test_storage_constructor_no_source() {
+        use std::error::Error as _;
+
+        let err = Error::storage("disk full");
+        assert_eq!(format!("{err}"), "storage error: disk full");
+        assert!(err.source().is_none());
     }
 }
