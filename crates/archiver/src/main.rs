@@ -219,6 +219,10 @@ impl DfeApp for App {
 
         Ok(())
     }
+
+    fn deployment_contract(&self) -> Option<hyperi_rustlib::deployment::DeploymentContract> {
+        Some(deployment_contract())
+    }
 }
 
 #[tokio::main]
