@@ -1,3 +1,12 @@
+## [1.7.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.0...v1.7.1) (2026-05-02)
+
+
+### Bug Fixes
+
+* **ci:** pgo-workload — disable DLQ file backend (unwriteable in runner) ([4524490](https://github.com/hyperi-io/dfe-archiver/commit/45244901342aaa0ddc51f67697e913d7fa8bd97c))
+* **deployment:** wire DfeApp::deployment_contract trait hook + bump rustlib to >=2.7.0 ([5716880](https://github.com/hyperi-io/dfe-archiver/commit/57168801b16233581f432a788429f64ab1b06b85))
+* **deps:** track rustlib 2.6.1 (cli→cli-service, worker→worker-pool) ([1864bde](https://github.com/hyperi-io/dfe-archiver/commit/1864bde75f21d65dbeb701554dc527f5720fa291))
+
 # [1.7.0](https://github.com/hyperi-io/dfe-archiver/compare/v1.6.5...v1.7.0) (2026-04-29)
 
 
