@@ -1,3 +1,11 @@
+## [1.7.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.1...v1.7.2) (2026-05-07)
+
+
+### Bug Fixes
+
+* **release:** force patch bump v1.7.2 ([0a468f6](https://github.com/hyperi-io/dfe-archiver/commit/0a468f6d97452677436f493daf37de79f33a9912))
+* **release:** retrigger publish under hyperi-ci v2.1.5 ([7db3e85](https://github.com/hyperi-io/dfe-archiver/commit/7db3e856050f7dacdd5f6639885f04694c3c8add))
+
 ## [1.7.1](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.0...v1.7.1) (2026-05-02)
 
 
