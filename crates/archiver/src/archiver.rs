@@ -135,9 +135,13 @@ impl Archiver {
             }
         };
 
+        // Shutdown token — created early so the DLQ drain task can be tied to it.
+        let cancel = CancellationToken::new();
+
         // Create DLQ (file-only mode — cascade to Kafka is optional via config)
-        let dlq = hyperi_rustlib::dlq::Dlq::file_only(&config.dlq, "dfe-archiver")
-            .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
+        let dlq =
+            hyperi_rustlib::dlq::Dlq::spawn(&config.dlq, "dfe-archiver", None, cancel.clone())
+                .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
         if config.dlq.enabled {
             info!(mode = ?config.dlq.mode, "DLQ enabled");
         }
@@ -160,7 +164,7 @@ impl Archiver {
             buffer,
             metrics,
             writers: parking_lot::Mutex::new(LruCache::new(writer_cap)),
-            cancel: CancellationToken::new(),
+            cancel,
             scaling,
             memory_guard,
             _stats_emitter: stats_emitter,
