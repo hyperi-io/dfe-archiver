@@ -9,7 +9,7 @@
 use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
+use hyperi_rustlib::metrics::{DfeMetrics, FlushTrigger, MetricsManager, TransportKind};
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -267,7 +267,7 @@ impl ArchiverMetrics {
     }
 
     /// Record flush operation with duration and trigger
-    pub fn record_flush(&self, duration_secs: f64, trigger: &str) {
+    pub fn record_flush(&self, duration_secs: f64, trigger: FlushTrigger) {
         counter!("dfe_archiver_flush_operations_total").increment(1);
         histogram!("dfe_archiver_flush_duration_seconds").record(duration_secs);
         if let Some(ref buffer) = self.buffer {
@@ -293,7 +293,7 @@ impl ArchiverMetrics {
             sink.record_error(backend);
         }
         if let Some(ref dfe) = self.dfe {
-            dfe.transport_send_errors("storage", 1);
+            dfe.transport_send_errors(TransportKind::Http, 1);
         }
     }
 
@@ -468,7 +468,7 @@ mod tests {
         m.record_bytes_compressed(2048, 4096);
         m.record_compression_duration(0.042);
         m.set_kafka_lag(500);
-        m.record_flush(0.01, "size");
+        m.record_flush(0.01, FlushTrigger::Size);
         m.record_error();
         m.record_sink_error("file");
         m.record_sink_duration("file", 0.005);

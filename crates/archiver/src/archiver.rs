@@ -29,6 +29,7 @@ use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::{KafkaStatsEmitter, TransportAdapter};
 use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+use hyperi_rustlib::metrics::FlushTrigger;
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure};
 use lru::LruCache;
 use rayon::prelude::*;
@@ -584,7 +585,8 @@ impl Archiver {
 
         let duration = start.elapsed();
         let backend = self.startup_config.archive.backend_name();
-        self.metrics.record_flush(duration.as_secs_f64(), "size");
+        self.metrics
+            .record_flush(duration.as_secs_f64(), FlushTrigger::Size);
         self.metrics.record_bytes_written(batch.data.len() as u64);
         self.metrics.record_batch_size(batch.data.len() as u64);
         self.metrics
