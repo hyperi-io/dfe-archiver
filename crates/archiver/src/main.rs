@@ -236,7 +236,7 @@ async fn main() {
     match &app.command {
         Some(Command::EmitDockerfile { output }) => {
             let contract = deployment_contract();
-            let content = generate_dockerfile(&contract);
+            let content = generate_dockerfile(&contract, None);
             if output == "-" {
                 print!("{content}");
             } else {
