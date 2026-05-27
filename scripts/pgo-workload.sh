@@ -169,6 +169,17 @@ for attempt in $(seq 1 60); do
     sleep 2
 done
 
+# Pre-create the topic. Redpanda auto-creates on PRODUCE but not on a consumer
+# SUBSCRIBE, so the archiver (a consumer) would never find "events" and never
+# reach ready -- and the load driver only starts after the archiver is ready,
+# so nothing ever produces it. Apache Kafka's auto-create-on-subscribe masked
+# this ordering. Create from a --network host client so it reaches the
+# advertised localhost:19092 listener (in-container rpk follows the advertised
+# address, which only resolves on the host).
+docker run --rm --network host "$KAFKA_IMAGE" \
+    topic create events -p 3 -X brokers=localhost:19092 >/dev/null 2>&1 || true
+echo "pgo-workload: created topic 'events'"
+
 # ----------------------------------------------------------------------------
 # Write ephemeral archiver config
 # ----------------------------------------------------------------------------
