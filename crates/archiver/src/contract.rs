@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn test_contract_generates_dockerfile() {
         let contract = deployment_contract();
-        let dockerfile = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+        let dockerfile = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
         assert!(dockerfile.contains("ubuntu:24.04"));
         assert!(dockerfile.contains("dfe-archiver"));
         assert!(dockerfile.contains("9090"));

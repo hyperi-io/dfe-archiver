@@ -250,7 +250,7 @@ async fn main() {
         }
         Some(Command::EmitHelm { output }) => {
             let contract = deployment_contract();
-            generate_chart(&contract, output).unwrap_or_else(|e| {
+            generate_chart(&contract, output, None).unwrap_or_else(|e| {
                 eprintln!("error: failed to generate chart: {e}");
                 std::process::exit(1);
             });
