@@ -3,7 +3,7 @@
 // Purpose:   E2E: produce to Kafka, archive to file, verify output
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use crate::common::{self, kafka_test_config, test_json_message, test_topic_name};

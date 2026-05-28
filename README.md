@@ -4,7 +4,7 @@
   Purpose:      Project overview and usage documentation
   Language:     Markdown
 
-  License:      FSL-1.1-ALv2
+  License:      BUSL-1.1
   Copyright:    (c) 2026 HyperI Pty Ltd
 -->
 
@@ -274,7 +274,6 @@ dfe-archiver version              # Version info
 
 ## License
 
-This software is licensed under the Functional Source License, Version 1.1,
-ALv2 Future License (FSL-1.1-ALv2). See [LICENSE](LICENSE) for details.
+This software is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE) for details.
 
 Copyright (c) 2026 HyperI Pty Ltd

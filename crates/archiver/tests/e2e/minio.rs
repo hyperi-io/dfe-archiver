@@ -3,7 +3,7 @@
 // Purpose:   E2E tests for MinIO storage backend
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 // Requires running MinIO. Run with: cargo nextest run --test e2e -- --ignored

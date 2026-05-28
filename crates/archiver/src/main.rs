@@ -3,7 +3,7 @@
 // Purpose:   CLI entry point using hyperi-rustlib DfeApp pattern
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 // Allocator selection: jemalloc (only allocator at all hyperi-ci channels per

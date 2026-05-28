@@ -3,7 +3,7 @@
 # Purpose:      Workspace root for high-volume Kafka-to-storage archiver
 # Language:     TOML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
 [workspace]
@@ -17,7 +17,7 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.94"
-license = "FSL-1.1-ALv2"
+license-file = "LICENSE"
 repository = "https://github.com/hyperi-io/dfe-archiver"
 authors = ["HyperI Pty Ltd <engineering@hyperi.io>"]
 

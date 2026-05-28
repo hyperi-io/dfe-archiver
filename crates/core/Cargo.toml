@@ -3,7 +3,7 @@
 # Purpose:      Core library - types, compression, buffering, routing, archive logic
 # Language:     TOML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
 [package]
@@ -12,7 +12,7 @@ version = "1.7.3"
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 

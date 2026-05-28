@@ -3,7 +3,7 @@
 // Purpose:   Prometheus metrics using hyperi-rustlib DFE metric groups
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use hyperi_rustlib::metrics::dfe_groups::{

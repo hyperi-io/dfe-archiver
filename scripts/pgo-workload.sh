@@ -4,7 +4,7 @@
 # Purpose:   PGO workload orchestrator — Redpanda + archiver + producer
 # Language:  Bash
 #
-# License:   FSL-1.1-ALv2
+# License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 #
 # Reference: dfe-loader Canary 2 (v1.17.5) PGO workload pattern.
