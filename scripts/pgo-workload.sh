@@ -269,7 +269,14 @@ for attempt in $(seq 1 60); do
         tail -100 "$WORK_DIR/archiver.log" >&2
         exit 1
     fi
-    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9091/readyz" \
+    # Primary signal: the archiver logs "<service> ready" once the pipeline
+    # is up (main.rs). Rust line-buffers stdout, so the line hits archiver.log
+    # immediately. The HTTP /readyz probe is kept as a fallback but proved
+    # unreliable in this metrics-only config — the readiness route is not
+    # served on the metrics port (9091) here — so the log line is the
+    # authoritative readiness check.
+    if grep -q ' ready"' "$WORK_DIR/archiver.log" 2>/dev/null \
+        || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9091/readyz" \
         || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9091/healthz"; then
         echo "pgo-workload: archiver ready (attempt $attempt)"
         break
