@@ -77,9 +77,7 @@ plugins:
   - - "@semantic-release/exec"
     - prepareCmd: "echo ${nextRelease.version} > VERSION && sed -i 's/^version = \"[^\"]*\"/version = \"${nextRelease.version}\"/' crates/core/Cargo.toml crates/io/Cargo.toml crates/archiver/Cargo.toml"
 
-  - - "@semantic-release/git"
-    - assets:
-        - CHANGELOG.md
-        - VERSION
-        - "crates/*/Cargo.toml"
-      message: "chore: version ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+  # @semantic-release/git DROPPED (2026-05): committed "chore: version X" back
+  # to main + tagged it; later force-pushes orphan it → tag unreachable → next
+  # release recomputes the same version → "tag vX exists". Now tags HEAD
+  # (reachable). Cargo.toml/VERSION stamped per build, not committed back.
