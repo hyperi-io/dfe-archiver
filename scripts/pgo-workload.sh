@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project:   dfe-archiver
 # File:      scripts/pgo-workload.sh
-# Purpose:   PGO workload orchestrator — Kafka + archiver + producer
+# Purpose:   PGO workload orchestrator — Redpanda + archiver + producer
 # Language:  Bash
 #
 # License:   FSL-1.1-ALv2
@@ -12,7 +12,7 @@
 # Usage:
 #   scripts/pgo-workload.sh <path-to-dfe-archiver-binary>
 #
-# Drives the archiver's hot path (Kafka consume → SIMD JSON route → buffer
+# Drives the archiver's hot path (Redpanda consume → SIMD JSON route → buffer
 # accumulate → zstd compress → file write + roll) under representative
 # load so a PGO-instrumented binary accumulates useful profile data.
 #
