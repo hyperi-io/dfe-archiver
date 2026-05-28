@@ -1,3 +1,21 @@
+## [1.7.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.2...v1.7.3) (2026-05-28)
+
+
+### Bug Fixes
+
+* adopt v2.7.1 DLQ API (Dlq::spawn + queue-admission send semantics) ([2dd55ee](https://github.com/hyperi-io/dfe-archiver/commit/2dd55ee4bdfb354af4e27296001ba8451349cb72))
+* **ci:** correct stale Kafka references in PGO workload header (now Redpanda) ([646eb0b](https://github.com/hyperi-io/dfe-archiver/commit/646eb0b09f0f60bb8924735a292127dbd27ca681))
+* **ci:** detect archiver readiness from log line, not unreliable /readyz probe ([36a6d9f](https://github.com/hyperi-io/dfe-archiver/commit/36a6d9f90bc0438376b287bda44dcc08c33fd758))
+* **ci:** pre-create Redpanda topic for PGO workload (no auto-create on consumer subscribe) ([afab57b](https://github.com/hyperi-io/dfe-archiver/commit/afab57b126be86cf3057a81db669cc4ba13eda43))
+* **ci:** use Redpanda (dev-container, 512M) for PGO workload broker; Kafka JVM OOMs 4GB runners ([546a0e6](https://github.com/hyperi-io/dfe-archiver/commit/546a0e66136a4e381b4586f8606ab13788b383c1))
+* **deps:** adopt rustlib v2.8.0 — final call sites ([c0c340b](https://github.com/hyperi-io/dfe-archiver/commit/c0c340b3c9018d0676c023549806b04f2a99fb8a))
+* **deps:** adopt rustlib v2.8.0 — remaining call sites ([962fb05](https://github.com/hyperi-io/dfe-archiver/commit/962fb05c62c9cc81fe867dfe75b67ff456b39bab))
+* **deps:** adopt rustlib v2.8.0 — typed metric label enums + generate_*() extra arg ([aad32d4](https://github.com/hyperi-io/dfe-archiver/commit/aad32d4695025faebab812c394b2ced51fafb434))
+* **deps:** bump hyperi-rustlib to >=2.7.1 ([8af5489](https://github.com/hyperi-io/dfe-archiver/commit/8af548937a227040856be303a66e5fbd35de7c30))
+* **deps:** bump hyperi-rustlib to >=2.8.0 ([9bbd234](https://github.com/hyperi-io/dfe-archiver/commit/9bbd2343b727e8c66d603390a457327a81a5ea52))
+* **release:** force patch bump v1.7.3 ([cb37d69](https://github.com/hyperi-io/dfe-archiver/commit/cb37d69c3fdf5e83283f56751102a5137833060a))
+* **release:** force patch bump v1.7.4 ([5101868](https://github.com/hyperi-io/dfe-archiver/commit/5101868435d8cc63bcee5e1ca28db45b0c71c77f))
+
 ## [1.7.2](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.1...v1.7.2) (2026-05-07)
 
 
