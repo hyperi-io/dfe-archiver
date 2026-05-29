@@ -12,7 +12,7 @@ version = "1.7.3"
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
 edition.workspace = true
 rust-version.workspace = true
-license-file.workspace = true
+license.workspace = true
 repository.workspace = true
 authors.workspace = true
 

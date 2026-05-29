@@ -12,7 +12,7 @@ version = "1.7.3"
 description = "I/O layer for dfe-archiver: Kafka transport and storage backends"
 edition.workspace = true
 rust-version.workspace = true
-license-file.workspace = true
+license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
