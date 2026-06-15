@@ -3,7 +3,7 @@
 // Purpose:   Prometheus metrics using hyperi-rustlib DFE metric groups
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use hyperi_rustlib::metrics::dfe_groups::{
@@ -286,9 +286,14 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Record storage write error with backend label
+    /// Record a storage-write error attributed to a backend (s3/gcs/azure/minio/file).
+    ///
+    /// Emits the per-backend sink error counter + the platform transport-error
+    /// counter. Does NOT touch `dfe_archiver_archive_errors_total` -- the write
+    /// path pairs this with `record_error()`, which owns that total, so the two
+    /// never double-count. Fills the per-backend storage-error metrics gap
+    /// (previously this was never called on the production path).
     pub fn record_sink_error(&self, backend: &str) {
-        counter!("dfe_archiver_archive_errors_total").increment(1);
         if let Some(ref sink) = self.sink {
             sink.record_error(backend);
         }

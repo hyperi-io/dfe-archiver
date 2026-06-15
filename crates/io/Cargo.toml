@@ -3,7 +3,7 @@
 # Purpose:      I/O layer - Kafka transport and storage backends
 # Language:     TOML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
 [package]
@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 dfe-archiver-core = { workspace = true }
-hyperi-rustlib = { workspace = true, features = ["transport-kafka", "metrics"] }
+hyperi-rustlib = { workspace = true, features = ["transport-kafka", "metrics", "governor"] }
 rdkafka = { workspace = true }
 
 # Cloud storage

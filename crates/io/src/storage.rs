@@ -3,7 +3,7 @@
 // Purpose:   Storage backend implementations (file, S3, MinIO, GCS, Azure)
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use async_trait::async_trait;

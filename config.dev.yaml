@@ -3,7 +3,7 @@
 # Purpose:      Development configuration for local testing
 # Language:     YAML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 #
 # Usage:
@@ -69,3 +69,27 @@ metrics:
   enabled: true
   address: "0.0.0.0:9090"
   path: "/metrics"
+
+# Horizontal scaling-pressure engine (rustlib 2.8.11). Honoured via the config
+# cascade -- run_app's guarded config::setup() ingests this --config file into
+# rustlib's global singleton, and the ScalingEngine reads `scaling.*` from it.
+# Emits dfe-archiver_scaling_pressure{name="default"} for a KEDA Prometheus
+# trigger. The smart default = max(CPU/cpu_target, kafka inbound) gated by the
+# object-store circuit. Inbound = Kafka (per-pod assigned-partition lag, pushed
+# from the consume loop); outbound = object store (NOT a rustlib transport, so
+# the outbound term is emit-only and never in the default composite).
+scaling:
+  enabled: true
+  interval_secs: 15
+  transport:
+    inbound: kafka
+    outbound: other        # s3/gcs/azure object store -- not a rustlib transport
+  params:
+    cpu_target: 0.70
+    # lag_target is PER-POD: sustained_msgs_per_sec_per_pod * tolerable_backlog_seconds
+    # (KEDA lagThreshold semantics). LEFT UNSET deliberately -- with no measured
+    # per-pod archiver throughput it would be a guess, and a wrong value
+    # mis-scales. Until then the Kafka lag term contributes 0 and the default
+    # reduces to CPU-only (+ circuit gate). TUNE-ME (Derek): set once a real
+    # per-pod sustained ingest rate is known.
+    # lag_target: 50000

@@ -3,7 +3,7 @@
 # Purpose:      AWS S3 Sink for HyperI XDR Archive (reference template)
 # Language:     YAML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 #
 # HyperI XDR Vector Component Template

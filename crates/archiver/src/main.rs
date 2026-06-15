@@ -3,7 +3,7 @@
 // Purpose:   CLI entry point using hyperi-rustlib DfeApp pattern
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 // Allocator selection: jemalloc (only allocator at all hyperi-ci channels per
@@ -165,11 +165,24 @@ impl DfeApp for App {
             }
         });
 
-        // Create and start archiver (pass pre-initialised metrics)
+        // Create and start archiver. Share the runtime's memory guard (the one
+        // feeding the self-regulation governor) and pass the governor so the
+        // Kafka receiver gets the inbound pause-partitions brake. When
+        // self_regulation is disabled, `runtime.governor` is None and the
+        // receiver is built without a gate (byte-identical to pre-governor).
         let archiver = Arc::new(
-            Archiver::new(shared_config, metrics)
-                .await
-                .map_err(|e| CliError::Service(e.to_string()))?,
+            Archiver::new(
+                shared_config,
+                metrics,
+                Arc::clone(&runtime.memory_guard),
+                runtime.governor.as_ref(),
+                // Per-pod scaling signals read by the runtime's ScalingEngine
+                // (rustlib 2.8.11). The archiver pushes assigned-lag + the
+                // object-store sink circuit into this cell from its loops.
+                Some(Arc::clone(&runtime.scaling_signals)),
+            )
+            .await
+            .map_err(|e| CliError::Service(e.to_string()))?,
         );
         let archiver_run = Arc::clone(&archiver);
 

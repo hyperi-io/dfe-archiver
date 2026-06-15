@@ -3,7 +3,7 @@
 // Purpose:   Config loading and validation integration tests
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use dfe_archiver::config::{Config, validate_config};

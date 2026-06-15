@@ -3,7 +3,7 @@
 // Purpose:   E2E tests against real Kafka (remote or docker-local)
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use crate::common::kafka_test_config;
@@ -40,7 +40,7 @@ async fn test_kafka_connection() {
 
     let config = build_kafka_config(vec!["test-topic".to_string()], "conn");
 
-    let transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config, None)
         .await
         .expect("create transport");
 
@@ -60,17 +60,21 @@ async fn test_kafka_consume() {
         &format!("{}", std::process::id()),
     );
 
-    let transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config, None)
         .await
         .expect("create transport");
 
-    // Try to receive messages (may be empty if topic is empty)
-    let messages = transport.recv(100).await.expect("recv");
-    println!("Received {} messages", messages.len());
+    // Try to receive a batch (may be empty if topic is empty)
+    let batch = transport.recv(100).await.expect("recv");
+    println!("Received {} messages", batch.messages.len());
 
     // Commit if we got any
-    if !messages.is_empty() {
-        let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
+    if !batch.messages.is_empty() {
+        let offsets: Vec<_> = batch
+            .messages
+            .iter()
+            .map(std::convert::Into::into)
+            .collect();
         transport.commit(offsets).await.expect("commit");
     }
 

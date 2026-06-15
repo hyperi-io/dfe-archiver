@@ -3,7 +3,7 @@
 // Purpose:   Compression codec comparison benchmarks
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 #![allow(clippy::expect_used)]

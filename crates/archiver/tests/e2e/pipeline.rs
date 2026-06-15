@@ -3,7 +3,7 @@
 // Purpose:   E2E: produce to Kafka, archive to file, verify output
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use crate::common::{self, kafka_test_config, test_json_message, test_topic_name};
@@ -157,7 +157,7 @@ async fn test_e2e_kafka_to_file_archive() {
 
     // Consume from Kafka
     let config = build_kafka_config(&topic);
-    let transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config, None)
         .await
         .expect("create transport");
 
@@ -165,7 +165,7 @@ async fn test_e2e_kafka_to_file_archive() {
     let mut attempts = 0;
 
     while total_received < message_count && attempts < 30 {
-        let messages = transport.recv(100).await.expect("recv");
+        let messages = transport.recv(100).await.expect("recv").messages;
 
         if messages.is_empty() {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -255,7 +255,7 @@ async fn test_e2e_kafka_to_compressed_archive() {
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
     let config = build_kafka_config(&topic);
-    let transport = TransportAdapter::new(&config)
+    let transport = TransportAdapter::new(&config, None)
         .await
         .expect("create transport");
 
@@ -263,7 +263,7 @@ async fn test_e2e_kafka_to_compressed_archive() {
     let mut attempts = 0;
 
     while total_received < message_count && attempts < 30 {
-        let messages = transport.recv(200).await.expect("recv");
+        let messages = transport.recv(200).await.expect("recv").messages;
 
         if messages.is_empty() {
             tokio::time::sleep(Duration::from_millis(500)).await;

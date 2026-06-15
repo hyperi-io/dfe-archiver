@@ -3,16 +3,31 @@
 // Purpose:   Kafka transport adapter wrapping hyperi-rustlib
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use compact_str::CompactString;
 use dfe_archiver_core::config::KafkaConfig;
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
+use hyperi_rustlib::SelfRegulationGovernor;
+use hyperi_rustlib::transport::filter::FilteredDlqEntry;
 use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
 use rdkafka::consumer::Consumer;
 use tracing::{debug, info, trace};
+
+/// A received block: the passing messages plus any inbound-filter DLQ entries.
+///
+/// The DLQ entries are surfaced (never silently dropped) so the orchestrator
+/// can route them onward. The archiver configures no inbound rustlib filters,
+/// so `dlq_entries` is empty in practice -- but the no-silent-drop contract is
+/// honoured regardless.
+pub struct ReceivedBatch {
+    /// Passing messages, each carrying its own commit token.
+    pub messages: Vec<KafkaMessage>,
+    /// Inbound-filter DLQ entries carried forward from the transport.
+    pub dlq_entries: Vec<FilteredDlqEntry>,
+}
 
 /// Transport adapter wrapping hyperi-rustlib Kafka transport
 pub struct TransportAdapter {
@@ -20,15 +35,27 @@ pub struct TransportAdapter {
 }
 
 impl TransportAdapter {
-    /// Create new transport adapter
+    /// Create a new transport adapter.
+    ///
+    /// When `governor` is `Some`, the self-regulation inbound brake is attached
+    /// to the Kafka receiver: under memory pressure the consumer's ASSIGNED
+    /// partitions are paused (the member stays in the group -- no rebalance) and
+    /// resumed once pressure clears. This is the pause-partitions gate for a
+    /// Kafka-source stage; nothing on the outbound archive drain is gated. When
+    /// `governor` is `None` (self-regulation disabled), construction is
+    /// byte-identical to before.
     ///
     /// # Errors
     /// Returns error if connection fails
-    pub async fn new(config: &KafkaConfig) -> Result<Self> {
+    pub async fn new(
+        config: &KafkaConfig,
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> Result<Self> {
         info!(
             brokers = %config.brokers.join(","),
             group_id = %config.group_id,
             topics = ?config.topics,
+            governed = governor.is_some(),
             "Creating Kafka transport via hyperi-rustlib"
         );
 
@@ -37,48 +64,75 @@ impl TransportAdapter {
             .await
             .map_err(|e| Error::kafka_with("transport creation failed", e))?;
 
+        // Attach the self-regulation pause-partitions gate over the runtime's
+        // shared pressure (the gate is evaluated automatically inside `recv`).
+        let transport = match governor {
+            Some(gov) => gov.attach_kafka_gate(transport),
+            None => transport,
+        };
+
         Ok(Self { transport })
     }
 
-    /// Receive batch of messages
+    /// Receive a batch from Kafka as a `WorkBatch`, reshaped into the archiver's
+    /// per-message `KafkaMessage` model.
+    ///
+    /// The transport yields a `WorkBatch<KafkaToken>` whose `records` and
+    /// `commit_tokens` are 1:1 and in the same order (one Kafka record produces
+    /// one record + one commit token), so they are zipped back into individual
+    /// `KafkaMessage`s -- preserving the per-message offset tracking the tiered
+    /// buffer relies on. Inbound-filter DLQ entries are surfaced for the caller
+    /// to route onward.
     ///
     /// # Errors
     /// Returns error if receive fails
-    pub async fn recv(&self, max_messages: usize) -> Result<Vec<KafkaMessage>> {
-        let messages = self
+    pub async fn recv(&self, max_messages: usize) -> Result<ReceivedBatch> {
+        let batch = self
             .transport
             .recv(max_messages)
             .await
             .map_err(|e| Error::kafka_with("recv failed", e))?;
 
-        debug!(count = messages.len(), "Received messages from Kafka");
+        debug!(
+            count = batch.records.len(),
+            dlq = batch.dlq_entries.len(),
+            "Received batch from Kafka"
+        );
 
-        let converted: Vec<KafkaMessage> = messages
+        // `records[i]` corresponds to `commit_tokens[i]` (the transport builds
+        // both in the same order from each Kafka record). Zip them back into the
+        // per-message model the buffer uses.
+        let messages: Vec<KafkaMessage> = batch
+            .records
             .into_iter()
-            .map(|msg| {
-                let topic = CompactString::from(msg.token.topic.as_ref());
-                let partition = msg.token.partition;
-                let offset = msg.token.offset;
+            .zip(batch.commit_tokens)
+            .map(|(record, token)| {
+                let topic = CompactString::from(token.topic.as_ref());
+                let partition = token.partition;
+                let offset = token.offset;
                 trace!(
                     topic = %topic,
                     partition,
                     offset,
-                    payload_bytes = msg.payload.len(),
+                    payload_bytes = record.payload.len(),
                     "Received Kafka message"
                 );
                 KafkaMessage::new(
-                    msg.key,
-                    msg.payload,
+                    record.key,
+                    record.payload.to_vec(),
                     topic,
                     partition,
                     offset,
-                    msg.timestamp_ms,
-                    msg.token,
+                    record.metadata.timestamp_ms,
+                    token,
                 )
             })
             .collect();
 
-        Ok(converted)
+        Ok(ReceivedBatch {
+            messages,
+            dlq_entries: batch.dlq_entries,
+        })
     }
 
     /// Commit offsets for processed messages
@@ -103,6 +157,24 @@ impl TransportAdapter {
 
         debug!(count, "Committed offsets to Kafka");
         Ok(())
+    }
+
+    /// Total consumer lag summed over THIS pod's ASSIGNED partitions.
+    ///
+    /// rdkafka reports `consumer_lag` only for assigned partitions, so the sum
+    /// is inherently PER-POD and scale-invariant: as the consumer group grows,
+    /// each pod's assigned lag falls. The rustlib 2.8.11 scaling engine consumes
+    /// it as the Kafka inbound pressure term via
+    /// `scaling_signals.set_kafka_assigned_lag`.
+    ///
+    /// Requires librdkafka statistics on the consumer (a non-zero
+    /// `statistics.interval.ms`); rustlib's `KafkaTransport` defaults it to
+    /// 5000ms, so the stats snapshot populates without extra config. With stats
+    /// disabled the snapshot is empty and this returns 0 (the engine's Kafka
+    /// term then contributes 0).
+    #[must_use]
+    pub fn assigned_lag(&self) -> i64 {
+        hyperi_rustlib::transport::kafka::total_consumer_lag(&self.transport.stats()).max(0)
     }
 
     /// Check if transport is healthy
@@ -222,6 +294,15 @@ impl KafkaStatsEmitter {
 
 /// Convert local config to hyperi-rustlib transport config
 fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfig {
+    // Force librdkafka statistics on so `transport.stats()` (and hence
+    // `assigned_lag()`) populates -- the rustlib 2.8.11 ScalingEngine's Kafka
+    // inbound term and the `dfe_archiver_kafka_lag` gauge both read it. rustlib
+    // already defaults this to 5000ms when unset, but we set it EXPLICITLY (as
+    // a highest-priority override) so a future profile/default change can never
+    // silently flip it to 0 and zero the lag signal.
+    let mut librdkafka_overrides = std::collections::HashMap::new();
+    librdkafka_overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
+
     hyperi_rustlib::transport::KafkaConfig {
         brokers: config.brokers.clone(),
         group: config.group_id.clone(),
@@ -230,10 +311,13 @@ fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfi
         sasl_username: config.sasl_username.clone(),
         sasl_password: config.sasl_password.clone(),
         security_protocol: config.security_protocol.clone(),
+        ssl_ca_location: config.ssl_ca_location.clone(),
+        allow_insecure_transport: config.allow_insecure_transport,
         session_timeout_ms: config.session_timeout_ms,
         max_poll_interval_ms: config.max_poll_interval_ms,
         // Use manual commit for at-least-once delivery
         enable_auto_commit: false,
+        librdkafka_overrides,
         ..Default::default()
     }
 }

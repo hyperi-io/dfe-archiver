@@ -3,7 +3,7 @@
 // Purpose:   Configuration type definitions
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
@@ -88,6 +88,17 @@ pub struct KafkaConfig {
     /// SASL password (never serialised in plaintext)
     pub sasl_password: Option<SensitiveString>,
 
+    /// Path to a CA certificate bundle for verifying the broker's TLS cert
+    /// (private-CA trust). Maps to librdkafka `ssl.ca.location`.
+    pub ssl_ca_location: Option<String>,
+
+    /// Deliberately opt into an unencrypted transport (PLAINTEXT /
+    /// `SASL_PLAINTEXT`) in production. Defaults to false: from rustlib v2.8.x
+    /// the Kafka transport REJECTS plaintext in production unless this is set
+    /// (e.g. mesh-encrypted in-cluster traffic). Outside production it has no
+    /// effect.
+    pub allow_insecure_transport: bool,
+
     /// Batch size for `recv()`
     pub batch_size: usize,
 
@@ -108,6 +119,8 @@ impl Default for KafkaConfig {
             security_protocol: "PLAINTEXT".to_string(),
             sasl_username: None,
             sasl_password: None,
+            ssl_ca_location: None,
+            allow_insecure_transport: false,
             batch_size: 10_000,
             max_poll_interval_ms: 300_000,
             session_timeout_ms: 30_000,
@@ -402,6 +415,13 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_string_sensitive("KAFKA", "SASL_PASSWORD") {
             self.kafka.sasl_password = Some(SensitiveString::from(v));
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "SSL_CA_LOCATION") {
+            self.kafka.ssl_ca_location = Some(v);
+        }
+        if let Some(v) = flat_env::flat_env_string("KAFKA", "ALLOW_INSECURE_TRANSPORT") {
+            self.kafka.allow_insecure_transport =
+                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         }
 
         // Archive

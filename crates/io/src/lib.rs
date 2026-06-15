@@ -3,13 +3,13 @@
 // Purpose:   I/O layer - Kafka transport and storage backend implementations
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 pub mod kafka;
 pub mod storage;
 
-pub use kafka::{KafkaStatsEmitter, TransportAdapter};
+pub use kafka::{KafkaStatsEmitter, ReceivedBatch, TransportAdapter};
 pub use storage::{FileBackend, ObjectStoreBackend, create_backend};
 
 #[cfg(any(test, feature = "transport-memory"))]

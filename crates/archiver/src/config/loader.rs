@@ -3,7 +3,7 @@
 // Purpose:   Configuration loading with cascade priority
 // Language:  Rust
 //
-// License:      FSL-1.1-ALv2
+// License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use dfe_archiver_core::config::Config;

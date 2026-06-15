@@ -1,7 +1,7 @@
 # Project:      dfe-archiver
 # File:         _typos.toml
 # Purpose:      Spell checking configuration for typos-cli
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HYPERI PTY LIMITED
 #
 # Based on: ci/templates/config/typos.toml
@@ -266,7 +266,7 @@ artifacts = "artifacts"
 # ---------------------------------------------------------------------------
 # Project-specific: Australian/British spellings in legal templates
 # ---------------------------------------------------------------------------
-# The FSL-1.1-ALv2 LICENSE file uses British "licence" (noun form).
+# The BUSL-1.1 LICENSE file uses British "licence" (noun form).
 # Allow both licence and license since both appear in the project.
 licence = "licence"
 

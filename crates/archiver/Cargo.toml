@@ -3,7 +3,7 @@
 # Purpose:      Binary and orchestration for the archiver service
 # Language:     TOML
 #
-# License:      FSL-1.1-ALv2
+# License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
 [package]
@@ -39,7 +39,11 @@ dfe-archiver-io = { workspace = true }
 hyperi-rustlib = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "metrics-dfe",
     "transport-kafka", "http-server", "tiered-sink", "spool",
-    "scaling", "deployment", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
+    # `expression` is REQUIRED for the ScalingEngine: it is gated on
+    # `#[cfg(all(feature="scaling", feature="expression"))]`. cli-service does
+    # NOT pull it, so without it the engine silently compiles out (no
+    # scaling_pressure gauge, signals pushed to a cell nobody reads).
+    "scaling", "expression", "deployment", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
 ] }
 
 # Async
