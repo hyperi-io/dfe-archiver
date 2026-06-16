@@ -304,6 +304,9 @@ fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfi
     librdkafka_overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
     hyperi_rustlib::transport::KafkaConfig {
+        // Archiver is consume-only (Kafka -> storage); the Consumer role means
+        // rustlib builds no idle producer (#44).
+        role: hyperi_rustlib::transport::KafkaRole::Consumer,
         brokers: config.brokers.clone(),
         group: config.group_id.clone(),
         topics: config.topics.clone(),
