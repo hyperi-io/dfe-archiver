@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Boxed dynamic error source — preserves the original error chain so
 /// `tracing::error!(error = %e, ...)` plus `e.source()` walks reach the
-/// underlying rustlib / `object_store` / rdkafka diagnostic.
+/// underlying scalo / `object_store` / rdkafka diagnostic.
 pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Main error type for the archiver
@@ -24,7 +24,7 @@ pub enum Error {
     Config(String),
 
     /// Kafka transport error. `source` carries the underlying
-    /// `hyperi_rustlib::transport::TransportError` (or rdkafka error) when
+    /// `scalo::transport::TransportError` (or rdkafka error) when
     /// the failure originated outside this crate.
     #[error("kafka error: {message}")]
     Kafka {

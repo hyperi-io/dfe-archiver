@@ -48,3 +48,23 @@ pub use dfe_archiver_core::config::{
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The archiver's weighted KEDA scaling components.
+///
+/// Single source of truth shared by the `ServiceApp::scaling_components`
+/// override (which registers them on the runtime's unified `ScalingPressure`,
+/// the engine `/scaling/pressure` serves) and the `Archiver`'s standalone
+/// fallback engine (built only when the runtime has `scaling` disabled). Both
+/// MUST register the same component set so the gauge and the served pressure
+/// agree. Weights/saturations mirror the legacy archiver model:
+/// `kafka_lag` (assigned-partition lag), `buffer_depth` (hot-buffer count), and
+/// `memory` (cgroup guard pressure ratio).
+#[must_use]
+pub fn scaling_components() -> Vec<scalo::scaling::ScalingComponent> {
+    use scalo::scaling::ScalingComponent;
+    vec![
+        ScalingComponent::new("kafka_lag", 0.40, 100_000.0),
+        ScalingComponent::new("buffer_depth", 0.30, 10_000.0),
+        ScalingComponent::new("memory", 0.30, 1.0),
+    ]
+}

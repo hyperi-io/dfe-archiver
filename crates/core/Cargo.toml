@@ -20,7 +20,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-hyperi-rustlib = { workspace = true, features = ["transport-kafka", "scaling", "dlq"] }
+scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq"] }
 
 # Serialization
 serde = { workspace = true }
@@ -59,4 +59,4 @@ tokio-test = { workspace = true }
 
 [features]
 default = []
-transport-memory = ["hyperi-rustlib/transport-memory"]
+transport-memory = ["scalo/transport-memory"]

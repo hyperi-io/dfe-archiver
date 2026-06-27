@@ -36,14 +36,13 @@ workspace = true
 [dependencies]
 dfe-archiver-core = { workspace = true }
 dfe-archiver-io = { workspace = true }
-hyperi-rustlib = { workspace = true, features = [
-    "config", "config-reload", "logger", "metrics", "metrics-dfe",
+scalo = { workspace = true, features = [
+    "config", "config-reload", "logger", "metrics", "service-metrics",
     "transport-kafka", "http-server", "tiered-sink", "spool",
-    # `expression` is REQUIRED for the ScalingEngine: it is gated on
-    # `#[cfg(all(feature="scaling", feature="expression"))]`. cli-service does
-    # NOT pull it, so without it the engine silently compiles out (no
-    # scaling_pressure gauge, signals pushed to a cell nobody reads).
-    "scaling", "expression", "deployment", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
+    # `scaling` exposes the unified ScalingPressure engine served at
+    # /scaling/pressure; `governor` exposes the self-regulation inbound brake.
+    # `expression` backs the CEL surface used by config/scaling tunables.
+    "scaling", "governor", "expression", "deployment", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
 ] }
 
 # Async

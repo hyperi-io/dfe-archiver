@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 dfe-archiver-core = { workspace = true }
-hyperi-rustlib = { workspace = true, features = ["transport-kafka", "metrics", "governor"] }
+scalo = { workspace = true, features = ["transport-kafka", "metrics", "governor"] }
 rdkafka = { workspace = true }
 
 # Cloud storage

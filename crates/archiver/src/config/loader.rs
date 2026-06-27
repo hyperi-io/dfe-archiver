@@ -8,7 +8,7 @@
 
 use dfe_archiver_core::config::Config;
 use dfe_archiver_core::{Error, Result};
-use hyperi_rustlib::config::flat_env::{ApplyFlatEnv, Normalize};
+use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
 use std::path::Path;
 use tracing::info;
 

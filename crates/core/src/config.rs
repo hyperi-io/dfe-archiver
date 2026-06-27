@@ -6,13 +6,13 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
-use hyperi_rustlib::config::sensitive::SensitiveString;
+use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
+use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
-pub use hyperi_rustlib::config::sensitive;
-pub use hyperi_rustlib::dlq::DlqConfig;
-pub use hyperi_rustlib::scaling::ScalingPressureConfig;
+pub use scalo::config::sensitive;
+pub use scalo::dlq::DlqConfig;
+pub use scalo::scaling::ScalingPressureConfig;
 
 /// Root configuration for dfe-archiver.
 ///
@@ -93,8 +93,8 @@ pub struct KafkaConfig {
     pub ssl_ca_location: Option<String>,
 
     /// Deliberately opt into an unencrypted transport (PLAINTEXT /
-    /// `SASL_PLAINTEXT`) in production. Defaults to false: from rustlib v2.8.x
-    /// the Kafka transport REJECTS plaintext in production unless this is set
+    /// `SASL_PLAINTEXT`) in production. Defaults to false: scalo's
+    /// Kafka transport REJECTS plaintext in production unless this is set
     /// (e.g. mesh-encrypted in-cluster traffic). Outside production it has no
     /// effect.
     pub allow_insecure_transport: bool,
@@ -494,12 +494,12 @@ impl Normalize for Config {
 }
 
 impl Config {
-    /// Register all config sections in the rustlib config registry.
+    /// Register all config sections in the scalo config registry.
     ///
     /// Enables the `/config` admin endpoint to dump effective config
     /// (with automatic redaction of sensitive fields like `sasl_password`).
     pub fn register_in_registry(&self) {
-        use hyperi_rustlib::config::registry;
+        use scalo::config::registry;
         registry::register("kafka", &self.kafka);
         registry::register("archive", &self.archive);
         registry::register("buffer", &self.buffer);

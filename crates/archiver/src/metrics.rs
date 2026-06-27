@@ -1,34 +1,34 @@
 // Project:   dfe-archiver
 // File:      crates/archiver/src/metrics.rs
-// Purpose:   Prometheus metrics using hyperi-rustlib DFE metric groups
+// Purpose:   Prometheus metrics using scalo metric groups
 // Language:  Rust
 //
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use hyperi_rustlib::metrics::dfe_groups::{
+use metrics::{counter, gauge, histogram};
+use scalo::metrics::groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{DfeMetrics, FlushTrigger, MetricsManager, TransportKind};
-use metrics::{counter, gauge, histogram};
+use scalo::metrics::{FlushTrigger, MetricsManager, ServiceMetrics, TransportKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-/// Archiver metrics -- combines rustlib DFE metric groups with
+/// Archiver metrics -- combines scalo metric groups with
 /// archiver-specific counters/gauges/histograms.
 ///
-/// Layer 1: `DfeMetrics` (platform `dfe_*` metrics)
+/// Layer 1: `ServiceMetrics` (platform `dfe_*` metrics)
 /// Layer 2: Group structs (`AppMetrics`, `BufferMetrics`, `ConsumerMetrics`,
 ///          `SinkMetrics`, `BackpressureMetrics`)
 /// Layer 3: Archiver-specific metrics (compression, archive roll, etc.)
 pub struct ArchiverMetrics {
-    /// Standard DFE metrics (None in tests without a metrics exporter)
-    dfe: Option<DfeMetrics>,
+    /// Standard platform metrics (None in tests without a metrics exporter)
+    dfe: Option<ServiceMetrics>,
     /// Pipeline readiness flag (shared with `MetricsManager` readiness check)
     ready: Arc<AtomicBool>,
 
-    // Layer 2: Metric groups from rustlib
+    // Layer 2: Metric groups from scalo
     pub app: Option<AppMetrics>,
     pub buffer: Option<BufferMetrics>,
     pub consumer: Option<ConsumerMetrics>,
@@ -62,9 +62,9 @@ impl ArchiverMetrics {
     /// Register all archiver metrics on the given manager.
     ///
     /// Uses a single `MetricsManager` for both metric registration and the
-    /// HTTP server. Combines rustlib DFE groups with archiver-specific metrics.
+    /// HTTP server. Combines scalo metric groups with archiver-specific metrics.
     pub fn register(manager: &MetricsManager, commit: &str) -> Self {
-        // Layer 2: Metric groups (auto-prefixed with dfe_archiver_)
+        // Layer 2: Metric groups (namespace-prefixed by the MetricsManager)
         let app = AppMetrics::new(manager, env!("CARGO_PKG_VERSION"), commit);
         let buffer = BufferMetrics::new(manager);
         let consumer = ConsumerMetrics::new(manager);
@@ -139,16 +139,10 @@ impl ArchiverMetrics {
         );
 
         // Labelled metrics (described manually for label dimensions)
-        metrics::describe_counter!(
-            "dfe_archiver_archive_roll_total",
-            "Archive file roll events by trigger"
-        );
-        metrics::describe_counter!(
-            "dfe_archiver_kafka_commit_errors_total",
-            "Failed Kafka offset commits"
-        );
+        metrics::describe_counter!("archive_roll_total", "Archive file roll events by trigger");
+        metrics::describe_counter!("kafka_commit_errors_total", "Failed Kafka offset commits");
 
-        let dfe = DfeMetrics::register(manager);
+        let dfe = ServiceMetrics::register(manager);
 
         Self {
             dfe: Some(dfe),
@@ -163,13 +157,13 @@ impl ArchiverMetrics {
         }
     }
 
-    // ── Layer 1: DfeMetrics pass-throughs ────────────────────────────
+    // ── Layer 1: ServiceMetrics pass-throughs ────────────────────────
 
-    /// Record messages received (dual-emit: archiver + `DfeMetrics`)
+    /// Record messages received (dual-emit: archiver + `ServiceMetrics`)
     ///
     /// Also feeds the EPS rate calculator.
     pub fn record_received(&self, count: u64) {
-        counter!("dfe_archiver_messages_received_total").increment(count);
+        counter!("messages_received_total").increment(count);
         self.eps_counter.fetch_add(count, Ordering::Relaxed);
         if let Some(ref app) = self.app {
             app.record_received(count);
@@ -191,14 +185,14 @@ impl ArchiverMetrics {
         let elapsed = last.elapsed().as_secs_f64();
         if elapsed > 0.0 {
             let eps = count as f64 / elapsed;
-            gauge!("dfe_archiver_events_per_second").set(eps);
+            gauge!("events_per_second").set(eps);
         }
         *last = Instant::now();
     }
 
-    /// Record messages archived (dual-emit: archiver + `DfeMetrics`)
+    /// Record messages archived (dual-emit: archiver + `ServiceMetrics`)
     pub fn record_archived(&self, count: u64) {
-        counter!("dfe_archiver_messages_archived_total").increment(count);
+        counter!("messages_archived_total").increment(count);
         if let Some(ref app) = self.app {
             app.record_processed(count);
         }
@@ -209,7 +203,7 @@ impl ArchiverMetrics {
 
     /// Record messages sent to DLQ
     pub fn record_dlq(&self, count: u64) {
-        counter!("dfe_archiver_messages_dlq_total").increment(count);
+        counter!("messages_dlq_total").increment(count);
         if let Some(ref dfe) = self.dfe {
             dfe.records_dlq(count);
         }
@@ -219,30 +213,30 @@ impl ArchiverMetrics {
 
     /// Record file created
     pub fn record_file_created(&self) {
-        counter!("dfe_archiver_files_created_total").increment(1);
+        counter!("files_created_total").increment(1);
     }
 
     /// Record file closed (rolled) with final compressed size
     pub fn record_file_closed(&self, compressed_bytes: u64) {
-        counter!("dfe_archiver_files_closed_total").increment(1);
-        histogram!("dfe_archiver_archive_file_size_bytes").record(compressed_bytes as f64);
+        counter!("files_closed_total").increment(1);
+        histogram!("archive_file_size_bytes").record(compressed_bytes as f64);
     }
 
     /// Record archive roll with trigger reason
     pub fn record_archive_roll(&self, trigger: &str) {
-        counter!("dfe_archiver_archive_roll_total", "trigger" => trigger.to_string()).increment(1);
+        counter!("archive_roll_total", "trigger" => trigger.to_string()).increment(1);
     }
 
     /// Record an LRU eviction of a per-destination archive writer.
     /// Increments a counter so operators can correlate sudden bumps with
     /// `unique_destinations` saturating the configured `max_writers` cap.
     pub fn record_writer_eviction(&self) {
-        counter!("dfe_archiver_writer_evictions_total").increment(1);
+        counter!("writer_evictions_total").increment(1);
     }
 
     /// Record bytes written (uncompressed input to writer)
     pub fn record_bytes_written(&self, bytes: u64) {
-        counter!("dfe_archiver_bytes_written_total").increment(bytes);
+        counter!("bytes_written_total").increment(bytes);
         if let Some(ref app) = self.app {
             app.record_bytes_written(bytes);
         }
@@ -250,26 +244,26 @@ impl ArchiverMetrics {
 
     /// Record bytes after compression
     pub fn record_bytes_compressed(&self, compressed: u64, uncompressed: u64) {
-        counter!("dfe_archiver_bytes_compressed_total").increment(compressed);
+        counter!("bytes_compressed_total").increment(compressed);
         if uncompressed > 0 {
-            gauge!("dfe_archiver_compression_ratio").set(compressed as f64 / uncompressed as f64);
+            gauge!("compression_ratio").set(compressed as f64 / uncompressed as f64);
         }
     }
 
     /// Record compression duration
     pub fn record_compression_duration(&self, duration_secs: f64) {
-        histogram!("dfe_archiver_compression_duration_seconds").record(duration_secs);
+        histogram!("compression_duration_seconds").record(duration_secs);
     }
 
     /// Update Kafka lag
     pub fn set_kafka_lag(&self, lag: u64) {
-        gauge!("dfe_archiver_kafka_lag").set(lag as f64);
+        gauge!("kafka_lag").set(lag as f64);
     }
 
     /// Record flush operation with duration and trigger
     pub fn record_flush(&self, duration_secs: f64, trigger: FlushTrigger) {
-        counter!("dfe_archiver_flush_operations_total").increment(1);
-        histogram!("dfe_archiver_flush_duration_seconds").record(duration_secs);
+        counter!("flush_operations_total").increment(1);
+        histogram!("flush_duration_seconds").record(duration_secs);
         if let Some(ref buffer) = self.buffer {
             buffer.record_flush(duration_secs, trigger);
         }
@@ -280,7 +274,7 @@ impl ArchiverMetrics {
 
     /// Record archive error
     pub fn record_error(&self) {
-        counter!("dfe_archiver_archive_errors_total").increment(1);
+        counter!("archive_errors_total").increment(1);
         if let Some(ref app) = self.app {
             app.record_error(1);
         }
@@ -289,7 +283,7 @@ impl ArchiverMetrics {
     /// Record a storage-write error attributed to a backend (s3/gcs/azure/minio/file).
     ///
     /// Emits the per-backend sink error counter + the platform transport-error
-    /// counter. Does NOT touch `dfe_archiver_archive_errors_total` -- the write
+    /// counter. Does NOT touch `archive_errors_total` -- the write
     /// path pairs this with `record_error()`, which owns that total, so the two
     /// never double-count. Fills the per-backend storage-error metrics gap
     /// (previously this was never called on the production path).
@@ -311,7 +305,7 @@ impl ArchiverMetrics {
 
     /// Record disk pressure event
     pub fn record_disk_pressure(&self) {
-        counter!("dfe_archiver_disk_pressure_events_total").increment(1);
+        counter!("disk_pressure_events_total").increment(1);
         if let Some(ref bp) = self.backpressure {
             bp.record_event();
         }
@@ -326,8 +320,8 @@ impl ArchiverMetrics {
 
     /// Update hot buffer stats
     pub fn set_hot_buffer_stats(&self, count: usize, bytes: usize) {
-        gauge!("dfe_archiver_hot_buffers_active").set(count as f64);
-        gauge!("dfe_archiver_hot_buffers_bytes").set(bytes as f64);
+        gauge!("hot_buffers_active").set(count as f64);
+        gauge!("hot_buffers_bytes").set(bytes as f64);
         if let Some(ref buffer) = self.buffer {
             buffer.set_buffer(bytes, count);
         }
@@ -342,7 +336,7 @@ impl ArchiverMetrics {
 
     /// Record batch size for histogram
     pub fn record_batch_size(&self, bytes: u64) {
-        histogram!("dfe_archiver_batch_size_bytes").record(bytes as f64);
+        histogram!("batch_size_bytes").record(bytes as f64);
     }
 
     /// Record Kafka recv duration
@@ -361,22 +355,22 @@ impl ArchiverMetrics {
 
     /// Record Kafka commit error
     pub fn record_commit_error(&self) {
-        counter!("dfe_archiver_kafka_commit_errors_total").increment(1);
+        counter!("kafka_commit_errors_total").increment(1);
     }
 
     /// Record routing error
     pub fn record_routing_error(&self) {
-        counter!("dfe_archiver_routing_errors_total").increment(1);
+        counter!("routing_errors_total").increment(1);
     }
 
     /// Record hot buffer eviction
     pub fn record_eviction(&self) {
-        counter!("dfe_archiver_hot_buffer_evictions_total").increment(1);
+        counter!("hot_buffer_evictions_total").increment(1);
     }
 
     /// Update unique destination count
     pub fn set_unique_destinations(&self, count: usize) {
-        gauge!("dfe_archiver_unique_destinations").set(count as f64);
+        gauge!("unique_destinations").set(count as f64);
     }
 
     /// Update last batch timestamp (staleness detection)
@@ -384,7 +378,7 @@ impl ArchiverMetrics {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
-        gauge!("dfe_archiver_pipeline_last_batch_timestamp_seconds").set(now);
+        gauge!("pipeline_last_batch_timestamp_seconds").set(now);
     }
 
     /// Update KEDA scaling pressure gauge

@@ -7,7 +7,7 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use compact_str::CompactString;
-use hyperi_rustlib::transport::KafkaToken;
+use scalo::transport::KafkaToken;
 use std::sync::Arc;
 
 /// Message received from Kafka
@@ -83,7 +83,7 @@ impl KafkaMessage {
     }
 }
 
-/// Kafka offset for commit tracking (newtype around hyperi-rustlib token)
+/// Kafka offset for commit tracking (newtype around the scalo token)
 #[derive(Debug, Clone)]
 pub struct KafkaOffset(KafkaToken);
 

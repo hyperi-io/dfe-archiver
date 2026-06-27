@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      crates/io/src/kafka.rs
-// Purpose:   Kafka transport adapter wrapping hyperi-rustlib
+// Purpose:   Kafka transport adapter wrapping scalo
 // Language:  Rust
 //
 // License:      BUSL-1.1
@@ -10,16 +10,16 @@ use compact_str::CompactString;
 use dfe_archiver_core::config::KafkaConfig;
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
-use hyperi_rustlib::SelfRegulationGovernor;
-use hyperi_rustlib::transport::filter::FilteredDlqEntry;
-use hyperi_rustlib::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
 use rdkafka::consumer::Consumer;
+use scalo::SelfRegulationGovernor;
+use scalo::transport::filter::FilteredDlqEntry;
+use scalo::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
 use tracing::{debug, info, trace};
 
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
-/// can route them onward. The archiver configures no inbound rustlib filters,
+/// can route them onward. The archiver configures no inbound scalo filters,
 /// so `dlq_entries` is empty in practice -- but the no-silent-drop contract is
 /// honoured regardless.
 pub struct ReceivedBatch {
@@ -29,7 +29,7 @@ pub struct ReceivedBatch {
     pub dlq_entries: Vec<FilteredDlqEntry>,
 }
 
-/// Transport adapter wrapping hyperi-rustlib Kafka transport
+/// Transport adapter wrapping the scalo Kafka transport
 pub struct TransportAdapter {
     transport: KafkaTransport,
 }
@@ -56,7 +56,7 @@ impl TransportAdapter {
             group_id = %config.group_id,
             topics = ?config.topics,
             governed = governor.is_some(),
-            "Creating Kafka transport via hyperi-rustlib"
+            "Creating Kafka transport via scalo"
         );
 
         let hs_config = convert_config(config);
@@ -163,18 +163,18 @@ impl TransportAdapter {
     ///
     /// rdkafka reports `consumer_lag` only for assigned partitions, so the sum
     /// is inherently PER-POD and scale-invariant: as the consumer group grows,
-    /// each pod's assigned lag falls. The rustlib 2.8.11 scaling engine consumes
-    /// it as the Kafka inbound pressure term via
-    /// `scaling_signals.set_kafka_assigned_lag`.
+    /// each pod's assigned lag falls. The archiver feeds it as the `kafka_lag`
+    /// component of the unified `ScalingPressure` engine (the Kafka inbound
+    /// pressure term KEDA scales on).
     ///
     /// Requires librdkafka statistics on the consumer (a non-zero
-    /// `statistics.interval.ms`); rustlib's `KafkaTransport` defaults it to
+    /// `statistics.interval.ms`); scalo's `KafkaTransport` defaults it to
     /// 5000ms, so the stats snapshot populates without extra config. With stats
-    /// disabled the snapshot is empty and this returns 0 (the engine's Kafka
-    /// term then contributes 0).
+    /// disabled the snapshot is empty and this returns 0 (the Kafka term then
+    /// contributes 0).
     #[must_use]
     pub fn assigned_lag(&self) -> i64 {
-        hyperi_rustlib::transport::kafka::total_consumer_lag(&self.transport.stats()).max(0)
+        scalo::transport::kafka::total_consumer_lag(&self.transport.stats()).max(0)
     }
 
     /// Check if transport is healthy
@@ -210,9 +210,8 @@ impl TransportAdapter {
 /// - `rdkafka_topic_partition_committed_offset{topic,partition}`
 /// - `rdkafka_consumer_rebalance_count`
 pub struct KafkaStatsEmitter {
-    consumer: std::sync::Arc<
-        rdkafka::consumer::BaseConsumer<hyperi_rustlib::transport::kafka::StatsContext>,
-    >,
+    consumer:
+        std::sync::Arc<rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext>>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -225,7 +224,7 @@ impl KafkaStatsEmitter {
         use rdkafka::config::ClientConfig;
         use rdkafka::consumer::Consumer;
 
-        let stats_ctx = hyperi_rustlib::transport::kafka::StatsContext::new();
+        let stats_ctx = scalo::transport::kafka::StatsContext::new();
 
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", config.brokers.join(","));
@@ -245,11 +244,10 @@ impl KafkaStatsEmitter {
             client_config.set("sasl.password", pass.expose());
         }
 
-        let consumer: rdkafka::consumer::BaseConsumer<
-            hyperi_rustlib::transport::kafka::StatsContext,
-        > = client_config
-            .create_with_context(stats_ctx)
-            .map_err(|e| Error::kafka_with("stats consumer creation failed", e))?;
+        let consumer: rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext> =
+            client_config
+                .create_with_context(stats_ctx)
+                .map_err(|e| Error::kafka_with("stats consumer creation failed", e))?;
 
         // Subscribe to same topics so we get partition-level lag stats
         let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
@@ -281,32 +279,33 @@ impl KafkaStatsEmitter {
 
     /// Get the current metrics snapshot.
     #[must_use]
-    pub fn get_metrics(&self) -> hyperi_rustlib::transport::kafka::KafkaMetrics {
+    pub fn get_metrics(&self) -> scalo::transport::kafka::KafkaMetrics {
         self.consumer.context().get_metrics()
     }
 
     /// Get total consumer lag across all partitions.
     #[must_use]
     pub fn total_lag(&self) -> i64 {
-        hyperi_rustlib::transport::kafka::total_consumer_lag(&self.consumer.context().get_metrics())
+        scalo::transport::kafka::total_consumer_lag(&self.consumer.context().get_metrics())
     }
 }
 
-/// Convert local config to hyperi-rustlib transport config
-fn convert_config(config: &KafkaConfig) -> hyperi_rustlib::transport::KafkaConfig {
+/// Convert local config to the scalo transport config
+fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
     // Force librdkafka statistics on so `transport.stats()` (and hence
-    // `assigned_lag()`) populates -- the rustlib 2.8.11 ScalingEngine's Kafka
-    // inbound term and the `dfe_archiver_kafka_lag` gauge both read it. rustlib
+    // `assigned_lag()`) populates -- the unified ScalingPressure's Kafka
+    // inbound term and the `dfe_archiver_kafka_lag` gauge both read it. scalo
     // already defaults this to 5000ms when unset, but we set it EXPLICITLY (as
     // a highest-priority override) so a future profile/default change can never
     // silently flip it to 0 and zero the lag signal.
     let mut librdkafka_overrides = std::collections::HashMap::new();
     librdkafka_overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
-    hyperi_rustlib::transport::KafkaConfig {
-        // Archiver is consume-only (Kafka -> storage); the Consumer role means
-        // rustlib builds no idle producer (#44).
-        role: hyperi_rustlib::transport::KafkaRole::Consumer,
+    scalo::transport::KafkaConfig {
+        // Archiver is consume-only (Kafka -> storage). scalo 2.9 KafkaConfig is
+        // profile-based (no `role` field): a non-empty `group` + subscribed
+        // `topics` make this a consumer; no produce calls means no idle producer
+        // (#44).
         brokers: config.brokers.clone(),
         group: config.group_id.clone(),
         topics: config.topics.clone(),

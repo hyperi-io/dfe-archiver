@@ -27,13 +27,13 @@ use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::{KafkaStatsEmitter, TransportAdapter};
-use hyperi_rustlib::SelfRegulationGovernor;
-use hyperi_rustlib::logger::helpers::{log_debounced, log_sampled, log_state_change};
-use hyperi_rustlib::memory::MemoryGuard;
-use hyperi_rustlib::metrics::FlushTrigger;
-use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure, ScalingSignalsCell};
 use lru::LruCache;
 use rayon::prelude::*;
+use scalo::SelfRegulationGovernor;
+use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
+use scalo::memory::MemoryGuard;
+use scalo::metrics::FlushTrigger;
+use scalo::scaling::ScalingPressure;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -57,7 +57,7 @@ pub struct Archiver {
     startup_config: Config,
     /// Shared config for hot-reloadable fields (buffer, memory, scaling tunables)
     shared_config: SharedConfig<Config>,
-    /// Kafka transport. `TransportAdapter` methods take `&self` and rustlib's
+    /// Kafka transport. `TransportAdapter` methods take `&self` and scalo's
     /// `KafkaTransport` is `Send+Sync` with internal locking on the recv hot
     /// path, so no outer `Mutex` is required. This lets recv and commit run
     /// concurrently from different async tasks.
@@ -73,20 +73,20 @@ pub struct Archiver {
     writers: parking_lot::Mutex<LruCache<String, Arc<Mutex<ArchiveWriter>>>>,
     /// Cancellation token for graceful shutdown
     cancel: CancellationToken,
-    /// KEDA scaling pressure calculator (legacy weighted model -- retained for
-    /// the worker-pool feedback signal it still feeds).
-    scaling: ScalingPressure,
-    /// Per-pod signal cell read by the rustlib 2.8.11 `ScalingEngine` on its
-    /// periodic tick. The engine runs inside `ServiceRuntime`; the archiver only
-    /// PUSHES into this cell from its consume/write loops. `None` when the
-    /// `scaling`/`expression` features are off (the runtime always provides one
-    /// when `scaling` is enabled, so in practice this is `Some`).
-    scaling_signals: Option<Arc<ScalingSignalsCell>>,
-    /// Object-store sink circuit latch driving `ScalingSignalsCell::set_circuit_open`.
+    /// The unified KEDA `ScalingPressure` engine -- the one the runtime serves
+    /// at `/scaling/pressure`. scalo 2.9 collapsed the old dual model (the app's
+    /// weighted pressure + a separate runtime signal cell) into this single
+    /// engine: the components are registered via `ServiceApp::scaling_components`
+    /// and the archiver's loops drive their values directly (`kafka_lag` from
+    /// assigned-partition lag, `buffer_depth` from hot-buffer count, `memory`
+    /// from the cgroup guard) plus the circuit gate. Shared from the runtime when
+    /// `scaling` is enabled; a standalone fallback otherwise.
+    scaling: Arc<ScalingPressure>,
+    /// Object-store sink circuit latch driving `ScalingPressure::set_circuit_open`.
     /// "Open" (dead) when a whole write cycle failed with zero successes;
     /// recovers the moment any write succeeds. The engine zeroes the scaling
     /// composite while open (more pods cannot relieve a dead sink) -- the right
-    /// behaviour for a non-rustlib outbound (object store).
+    /// behaviour for a non-Kafka outbound (object store).
     sink_circuit_open: AtomicBool,
     /// Cgroup-aware memory guard. This is the SAME guard the self-regulation
     /// governor reads, so the bytes accounted here (`add_bytes` on recv,
@@ -95,7 +95,7 @@ pub struct Archiver {
     /// rdkafka stats emitter (sidecar consumer for broker/partition metrics)
     _stats_emitter: Option<KafkaStatsEmitter>,
     /// Dead letter queue for failed messages
-    dlq: Arc<hyperi_rustlib::dlq::Dlq>,
+    dlq: Arc<scalo::dlq::Dlq>,
     /// Log-spam guards (per-instance — see `LogSpamGuards` doc)
     log_guards: LogSpamGuards,
 }
@@ -115,12 +115,18 @@ impl Archiver {
     /// the inbound brake reflects real archiver pressure. `governor`, when
     /// `Some`, attaches the Kafka pause-partitions inbound gate to the receiver
     /// (default-on self-regulation); `None` means self-regulation is disabled.
+    ///
+    /// `scaling` is the runtime's unified `ScalingPressure` engine (the one
+    /// `/scaling/pressure` serves to KEDA), shared so the archiver's loops drive
+    /// the served gauge. `None` when the runtime's `scaling` feature/section is
+    /// off; a standalone engine (registering the same components) is built as a
+    /// fallback so the local pressure gauge keeps working.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
         memory_guard: Arc<MemoryGuard>,
         governor: Option<&SelfRegulationGovernor>,
-        scaling_signals: Option<Arc<ScalingSignalsCell>>,
+        scaling: Option<Arc<ScalingPressure>>,
     ) -> Result<Self> {
         let config = shared_config.get();
         let transport = TransportAdapter::new(&config.kafka, governor).await?;
@@ -140,14 +146,17 @@ impl Archiver {
         };
         let buffer = TieredBufferManager::new(buffer_config)?;
 
-        let scaling = ScalingPressure::new(
-            config.scaling.clone(),
-            vec![
-                ScalingComponent::new("kafka_lag", 0.40, 100_000.0),
-                ScalingComponent::new("buffer_depth", 0.30, 10_000.0),
-                ScalingComponent::new("memory", 0.30, 1.0),
-            ],
-        );
+        // Use the runtime's unified ScalingPressure (the engine /scaling/pressure
+        // serves) when present, so the archiver's loops drive the served KEDA
+        // gauge directly. Fall back to a standalone engine registering the SAME
+        // components (and the config's gate thresholds) when the runtime has
+        // scaling disabled -- keeps the local pressure gauge functioning.
+        let scaling = scaling.unwrap_or_else(|| {
+            Arc::new(ScalingPressure::new(
+                config.scaling.clone(),
+                crate::scaling_components(),
+            ))
+        });
 
         // Start rdkafka stats sidecar (non-fatal if it fails)
         let stats_emitter = match KafkaStatsEmitter::new(&config.kafka) {
@@ -162,9 +171,8 @@ impl Archiver {
         let cancel = CancellationToken::new();
 
         // Create DLQ (file-only mode — cascade to Kafka is optional via config)
-        let dlq =
-            hyperi_rustlib::dlq::Dlq::spawn(&config.dlq, "dfe-archiver", None, cancel.clone())
-                .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
+        let dlq = scalo::dlq::Dlq::spawn(&config.dlq, "dfe-archiver", None, cancel.clone())
+            .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
         if config.dlq.enabled {
             info!(mode = ?config.dlq.mode, "DLQ enabled");
         }
@@ -189,7 +197,6 @@ impl Archiver {
             writers: parking_lot::Mutex::new(LruCache::new(writer_cap)),
             cancel,
             scaling,
-            scaling_signals,
             sink_circuit_open: AtomicBool::new(false),
             memory_guard,
             _stats_emitter: stats_emitter,
@@ -322,10 +329,12 @@ impl Archiver {
         }
         self.metrics.record_received(batch_len as u64);
 
-        // Track incoming bytes in memory guard + scaling pressure
+        // Track incoming bytes in the memory guard (the inbound brake watches
+        // this). The `kafka_lag` scaling component is driven by the pod's
+        // assigned-partition lag in `push_kafka_lag_signal` (scale-invariant),
+        // NOT by per-batch throughput, so nothing is set here.
         let batch_bytes: u64 = messages.iter().map(|m| m.payload.len() as u64).sum();
         self.memory_guard.add_bytes(batch_bytes);
-        self.scaling.set_component("kafka_lag", batch_len as f64);
 
         // Phase 1: route + buffer accumulate (returns staged batches and a
         // backpressure flag set when the buffer rejects a push).
@@ -377,7 +386,7 @@ impl Archiver {
                             "Routing failed, using topic (sampled 1/1000)"
                         );
                     }
-                    hyperi_rustlib::logger::security::input_validation_failure(
+                    scalo::logger::security::input_validation_failure(
                         "routing",
                         &e.to_string(),
                         None,
@@ -506,29 +515,28 @@ impl Archiver {
         self.metrics.record_commit(commit_count);
     }
 
-    /// Push this pod's Kafka assigned-partition lag into the scaling-signal cell
-    /// AND the `dfe_archiver_kafka_lag` gauge.
+    /// Push this pod's Kafka assigned-partition lag into the unified
+    /// `ScalingPressure` `kafka_lag` component AND the `dfe_archiver_kafka_lag`
+    /// gauge.
     ///
-    /// The rustlib 2.8.11 `ScalingEngine` reads `kafka_assigned_lag` on its tick
-    /// and normalises it against `scaling.params.lag_target` for the Kafka
-    /// inbound pressure term. Until `lag_target` is sized (see config TUNE-ME)
-    /// that term contributes 0, but the signal + gauge are still emitted for
-    /// observability and a KEDA Kafka trigger.
+    /// The component is the Kafka inbound term of the composite the engine
+    /// serves at `/scaling/pressure` to KEDA, weighted + saturated per
+    /// `scaling_components()`. `assigned_lag()` sums lag over THIS pod's ASSIGNED
+    /// partitions, so it is scale-invariant: as the consumer group grows each
+    /// pod's lag falls and the term relaxes.
     fn push_kafka_lag_signal(&self) {
         let lag = self.transport.assigned_lag();
         // assigned_lag() is >= 0 (clamped in the adapter).
         let lag = u64::try_from(lag).unwrap_or(0);
         self.metrics.set_kafka_lag(lag);
-        if let Some(ref signals) = self.scaling_signals {
-            signals.set_kafka_assigned_lag(lag as f64);
-        }
+        self.scaling.set_component("kafka_lag", lag as f64);
     }
 
     /// Drive the object-store sink circuit-open scaling gate from a write
     /// cycle's outcome (mirrors dfe-loader's `ClickHouse` sink latch). The sink is
     /// "dead" when a whole cycle wrote nothing but saw errors; it recovers the
-    /// moment any write succeeds. The engine zeroes the composite while open
-    /// (more pods cannot relieve a dead object store).
+    /// moment any write succeeds. The engine zeroes the composite while the
+    /// circuit is open (more pods cannot relieve a dead object store).
     fn update_sink_circuit(&self, cycle_ok: usize, cycle_err: usize) {
         if cycle_ok > 0 {
             self.sink_circuit_open
@@ -537,13 +545,13 @@ impl Archiver {
             self.sink_circuit_open
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        if let Some(ref signals) = self.scaling_signals {
-            let open = self
-                .sink_circuit_open
-                .load(std::sync::atomic::Ordering::Relaxed);
-            signals.set_circuit_open(open);
-            self.metrics.set_scaling_circuit_open(open);
-        }
+        let open = self
+            .sink_circuit_open
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // Feed the unified ScalingPressure circuit gate directly -- KEDA reads
+        // the resulting /scaling/pressure (0.0 while open).
+        self.scaling.set_circuit_open(open);
+        self.metrics.set_scaling_circuit_open(open);
     }
 
     /// Update buffer stats, scaling pressure, and pipeline gauges
@@ -817,7 +825,7 @@ impl Archiver {
             "Sending failed batch to DLQ"
         );
 
-        let entry = hyperi_rustlib::dlq::DlqEntry::new(
+        let entry = scalo::dlq::DlqEntry::new(
             "dfe-archiver",
             format!("storage_write_failed: {error}"),
             data.to_vec(),
@@ -828,7 +836,7 @@ impl Archiver {
             error!(error = %dlq_err, destination, "DLQ send also failed");
         } else {
             self.metrics.record_dlq(1);
-            hyperi_rustlib::logger::security::record_dlq(
+            scalo::logger::security::record_dlq(
                 "storage_write_failed",
                 &error.to_string(),
                 Some(destination),
@@ -838,22 +846,18 @@ impl Archiver {
 
     /// Route inbound-filter DLQ entries surfaced by the transport.
     ///
-    /// These are records the rustlib inbound filter dead-lettered before they
+    /// These are records the scalo inbound filter dead-lettered before they
     /// reached the archiver. The archiver configures no inbound filters, so this
     /// is normally empty -- but the no-silent-drop contract means we route any
     /// entries that do arrive instead of dropping them after a metric.
-    async fn route_filter_dlq(
-        &self,
-        entries: Vec<hyperi_rustlib::transport::filter::FilteredDlqEntry>,
-    ) {
+    async fn route_filter_dlq(&self, entries: Vec<scalo::transport::filter::FilteredDlqEntry>) {
         if entries.is_empty() || !self.dlq.is_enabled() {
             return;
         }
         for entry in entries {
             let dest = entry.key.as_deref().unwrap_or("filter");
-            let dlq_entry =
-                hyperi_rustlib::dlq::DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
-                    .with_destination(dest);
+            let dlq_entry = scalo::dlq::DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
+                .with_destination(dest);
             if let Err(dlq_err) = self.dlq.send(dlq_entry).await {
                 error!(error = %dlq_err, "Inbound-filter DLQ send failed");
             } else {

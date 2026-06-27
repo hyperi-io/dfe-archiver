@@ -1,6 +1,6 @@
 // Project:   dfe-archiver
 // File:      crates/archiver/src/main.rs
-// Purpose:   CLI entry point using hyperi-rustlib DfeApp pattern
+// Purpose:   CLI entry point using the scalo ServiceApp pattern
 // Language:  Rust
 //
 // License:      BUSL-1.1
@@ -19,9 +19,9 @@ use dfe_archiver::config::{
 };
 use dfe_archiver::contract::deployment_contract;
 use dfe_archiver::{Archiver, metrics::init_metrics};
-use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
-use hyperi_rustlib::deployment::{generate_chart, generate_dockerfile};
-use hyperi_rustlib::logger::security;
+use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
+use scalo::deployment::generate_chart;
+use scalo::logger::security;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -60,7 +60,7 @@ enum Command {
     EmitContract,
 }
 
-impl DfeApp for App {
+impl ServiceApp for App {
     type Config = dfe_archiver_core::config::Config;
 
     fn name(&self) -> &'static str {
@@ -94,7 +94,7 @@ impl DfeApp for App {
     async fn run_service(
         &self,
         config: Self::Config,
-        mut runtime: hyperi_rustlib::cli::ServiceRuntime,
+        mut runtime: scalo::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(
             kafka_brokers = %config.kafka.brokers.join(","),
@@ -170,16 +170,19 @@ impl DfeApp for App {
         // Kafka receiver gets the inbound pause-partitions brake. When
         // self_regulation is disabled, `runtime.governor` is None and the
         // receiver is built without a gate (byte-identical to pre-governor).
+        // Share the runtime's unified ScalingPressure engine -- the one
+        // `/scaling/pressure` serves to KEDA, built from the components
+        // `scaling_components()` registers below. The archiver's loops drive
+        // its values (kafka_lag, buffer_depth, memory, circuit) directly. When
+        // the `scaling` section/feature is off the runtime hands back None;
+        // fall back to a standalone engine so the gauge path is unchanged.
         let archiver = Arc::new(
             Archiver::new(
                 shared_config,
                 metrics,
                 Arc::clone(&runtime.memory_guard),
                 runtime.governor.as_ref(),
-                // Per-pod scaling signals read by the runtime's ScalingEngine
-                // (rustlib 2.8.11). The archiver pushes assigned-lag + the
-                // object-store sink circuit into this cell from its loops.
-                Some(Arc::clone(&runtime.scaling_signals)),
+                runtime.scaling.clone(),
             )
             .await
             .map_err(|e| CliError::Service(e.to_string()))?,
@@ -193,11 +196,11 @@ impl DfeApp for App {
 
         // Register health checks
         let archiver_health = Arc::clone(&archiver);
-        hyperi_rustlib::health::HealthRegistry::register("kafka", move || {
+        scalo::health::HealthRegistry::register("kafka", move || {
             if archiver_health.is_transport_healthy() {
-                hyperi_rustlib::health::HealthStatus::Healthy
+                scalo::health::HealthStatus::Healthy
             } else {
-                hyperi_rustlib::health::HealthStatus::Unhealthy
+                scalo::health::HealthStatus::Unhealthy
             }
         });
 
@@ -233,7 +236,16 @@ impl DfeApp for App {
         Ok(())
     }
 
-    fn deployment_contract(&self) -> Option<hyperi_rustlib::deployment::DeploymentContract> {
+    fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
+        // Register the archiver's weighted KEDA components on the runtime's
+        // unified ScalingPressure -- the engine `/scaling/pressure` serves. The
+        // pipeline drives these values (kafka_lag from assigned-partition lag,
+        // buffer_depth from hot-buffer count, memory from the cgroup guard) plus
+        // the object-store circuit gate, so KEDA scales on the single composite.
+        dfe_archiver::scaling_components()
+    }
+
+    fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(deployment_contract())
     }
 }
@@ -248,8 +260,7 @@ async fn main() {
     // (these don't need logger/config init)
     match &app.command {
         Some(Command::EmitDockerfile { output }) => {
-            let contract = deployment_contract();
-            let content = generate_dockerfile(&contract, None);
+            let content = dfe_archiver::contract::emit_dockerfile();
             if output == "-" {
                 print!("{content}");
             } else {
@@ -278,7 +289,7 @@ async fn main() {
         _ => {}
     }
 
-    // Standard DfeApp lifecycle (run, version, config-check)
+    // Standard ServiceApp lifecycle (run, version, config-check)
     if let Err(e) = run_app(app).await {
         eprintln!("fatal: {e}");
         std::process::exit(1);

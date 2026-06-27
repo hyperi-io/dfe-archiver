@@ -235,7 +235,7 @@ async fn produce_loop(
 
     while Instant::now() < deadline {
         tick.tick().await;
-        let payload = &payloads[(idx as usize) % payloads.len()];
+        let payload = &payloads[usize::try_from(idx).unwrap_or(usize::MAX) % payloads.len()];
         idx = idx.wrapping_add(1);
         // Spread across partitions; archiver routes by topic by default but
         // expression-routing setups key off org_id which lives in the payload.
