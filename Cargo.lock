@@ -96,7 +96,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -107,7 +107,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -694,6 +694,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+ "gloo-timers",
+ "tokio",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1067,6 +1078,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32c"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1346,7 +1366,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1466,7 +1486,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1678,6 +1698,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
+
+[[package]]
 name = "futures-util"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1757,6 +1783,41 @@ dependencies = [
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "governor"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9efcab3c1958580ff1f25a2a41be1668f7603d849bb63af523b208a3cc1223b8"
+dependencies = [
+ "cfg-if",
+ "dashmap",
+ "futures-sink",
+ "futures-timer",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hashbrown 0.16.1",
+ "nonzero_ext",
+ "parking_lot",
+ "portable-atomic",
+ "quanta",
+ "rand 0.9.4",
+ "smallvec",
+ "spinning_top",
+ "web-time",
 ]
 
 [[package]]
@@ -2059,7 +2120,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2651,6 +2712,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nonzero_ext"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
+
+[[package]]
 name = "notify"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2683,7 +2750,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3172,7 +3239,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.41",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3210,7 +3277,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3625,7 +3692,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3694,7 +3761,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3760,20 +3827,23 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.9.2"
+version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c258da404a824a056d32861168702dcd869a002e959e12f3ca7968cabc30e02"
+checksum = "e19cae1760b6b67c0bae7adceed4e159d61785601e066adb3026b256a78c59bc"
 dependencies = [
  "axum",
+ "backon",
  "base64",
  "bytes",
  "cel",
  "chrono",
  "clap",
+ "crc32c",
  "dirs",
  "dotenvy",
  "figment",
  "file-rotate",
+ "governor",
  "libc",
  "lz4_flex",
  "memchr",
@@ -4123,7 +4193,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4170,6 +4240,15 @@ name = "spin"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+
+[[package]]
+name = "spinning_top"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d96d2d1d716fb500937168cc09353ffdc7a012be8475ac7308e1bdf0e3923300"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spki"
@@ -4296,7 +4375,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5040,7 +5119,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
