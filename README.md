@@ -11,6 +11,9 @@
 # DFE Archiver
 
 High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
+Built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane runtime
+(config cascade, logging, metrics, Kafka transport, tiered sink, deployment
+contract).
 
 ## Features
 
@@ -24,31 +27,32 @@ High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 
 ## Architecture
 
-```
-Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
-      ↓                ↓               ↓               ↓
-  Batch recv      Per-dest       Compressed       File/S3/GCS/
-  (10K msgs)      buffering      rolling files    Azure/MinIO
+```mermaid
+flowchart LR
+    K[("Kafka<br/>batch recv, 10K msgs")] --> BM["Buffer Manager<br/>per-destination buffering"]
+    BM --> AW["Archive Writer<br/>compressed rolling files"]
+    AW --> ST["Storage backend<br/>File / S3 / GCS / Azure / MinIO"]
+    ST -. write ok .-> C["Kafka offset commit<br/>at-least-once"]
 ```
 
 ### Workspace Structure
 
 The project is a Rust workspace with three crates:
 
-- **`crates/core`** — Types, configuration, compression codecs, buffer manager, routing, archive writer
-- **`crates/io`** — Kafka transport adapter, storage backends (File, S3, GCS, Azure, MinIO)
-- **`crates/archiver`** — Binary entry point, pipeline orchestrator, metrics, CLI, deployment contract
+- **`crates/core`** - Types, configuration, compression codecs, buffer manager, routing, archive writer
+- **`crates/io`** - Kafka transport adapter, storage backends (File, S3, GCS, Azure, MinIO)
+- **`crates/archiver`** - Binary entry point, pipeline orchestrator, metrics, CLI, deployment contract
 
 ### Tiered Buffer Design
 
 Handles high destination cardinality (e.g., 10,000+ orgs) without exhausting memory:
 
-```
-Tier 1: Hot Buffers (64 destinations × 1MB = 64MB memory)
-    ↓ LRU eviction
-Tier 2: Disk Spool (bounded by max_spool_bytes, default 10GB)
-    ↓ batch flush
-Archive Writers (8 concurrent, semaphore-controlled)
+```mermaid
+flowchart TB
+    R["incoming records"] --> T1["Tier 1: hot buffers<br/>64 destinations x 1MB = 64MB"]
+    T1 -->|LRU eviction| T2["Tier 2: disk spool<br/>bounded by max_spool_bytes (10GB default)"]
+    T2 -->|batch flush| AW["Archive writers<br/>8 concurrent, semaphore-controlled"]
+    T2 -. spool over limit or low disk .-> BP["Backpressure<br/>pause Kafka consume"]
 ```
 
 ## Quick Start
@@ -145,11 +149,11 @@ or file polling (5-second interval).
 - `archive.roll_size_bytes`, `archive.roll_interval_secs`
 
 **Requires pod restart:**
-- `kafka.*` (except `batch_size`) — transport connection established at startup
+- `kafka.*` (except `batch_size`) - transport connection established at startup
 - `archive.destination`, `archive.path_template`, `archive.s3/gcs/azure/minio`
-- `routing.*` — archive path structure must be atomic
-- `compression.*` — file format consistency across rolling set
-- `metrics.*` — HTTP server binds at startup
+- `routing.*` - archive path structure must be atomic
+- `compression.*` - file format consistency across rolling set
+- `metrics.*` - HTTP server binds at startup
 
 ## Storage Backends
 
@@ -218,13 +222,13 @@ When limits are exceeded, `push()` returns an error (backpressure), causing Kafk
 
 Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers:
 
-**Platform** (`dfe_*`): `records_received_total`, `records_delivered_total`, `transport_sent_total`, `scaling_pressure` — auto-emitted by rustlib.
+**Platform** (`dfe_*`): `records_received_total`, `records_delivered_total`, `transport_sent_total`, `scaling_pressure` - auto-emitted by scalo.
 
 **Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend), `BackpressureMetrics`.
 
 **Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`.
 
-**rdkafka stats** (`rdkafka_*`): `broker_rtt_avg_seconds{broker}`, `topic_partition_consumer_lag{topic,partition}`, `consumer_rebalance_count` — collected via sidecar `StatsContext` consumer.
+**rdkafka stats** (`rdkafka_*`): `broker_rtt_avg_seconds{broker}`, `topic_partition_consumer_lag{topic,partition}`, `consumer_rebalance_count` - collected via sidecar `StatsContext` consumer.
 
 **Health endpoints:** `/healthz` (liveness), `/readyz` (readiness via `HealthRegistry`)
 
