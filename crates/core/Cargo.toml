@@ -20,7 +20,10 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq"] }
+scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq", "config-schema"] }
+
+# JSON Schema derivation for the reflectable config-schema capability (scalo-rs#6).
+schemars = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

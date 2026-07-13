@@ -24,7 +24,7 @@ pub fn deployment_contract() -> DeploymentContract {
     // a distro -- the old "ubuntu:24.04" pin predated the trixie cutover.
     let base_image = base_image_from_cascade();
     DeploymentContract {
-        schema_version: 2,
+        schema_version: 3,
         app_name: "dfe-archiver".into(),
         binary_name: "dfe-archiver".into(),
         description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines".into(),
@@ -55,7 +55,36 @@ pub fn deployment_contract() -> DeploymentContract {
             licenses: "BUSL-1.1".into(),
             ..OciLabels::default()
         },
+        // Reflectable config (scalo-rs#6): derived JSON Schema of the full
+        // Config + a catalog of the storage backends the archiver writes to.
+        config_schema: Some(scalo::deployment::config_schema_json::<
+            dfe_archiver_core::config::Config,
+        >()),
+        capabilities: capabilities(),
     }
+}
+
+/// Capability catalog for dfe-archiver: the object-store backends it writes
+/// archives to, grounded in `dfe_archiver_core::config::ArchiveConfig`. The
+/// typed per-backend knobs live in the derived schema; this lists the backends
+/// + the destination URL scheme that selects each.
+fn capabilities() -> Vec<scalo::deployment::Capability> {
+    use scalo::deployment::{Capability, FieldSpec};
+    vec![
+        Capability::sink("archive")
+            .description("Rolling object-store archiver: consumes Kafka, writes compressed rolled files to a storage backend selected by the destination URL scheme.")
+            .maturity("stable")
+            .field(FieldSpec::string("destination").required().description("Destination URL; the scheme selects the backend (file:// | s3:// | gs:// | az:// | minio://)."))
+            .field(FieldSpec::string("path_template").description("Path template with {year}/{month}/{day}/{hour} placeholders."))
+            .field(FieldSpec::enumeration("compression", ["none", "zstd", "lz4", "snappy", "gzip"]).description("Rolled-file compression codec."))
+            .children(vec![
+                Capability::service("file").description("Local filesystem (file://)."),
+                Capability::service("s3").description("Amazon S3 (s3://)."),
+                Capability::service("gcs").description("Google Cloud Storage (gs:// / gcs://)."),
+                Capability::service("azure").description("Azure Blob Storage (az:// / azure://)."),
+                Capability::service("minio").description("MinIO / S3-compatible (minio://)."),
+            ]),
+    ]
 }
 
 /// Generate the Dockerfile from the deployment contract.
@@ -85,6 +114,31 @@ mod tests {
         assert_eq!(contract.health.liveness_path, "/healthz");
         assert_eq!(contract.health.readiness_path, "/readyz");
         assert!(contract.keda.is_some());
+    }
+
+    #[test]
+    fn test_contract_carries_reflectable_config() {
+        let contract = deployment_contract();
+        assert_eq!(contract.schema_version, 3);
+        assert!(contract.config_schema.is_some());
+        let archive = contract
+            .capabilities
+            .iter()
+            .find(|c| c.name == "archive")
+            .expect("archive sink capability");
+        let backends: Vec<&str> = archive.children.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            backends.contains(&"s3") && backends.contains(&"gcs") && backends.contains(&"azure")
+        );
+    }
+
+    /// Committed reflectable artefacts under the workspace-root docs/ must not
+    /// drift. Regenerate with `dfe-archiver config-schema --dir docs`.
+    #[test]
+    fn test_config_artifacts_do_not_drift() {
+        // CARGO_MANIFEST_DIR is crates/archiver; the repo docs/ is two up.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        scalo::deployment::assert_no_config_artifact_drift(&deployment_contract(), dir);
     }
 
     #[test]

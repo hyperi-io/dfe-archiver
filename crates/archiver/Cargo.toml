@@ -42,7 +42,7 @@ scalo = { workspace = true, features = [
     # `scaling` exposes the unified ScalingPressure engine served at
     # /scaling/pressure; `governor` exposes the self-regulation inbound brake.
     # `expression` backs the CEL surface used by config/scaling tunables.
-    "scaling", "governor", "expression", "deployment", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
+    "scaling", "governor", "expression", "deployment", "config-schema", "cli-service", "memory", "health", "shutdown", "dlq", "worker-pool",
 ] }
 
 # Async

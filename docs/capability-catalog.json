@@ -1,0 +1,62 @@
+[
+  {
+    "kind": "sink",
+    "name": "archive",
+    "description": "Rolling object-store archiver: consumes Kafka, writes compressed rolled files to a storage backend selected by the destination URL scheme.",
+    "maturity": "stable",
+    "fields": [
+      {
+        "name": "destination",
+        "type": "string",
+        "required": true,
+        "description": "Destination URL; the scheme selects the backend (file:// | s3:// | gs:// | az:// | minio://)."
+      },
+      {
+        "name": "path_template",
+        "type": "string",
+        "required": false,
+        "description": "Path template with {year}/{month}/{day}/{hour} placeholders."
+      },
+      {
+        "name": "compression",
+        "type": "enum",
+        "required": false,
+        "description": "Rolled-file compression codec.",
+        "enum_values": [
+          "none",
+          "zstd",
+          "lz4",
+          "snappy",
+          "gzip"
+        ]
+      }
+    ],
+    "children": [
+      {
+        "kind": "service",
+        "name": "file",
+        "description": "Local filesystem (file://)."
+      },
+      {
+        "kind": "service",
+        "name": "s3",
+        "description": "Amazon S3 (s3://)."
+      },
+      {
+        "kind": "service",
+        "name": "gcs",
+        "description": "Google Cloud Storage (gs:// / gcs://)."
+      },
+      {
+        "kind": "service",
+        "name": "azure",
+        "description": "Azure Blob Storage (az:// / azure://)."
+      },
+      {
+        "kind": "service",
+        "name": "minio",
+        "description": "MinIO / S3-compatible (minio://)."
+      }
+    ]
+  }
+]

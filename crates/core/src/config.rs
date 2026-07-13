@@ -31,7 +31,7 @@ pub use scalo::scaling::ScalingPressureConfig;
 /// - `compression.*` — file format consistency across rolling set
 /// - `metrics.*` — HTTP server binds at startup
 /// - `buffer.writer_parallelism` — structural buffer manager config
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
@@ -64,7 +64,7 @@ pub struct Config {
 }
 
 /// Kafka consumer configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaConfig {
     /// Broker addresses
@@ -129,7 +129,7 @@ impl Default for KafkaConfig {
 }
 
 /// Archive output configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ArchiveConfig {
     /// Destination URL (file://, s3://, gs://, az://, minio://)
@@ -212,7 +212,7 @@ impl Default for ArchiveConfig {
 }
 
 /// S3 configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct S3Config {
     pub region: Option<String>,
     pub endpoint: Option<String>,
@@ -225,7 +225,7 @@ pub struct S3Config {
 }
 
 /// GCS configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct GcsConfig {
     pub project_id: Option<String>,
     pub service_account_key: Option<SensitiveString>,
@@ -234,7 +234,7 @@ pub struct GcsConfig {
 }
 
 /// Azure Blob configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct AzureConfig {
     pub account_name: String,
     pub account_key: Option<SensitiveString>,
@@ -245,7 +245,7 @@ pub struct AzureConfig {
 }
 
 /// `MinIO` configuration (S3-compatible)
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct MinioConfig {
     pub endpoint: String,
     pub access_key: String,
@@ -255,7 +255,7 @@ pub struct MinioConfig {
 }
 
 /// Buffer management configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
     /// Flush when buffer exceeds this size (bytes)
@@ -289,7 +289,7 @@ impl Default for BufferConfig {
 }
 
 /// Memory limits configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Hard limit on total memory usage (bytes)
@@ -313,7 +313,7 @@ impl Default for MemoryConfig {
 }
 
 /// Routing configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// Routing mode: "topic" (default) or "expression"
@@ -338,7 +338,7 @@ impl Default for RoutingConfig {
 }
 
 /// Metrics configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MetricsConfig {
     /// Enable metrics server
@@ -362,7 +362,7 @@ impl Default for MetricsConfig {
 }
 
 /// Compression configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompressionConfig {
     /// Compression codec: none, zstd, lz4, snappy, gzip

@@ -40,8 +40,12 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime
-scalo = { version = ">=2.10.0, <3" }
+# scalo data-plane runtime.
+scalo = { version = ">=2.10.4, <3" }
+
+# JSON Schema derivation for the reflectable config-schema capability
+# (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
+schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
 # Async runtime
 tokio = { version = ">=1.50", features = ["full", "parking_lot"] }
