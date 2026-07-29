@@ -40,7 +40,7 @@ pub fn deployment_contract() -> DeploymentContract {
         default_config: None,
         depends_on: vec!["kafka".into()],
         keda: Some(KedaContract::default()),
-        native_deps: NativeDepsContract::for_rustlib_features(
+        native_deps: NativeDepsContract::for_scalo_features(
             &["transport-kafka", "spool", "tiered-sink"],
             &base_image,
         ),
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(contract.app_name, "dfe-archiver");
         assert_eq!(contract.binary(), "dfe-archiver");
         assert_eq!(contract.metrics_port, 9090);
-        assert_eq!(contract.health.liveness_path, "/healthz");
+        assert_eq!(contract.health.liveness_path, "/livez");
         assert_eq!(contract.health.readiness_path, "/readyz");
         assert!(contract.keda.is_some());
     }
