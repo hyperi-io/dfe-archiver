@@ -56,7 +56,8 @@ if [[ ! -x "$ARCHIVER_BIN" ]]; then
 fi
 
 DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v26.1.9}"
+# renovate: datasource=docker depName=redpandadata/redpanda
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v26.2.1}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s — shorter workloads produce bad PGO profiles
