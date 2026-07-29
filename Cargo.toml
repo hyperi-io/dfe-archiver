@@ -69,7 +69,16 @@ flate2 = ">=1.1.9"
 # Cloud storage backends
 object_store = { version = ">=0.13", features = ["aws", "gcp", "azure"] }
 aws-config = ">=1.8"
-aws-sdk-s3 = ">=1.124"
+# default-features off to drop the `rustls` feature, which is the legacy
+# hyper-0.14 TLS backend and the only thing pulling rustls 0.21 -> the
+# unmaintained rustls-webpki 0.101. Everything else in the default set is
+# re-listed here; the modern TLS path is default-https-client (aws-lc).
+aws-sdk-s3 = { version = ">=1.124", default-features = false, features = [
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+    "sigv4a",
+] }
 
 # Utilities
 bytes = ">=1.11"
