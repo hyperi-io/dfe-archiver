@@ -10,8 +10,12 @@
 # Limit test parallelism to avoid overwhelming the system
 test-threads = 2
 
-# Retry failed tests once (helps with flaky integration tests)
-retries = 1
+# No retries. hyperi-ci runs a bare `cargo nextest run` -- it never passes
+# `--profile ci` and never sets NEXTEST_PROFILE -- so this is the profile CI
+# uses, and a retry here converts a real intermittent failure into a green run
+# that reports nothing. Flaky tests get fixed or deleted, never retried. Pinned
+# by tests/integration/test_runner_config.rs::test_default_nextest_profile_does_not_retry.
+retries = 0
 
 # Slow test threshold (warn if tests take longer than this)
 slow-timeout = { period = "60s", terminate-after = 2 }
@@ -19,6 +23,7 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 # Fail fast - stop on first failure
 fail-fast = false
 
+# Opt-in only (`cargo nextest run --profile ci`); hyperi-ci does NOT select it.
 [profile.ci]
 # CI profile - same parallelism limit
 test-threads = 2

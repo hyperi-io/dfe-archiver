@@ -41,79 +41,100 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # scalo data-plane runtime.
-scalo = { version = ">=2.10.4, <3" }
+scalo = { version = ">=2.10.7, <3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
 # Async runtime
-tokio = { version = ">=1.50", features = ["full", "parking_lot"] }
-tokio-util = { version = ">=0.7", features = ["time"] }
+tokio = { version = ">=1.50, <2", features = ["full", "parking_lot"] }
+tokio-util = { version = ">=0.7, <0.8", features = ["time"] }
 
 # Serialization
-serde = { version = ">=1.0.228", features = ["derive"] }
-serde_json = ">=1.0.149"
-sonic-rs = ">=0.5.8"
+serde = { version = ">=1.0.228, <2", features = ["derive"] }
+serde_json = ">=1.0.149, <2"
+sonic-rs = ">=0.5.8, <0.6"
 
 # Error handling
-thiserror = ">=2.0"
+thiserror = ">=2.0, <3"
 anyhow = ">=1.0.100"
 
 # Compression
-zstd = ">=0.13"
-lz4_flex = ">=0.13"
-snap = ">=1.1"
-flate2 = ">=1.1.9"
+zstd = ">=0.13, <0.14"
+lz4_flex = ">=0.13, <0.14"
+snap = ">=1.1, <2"
+flate2 = ">=1.1.9, <2"
 
 # Cloud storage backends
-object_store = { version = ">=0.13", features = ["aws", "gcp", "azure"] }
-aws-config = ">=1.8"
-aws-sdk-s3 = ">=1.124"
+object_store = { version = ">=0.14.0, <0.15", features = ["aws", "gcp", "azure"] }
+aws-config = ">=1.8, <2"
+# default-features off to drop the `rustls` feature, which is the legacy
+# hyper-0.14 TLS backend and the only thing pulling rustls 0.21 -> the
+# unmaintained rustls-webpki 0.101. Everything else in the default set is
+# re-listed here; the modern TLS path is default-https-client (aws-lc).
+aws-sdk-s3 = { version = ">=1.124, <2", default-features = false, features = [
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+    "sigv4a",
+] }
 
 # Utilities
-bytes = ">=1.11"
-chrono = { version = ">=0.4.44", features = ["serde"] }
-uuid = { version = ">=1.23", features = ["v4", "serde"] }
-parking_lot = ">=0.12"
-rayon = ">=1.12"
-dashmap = ">=6.1"
-compact_str = ">=0.9"
-rustc-hash = ">=2.1"
-smallvec = { version = ">=1.15", features = ["union", "serde"] }
-fs2 = ">=0.4"
-indexmap = ">=2.14"
-lru = ">=0.16"
-metrics = ">=0.24.4"
-percent-encoding = ">=2.3"
+bytes = ">=1.11, <2"
+chrono = { version = ">=0.4.44, <0.5", features = ["serde"] }
+uuid = { version = ">=1.23, <2", features = ["v4", "serde"] }
+parking_lot = ">=0.12, <0.13"
+rayon = ">=1.12, <2"
+dashmap = ">=6.1, <7"
+compact_str = ">=0.9, <0.10"
+rustc-hash = ">=2.1, <3"
+smallvec = { version = ">=1.15, <2", features = ["union", "serde"] }
+fs2 = ">=0.4, <0.5"
+indexmap = ">=2.14, <3"
+lru = ">=0.18.0, <0.19"
+metrics = ">=0.24.4, <0.25"
+percent-encoding = ">=2.3, <3"
 
 # CLI
-clap = { version = ">=4.6", features = ["derive", "env"] }
+clap = { version = ">=4.6, <5", features = ["derive", "env"] }
 
 # Tracing
-tracing = ">=0.1.44"
-tracing-subscriber = { version = ">=0.3.23", features = ["env-filter"] }
+tracing = ">=0.1.44, <0.2"
+tracing-subscriber = { version = ">=0.3.23, <0.4", features = ["env-filter"] }
 
 # Async utilities
-async-trait = ">=0.1.89"
-futures = ">=0.3.32"
+async-trait = ">=0.1.89, <0.2"
+futures = ">=0.3.32, <0.4"
 
 # Config
-dotenvy = ">=0.15"
-serde_yaml_ng = ">=0.9"
+dotenvy = ">=0.15, <0.16"
+serde_yaml_ng = ">=0.10.0, <0.11"
 
 # Allocators
-tikv-jemallocator = ">=0.6"
+tikv-jemallocator = ">=0.7.0, <0.8"
 
 # Dev dependencies
-tempfile = ">=3.27"
-criterion = { version = ">=0.8", features = ["html_reports", "async_tokio"] }
-proptest = ">=1.11"
-tokio-test = ">=0.4"
-test-log = { version = ">=0.2", features = ["trace"] }
-walkdir = ">=2.5"
-reqwest = ">=0.13.3"
-rdkafka = { version = ">=0.39", features = ["dynamic-linking"] }
+tempfile = ">=3.27, <4"
+criterion = { version = ">=0.8, <0.9", features = ["html_reports", "async_tokio"] }
+proptest = ">=1.11, <2"
+tokio-test = ">=0.4, <0.5"
+test-log = { version = ">=0.2, <0.3", features = ["trace"] }
+walkdir = ">=2.5, <3"
+reqwest = ">=0.13.3, <0.14"
+rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
+# Emulator containers for the cloud storage backends, so S3/GCS/Azure coverage
+# runs with no cloud credentials. Same major line as the rest of the fleet
+# (dfe-fetcher, dfe-loader, dfe-receiver) so the container-hygiene helpers stay
+# copy-compatible.
+testcontainers = ">=0.27.3, <0.28"
+# Azure Shared Key signing, for the one call object_store does not expose:
+# creating the blob container the tests then write into. Azurite rejects an
+# unsigned request, so there is no shortcut. Versions match what the graph
+# already resolves, so this adds no new compilation units.
+hmac = ">=0.13, <0.14"
+sha2 = ">=0.11, <0.12"
+base64 = ">=0.22.1, <0.23"
 
 [profile.release]
 lto = "thin"             # hyperi-ci overrides to "fat" at beta+ channels

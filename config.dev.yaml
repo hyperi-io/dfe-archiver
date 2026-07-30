@@ -90,6 +90,6 @@ scaling:
     # (KEDA lagThreshold semantics). LEFT UNSET deliberately -- with no measured
     # per-pod archiver throughput it would be a guess, and a wrong value
     # mis-scales. Until then the Kafka lag term contributes 0 and the default
-    # reduces to CPU-only (+ circuit gate). TUNE-ME (Derek): set once a real
-    # per-pod sustained ingest rate is known.
+    # reduces to CPU-only (+ circuit gate). TUNE-ME: set once a real per-pod
+    # sustained ingest rate is known.
     # lag_target: 50000
