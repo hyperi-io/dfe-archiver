@@ -41,7 +41,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # scalo data-plane runtime.
-scalo = { version = ">=2.10.4, <3" }
+scalo = { version = ">=2.10.7, <3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
