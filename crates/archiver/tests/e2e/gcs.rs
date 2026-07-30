@@ -160,6 +160,9 @@ async fn test_gcs_basic_operations() {
     let Some(gcs) = common::acquire_gcs("test_gcs_basic_operations", "archive-test").await else {
         return;
     };
+    if !gcs.can_write() {
+        return; // the emulator cannot serve GCS multipart; reason printed
+    }
 
     let backend =
         ObjectStoreBackend::new_gcs(&gcs.config, "test-basic".to_string(), 8 * 1024 * 1024)
@@ -189,6 +192,9 @@ async fn test_gcs_multipart_large_file() {
     else {
         return;
     };
+    if !gcs.can_write() {
+        return;
+    }
 
     let backend =
         ObjectStoreBackend::new_gcs(&gcs.config, "test-multipart".to_string(), 5 * 1024 * 1024)
@@ -229,6 +235,9 @@ async fn test_gcs_archive_roundtrip() {
     let Some(gcs) = common::acquire_gcs("test_gcs_archive_roundtrip", "archive-test").await else {
         return;
     };
+    if !gcs.can_write() {
+        return;
+    }
 
     let archive_config = ArchiveConfig {
         destination: format!("gs://{}/test-archive", gcs.config.bucket),
@@ -279,6 +288,9 @@ async fn test_gcs_rolling_by_size() {
     let Some(gcs) = common::acquire_gcs("test_gcs_rolling_by_size", "archive-test").await else {
         return;
     };
+    if !gcs.can_write() {
+        return;
+    }
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
 

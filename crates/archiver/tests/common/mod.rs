@@ -972,6 +972,29 @@ impl GcsFixture {
     pub fn manages_container(&self) -> bool {
         self.container.is_some()
     }
+
+    /// Can this target serve the archiver's WRITE path?
+    ///
+    /// The emulator cannot: `put_multipart` on GCS is the XML multipart API and
+    /// fake-gcs-server does not implement it (see `tests/e2e/gcs.rs`). So the
+    /// write tests are `#[ignore]`d, and when someone runs them anyway with
+    /// `--run-ignored all` they should say why they cannot run rather than fail
+    /// on a 404 that reads like a bug. In CI they FAIL, because asking to run a
+    /// credential test with no credentials should be loud.
+    #[must_use]
+    pub fn can_write(&self) -> bool {
+        if self.container.is_none() {
+            return true;
+        }
+        require_service_in_ci(
+            "a live GCS bucket",
+            "object_store's GCS put_multipart is the XML multipart API and \
+             fake-gcs-server does not implement it, so the write path needs real \
+             credentials (GCS_BUCKET plus GCS_SERVICE_ACCOUNT_KEY or \
+             GOOGLE_APPLICATION_CREDENTIALS)",
+        );
+        false
+    }
 }
 
 /// A GCS target for `test`, writing into `bucket`.
