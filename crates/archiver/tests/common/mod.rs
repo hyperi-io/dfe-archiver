@@ -47,6 +47,40 @@ pub fn require_service_in_ci(service: &str, reason: &str) {
     eprintln!("{service} unavailable, test will skip: {reason}");
 }
 
+/// Is a Docker daemon reachable?
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Fail when a container this suite starts for itself would not come up.
+///
+/// Stricter than [`require_service_in_ci`], and deliberately so. That one covers
+/// a service the suite does NOT own -- a developer without the dev stack up is a
+/// legitimate skip. A container the suite starts is different: if Docker is
+/// there, a failure to start it is OUR fault, so skipping hides a broken fixture
+/// behind a green run.
+///
+/// This is not hypothetical. A wait strategy pointed at stdout when
+/// fake-gcs-server logs to stderr made all five GCS tests time out at 60s and
+/// then report PASS. Sixty seconds of nothing, five times, green.
+///
+/// Only a genuinely absent Docker still skips.
+pub fn require_container_in_ci(service: &str, reason: &str) {
+    assert!(
+        !docker_available(),
+        "{service} would not start although Docker is running ({reason}). \
+         This suite owns that container, so a failure to start it is a fault \
+         here, not a missing dependency -- skipping would report green while \
+         testing nothing."
+    );
+    require_service_in_ci(service, reason);
+}
+
 /// Test backend mode.
 ///
 /// Controlled by `TEST_MODE` in `.env`:
@@ -473,21 +507,21 @@ pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> 
     let started = match image.start().await {
         Ok(c) => c,
         Err(e) => {
-            require_service_in_ci("Azurite", &format!("container start failed: {e}"));
+            require_container_in_ci("Azurite", &format!("container start failed: {e}"));
             return None;
         }
     };
     let host = match started.get_host().await {
         Ok(h) => h,
         Err(e) => {
-            require_service_in_ci("Azurite", &format!("get_host: {e}"));
+            require_container_in_ci("Azurite", &format!("get_host: {e}"));
             return None;
         }
     };
     let port = match started.get_host_port_ipv4(10000u16).await {
         Ok(p) => p,
         Err(e) => {
-            require_service_in_ci("Azurite", &format!("get_host_port: {e}"));
+            require_container_in_ci("Azurite", &format!("get_host_port: {e}"));
             return None;
         }
     };
@@ -507,7 +541,7 @@ pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> 
     let endpoint = format!("http://{host}:{port}/{AZURITE_ACCOUNT}");
 
     if let Err(e) = create_blob_container(&endpoint, container).await {
-        require_service_in_ci("Azurite", &format!("could not create blob container: {e}"));
+        require_container_in_ci("Azurite", &format!("could not create blob container: {e}"));
         return None;
     }
 
@@ -656,6 +690,274 @@ pub async fn azurite_blob_len(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or_else(|| format!("HEAD {resource} returned no usable Content-Length"))
+}
+
+// ── fake-gcs-server (Google Cloud Storage emulator) ───────────────────
+
+/// `fsouza/fake-gcs-server`, the maintained GCS emulator (1.55.1 published
+/// 2026-07-19). Pinned, not `latest`, for the same reason as Azurite.
+///
+/// renovate: datasource=docker depName=fsouza/fake-gcs-server
+const FAKE_GCS_TAG: &str = "1.55.1";
+
+/// A GCS target for a test: a live bucket if credentials are configured, else a
+/// fake-gcs-server this fixture owns.
+pub struct GcsFixture {
+    /// Config pointed at the target, ready for `ObjectStoreBackend::new_gcs`.
+    pub config: dfe_archiver::config::GcsConfig,
+    container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
+}
+
+impl GcsFixture {
+    /// Did this fixture start its own container?
+    #[must_use]
+    pub fn manages_container(&self) -> bool {
+        self.container.is_some()
+    }
+}
+
+/// A GCS target for `test`, writing into `bucket`.
+///
+/// Live first, but only when `GCS_BUCKET` comes with a credential that actually
+/// exists -- `storage.googleapis.com` always resolves, so unlike Azure there is
+/// nothing to probe, and a bucket name on its own is not evidence of access. The
+/// repo's `.env` sets `GCS_BUCKET` and no credential, which is exactly the case
+/// that has to fall through to the emulator rather than fail on ADC lookup.
+///
+/// Returns `None` when neither is available -- having failed the run in CI.
+pub async fn acquire_gcs(test: &str, bucket: &str) -> Option<GcsFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    load_dotenv();
+    if let Ok(live_bucket) = env::var("GCS_BUCKET") {
+        let inline_key = env::var("GCS_SERVICE_ACCOUNT_KEY").ok();
+        // A path that does not exist is the same defect as no path at all.
+        let key_path = env::var("GOOGLE_APPLICATION_CREDENTIALS")
+            .ok()
+            .filter(|p| std::path::Path::new(p).is_file());
+        if inline_key.is_some() || key_path.is_some() {
+            return Some(GcsFixture {
+                config: dfe_archiver::config::GcsConfig {
+                    bucket: live_bucket,
+                    project_id: None,
+                    service_account_key: inline_key
+                        .map(dfe_archiver::config::sensitive::SensitiveString::from),
+                    credentials_path: key_path,
+                },
+                container: None,
+            });
+        }
+        eprintln!("GCS_BUCKET is set but no usable credential is -- using fake-gcs-server instead");
+    }
+
+    let name = container_name(Some(test), "fake-gcs");
+    // This name belongs to this test alone, so anything holding it is a leak.
+    reap_stale(&name);
+
+    let image = GenericImage::new("fsouza/fake-gcs-server", FAKE_GCS_TAG)
+        .with_exposed_port(4443u16.tcp())
+        // STDERR: fake-gcs-server's slog default writes there and stdout stays
+        // empty, so waiting on stdout never matches and every test times out.
+        .with_wait_for(WaitFor::message_on_stderr("server started at"))
+        // -backend memory keeps it disposable, and plain http avoids having to
+        // trust the emulator's self-signed certificate from a Rust client.
+        .with_cmd(["-scheme", "http", "-backend", "memory"])
+        .with_container_name(&name)
+        .with_labels(test_labels("fake-gcs"));
+
+    let started = match image.start().await {
+        Ok(c) => c,
+        Err(e) => {
+            require_container_in_ci("fake-gcs-server", &format!("container start failed: {e}"));
+            return None;
+        }
+    };
+    let host = match started.get_host().await {
+        Ok(h) => h,
+        Err(e) => {
+            require_container_in_ci("fake-gcs-server", &format!("get_host: {e}"));
+            return None;
+        }
+    };
+    let port = match started.get_host_port_ipv4(4443u16).await {
+        Ok(p) => p,
+        Err(e) => {
+            require_container_in_ci("fake-gcs-server", &format!("get_host_port: {e}"));
+            return None;
+        }
+    };
+    let base_url = format!("http://{host}:{port}");
+
+    if let Err(e) = fake_gcs_setup(&base_url, bucket).await {
+        require_container_in_ci("fake-gcs-server", &e);
+        return None;
+    }
+
+    Some(GcsFixture {
+        config: dfe_archiver::config::GcsConfig {
+            bucket: bucket.to_string(),
+            project_id: None,
+            // object_store reads `gcs_base_url` and `disable_oauth` out of the
+            // service-account JSON, and that is the ONLY way to redirect its GCS
+            // client -- `GcsConfig` has no endpoint field and the builder's
+            // `with_base_url` is not reachable through `new_gcs`. Documented by
+            // object_store itself as the emulator recipe, so the archiver
+            // already supports this without any production-code change.
+            service_account_key: Some(dfe_archiver::config::sensitive::SensitiveString::from(
+                format!(
+                    r#"{{"gcs_base_url":"{base_url}","disable_oauth":true,"client_email":"","private_key_id":"","private_key":""}}"#
+                ),
+            )),
+            credentials_path: None,
+        },
+        container: Some(started),
+    })
+}
+
+/// Point fake-gcs-server at its reachable address and create the bucket.
+///
+/// `publicHost` is what makes this work at all. `object_store`'s GCS client
+/// addresses objects the XML way -- `<base_url>/<bucket>/<object>` -- and
+/// fake-gcs-server only routes that path when the request's Host matches its
+/// public host, which defaults to `storage.googleapis.com`. Left alone it 404s
+/// every head, get and delete, which reads as "the object is not there" rather
+/// than "the emulator is not listening on that route". Verified by hand: 404
+/// before the call, 200 after it.
+///
+/// It cannot be passed as a flag at start time because testcontainers only
+/// assigns the published port afterwards, hence the runtime config endpoint.
+/// `externalUrl` goes with it so any URL the emulator hands back is reachable.
+///
+/// No call here needs credentials: the emulator has no auth.
+async fn fake_gcs_setup(base_url: &str, bucket: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let public_host = base_url.trim_start_matches("http://");
+
+    // Bodies are built as strings rather than with `.json()`: reqwest is carried
+    // here without its `json` feature and one emulator call is not a reason to
+    // pull serde into the HTTP client.
+    let config = client
+        .put(format!("{base_url}/_internal/config"))
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "externalUrl": base_url, "publicHost": public_host }).to_string())
+        .send()
+        .await
+        .map_err(|e| format!("PUT /_internal/config: {e}"))?;
+    if !config.status().is_success() {
+        return Err(format!(
+            "PUT /_internal/config -> {} (without it the emulator 404s every \
+             object request)",
+            config.status()
+        ));
+    }
+
+    let created = client
+        .post(format!("{base_url}/storage/v1/b?project=dfe-archiver-test"))
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "name": bucket }).to_string())
+        .send()
+        .await
+        .map_err(|e| format!("create bucket {bucket}: {e}"))?;
+    let status = created.status();
+    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+        return Ok(());
+    }
+    let body = created.text().await.unwrap_or_default();
+    Err(format!("create bucket {bucket} -> {status}: {body}"))
+}
+
+/// Put an object into fake-gcs-server directly, over its JSON media-upload API.
+///
+/// Needed because the archiver cannot write to this emulator: `object_store`'s
+/// GCS `put_multipart` is XML-multipart-only (`POST ?uploads=`) and
+/// fake-gcs-server does not implement that API -- it 404s. Seeding from the
+/// fixture side is what lets the read, list and delete paths still be tested.
+pub async fn fake_gcs_put_object(
+    config: &dfe_archiver::config::GcsConfig,
+    name: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let base_url = fake_gcs_base_url(config)?;
+    let url = format!(
+        "{base_url}/upload/storage/v1/b/{}/o?uploadType=media&name={}",
+        config.bucket,
+        name.replace('/', "%2F")
+    );
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("Content-Type", "application/octet-stream")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| format!("POST {url}: {e}"))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err(format!("POST {url} -> {}", response.status()))
+}
+
+/// The emulator base URL, read back out of the fixture's service-account JSON.
+fn fake_gcs_base_url(config: &dfe_archiver::config::GcsConfig) -> Result<String, String> {
+    let key = config
+        .service_account_key
+        .as_ref()
+        .ok_or_else(|| "not a fake-gcs-server fixture: no inline key".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(key.expose())
+        .map_err(|e| format!("service account key is not JSON: {e}"))?;
+    parsed
+        .get("gcs_base_url")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| "not a fake-gcs-server fixture: no gcs_base_url".to_string())
+}
+
+/// Byte length of an object, from fake-gcs-server's JSON metadata API.
+///
+/// `StorageBackend::exists` is true of a zero-byte object, so a resumable upload
+/// that committed nothing would satisfy it. This asks the server how many bytes
+/// actually landed.
+///
+/// Only usable against a fake-gcs-server fixture: it reads the emulator base URL
+/// back out of the service-account JSON, and sends no credentials.
+pub async fn fake_gcs_object_len(
+    config: &dfe_archiver::config::GcsConfig,
+    prefix: &str,
+    path: &str,
+) -> Result<u64, String> {
+    let base_url = fake_gcs_base_url(config)?;
+
+    let object = if prefix.is_empty() {
+        path.to_string()
+    } else {
+        format!("{prefix}/{path}")
+    };
+    // The object name is a single path segment in the URL, so its slashes have to
+    // be escaped or the API reads them as more segments and 404s.
+    let escaped = object.replace('/', "%2F");
+    let url = format!("{base_url}/storage/v1/b/{}/o/{escaped}", config.bucket);
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GET {url} -> {status}"));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("reading object metadata: {e}"))?;
+    let meta: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("object metadata is not JSON: {e}"))?;
+    // GCS reports size as a STRING in JSON, per the API's int64 encoding.
+    meta.get("size")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| format!("no usable size in {meta}"))
 }
 
 // ── Test data helpers ────────────────────────────────────────────────
