@@ -47,6 +47,10 @@ cobertura.xml
 # Local working files / AI agent artefacts (not committed)
 docs/superpowers/
 hyperi-ai/
+# The dotted spelling is the current one (plans, handovers, scratch). It is NOT
+# matched by the line above, so without this the whole directory sits untracked
+# in `git status` and a `git add -A` commits it.
+.hyperi-ai/
 .mcp.json
 .ai-version
 .worktrees/
