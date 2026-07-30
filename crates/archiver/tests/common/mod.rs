@@ -12,6 +12,41 @@ use std::env;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
+// ── Reachability ─────────────────────────────────────────────────────
+
+/// Is `host_port` accepting TCP connections?
+///
+/// Tries EVERY address the name resolves to. Taking only the first one is a
+/// silent false negative on any dual-stack host: `localhost` resolves to `::1`
+/// ahead of `127.0.0.1` here, and Docker's `-p 9000:9000` publishes the IPv4
+/// mapping only, so a first-address-only probe reports a healthy service down.
+/// Measured against a running `MinIO` -- `[::1]:9000` refused, `127.0.0.1:9000`
+/// connected -- which is what made six `MinIO` tests skip and report green.
+///
+/// `timeout` is per address, so the worst case is `timeout` times the number of
+/// resolved addresses. Keep it short: these are local services.
+fn tcp_reachable(host_port: &str, timeout: Duration) -> bool {
+    match host_port.to_socket_addrs() {
+        Ok(mut addrs) => addrs.any(|a| std::net::TcpStream::connect_timeout(&a, timeout).is_ok()),
+        Err(_) => false,
+    }
+}
+
+/// Fail in CI where a test would otherwise skip for want of a service.
+///
+/// A skip in CI is the worst outcome available: the job is green and nothing was
+/// tested. Outside CI a skip is legitimate -- a developer may not have the stack
+/// up -- but the reason still has to be printed, because it is the only signal
+/// that the test did not run.
+pub fn require_service_in_ci(service: &str, reason: &str) {
+    assert!(
+        env::var_os("CI").is_none(),
+        "no {service} available in CI ({reason}). Integration tests must RUN \
+         here, not skip; skipping would report green while testing nothing."
+    );
+    eprintln!("{service} unavailable, test will skip: {reason}");
+}
+
 /// Test backend mode.
 ///
 /// Controlled by `TEST_MODE` in `.env`:
@@ -59,13 +94,7 @@ impl KafkaTestConfig {
     /// Check if broker is reachable via TCP
     pub fn is_reachable(&self) -> bool {
         let first = self.brokers.split(',').next().unwrap_or(&self.brokers);
-        first
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-            .is_some_and(|a| {
-                std::net::TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok()
-            })
+        tcp_reachable(first, Duration::from_secs(3))
     }
 }
 
@@ -165,60 +194,13 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     Err("Kafka did not become healthy within 30s".into())
 }
 
-// ── MinIO lifecycle ──────────────────────────────────────────────────
+// ── MinIO: the shared dev stack, a precondition rather than a fixture ─
 
-/// RAII guard that stops docker-compose services on drop — but only if the
-/// test started them. If services were already running, the guard leaves them
-/// alone so concurrent tests and dev workflows aren't disrupted.
-pub struct DockerGuard {
-    compose_file: String,
-    services: Vec<String>,
-    started_by_test: bool,
-}
-
-impl DockerGuard {
-    /// Mark that the guard doesn't own the containers (pre-existing).
-    pub fn noop(compose_file: impl Into<String>) -> Self {
-        Self {
-            compose_file: compose_file.into(),
-            services: Vec::new(),
-            started_by_test: false,
-        }
-    }
-}
-
-impl Drop for DockerGuard {
-    fn drop(&mut self) {
-        if !self.started_by_test || self.services.is_empty() {
-            return;
-        }
-        // Best-effort cleanup; don't panic in Drop.
-        let mut args = vec![
-            "compose".to_string(),
-            "-f".to_string(),
-            self.compose_file.clone(),
-            "down".to_string(),
-        ];
-        args.extend(self.services.iter().cloned());
-        let _ = std::process::Command::new("docker").args(&args).status();
-    }
-}
-
-/// Ensure `MinIO` is available for a test.
-///
-/// Order of preference:
-///   1. If `MINIO_ENDPOINT` is reachable — use it (no lifecycle management)
-///   2. Otherwise, try to start `MinIO` via `docker-compose.dev.yaml`
-///   3. If neither works, return `None` so the caller can skip the test
-///
-/// Returns a `DockerGuard` that stops the container on drop (only if this
-/// call actually started it).
-pub fn ensure_minio() -> Option<DockerGuard> {
+/// Host:port the `MinIO` tests talk to, from `MINIO_ENDPOINT` or the dev default.
+fn minio_host_port() -> String {
     load_dotenv();
     let endpoint =
         env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
-
-    // Quick reachability check (blocking reqwest would need runtime; use raw TCP)
     let addr = endpoint
         .trim_start_matches("http://")
         .trim_start_matches("https://")
@@ -226,72 +208,49 @@ pub fn ensure_minio() -> Option<DockerGuard> {
         .next()
         .unwrap_or("localhost:9000")
         .to_string();
-    let host_port = if addr.contains(':') {
+    if addr.contains(':') {
         addr
     } else {
         format!("{addr}:9000")
-    };
-
-    let already_running = host_port
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next())
-        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok());
-
-    if already_running {
-        return Some(DockerGuard::noop("docker-compose.dev.yaml"));
     }
+}
 
-    // Try to start via docker compose. The compose file lives at the workspace
-    // root, so resolve it relative to CARGO_MANIFEST_DIR (the crate root is
-    // crates/archiver — go up two levels).
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let compose_path = manifest
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|p| p.join("docker-compose.dev.yaml"))
-        .filter(|p| p.exists())?;
-    let compose_file = compose_path.to_string_lossy().into_owned();
-
-    let status = std::process::Command::new("docker")
-        .args([
-            "compose",
-            "-f",
-            &compose_file,
-            "up",
-            "-d",
-            "minio",
-            "minio-init",
-        ])
-        .status()
-        .ok()?;
-
-    if !status.success() {
-        return None;
+/// Is the shared dev-stack `MinIO` up? Returns false having said why, and having
+/// failed the run outright in CI.
+///
+/// `archiver-minio` in `docker-compose.dev.yaml` is the DEVELOPER's stack, and
+/// it is genuinely shared -- one `MinIO` serves the whole suite, and the bucket
+/// prefixes keep the tests out of each other's way. That makes it a
+/// PRECONDITION, not a fixture: bring it up with
+///
+///     docker compose -f docker-compose.dev.yaml up -d minio minio-init
+///
+/// This used to start `MinIO` itself and hand back an RAII guard that ran
+/// `compose down` on drop. Two things were wrong with that and neither survives
+/// process-per-test. nextest runs every test in its own PROCESS, so all six
+/// `MinIO` tests raced to `compose up` and several came away believing they owned
+/// the container -- then the first to finish tore it down under the other five.
+/// And there is no end-of-suite hook to tear a shared container down from, so
+/// the honest options were "leak it" or "do not start it". Starting a container
+/// nothing can clean up is what left `archiver-minio` running after the suite.
+///
+/// Where a test genuinely needs a container of its own it starts one via
+/// testcontainers under [`container_name`], which is per-test, labelled, and
+/// removed on drop.
+pub fn ensure_minio() -> bool {
+    let host_port = minio_host_port();
+    // 2s, and every resolved address: see `tcp_reachable`.
+    if tcp_reachable(&host_port, Duration::from_secs(2)) {
+        return true;
     }
-
-    // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
-    // up to a 30s ceiling. Connect timeout reduced to 500ms — MinIO is
-    // local, anything slower is the container failing to bind.
-    for _ in 0..120 {
-        if host_port
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .is_some_and(|a| {
-                std::net::TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_ok()
-            })
-        {
-            return Some(DockerGuard {
-                compose_file: compose_file.clone(),
-                services: vec!["minio".into(), "minio-init".into()],
-                started_by_test: true,
-            });
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    None
+    require_service_in_ci(
+        "MinIO",
+        &format!(
+            "nothing accepting TCP on {host_port} -- start the dev stack with \
+             `docker compose -f docker-compose.dev.yaml up -d minio minio-init`"
+        ),
+    );
+    false
 }
 
 // ── Test data helpers ────────────────────────────────────────────────

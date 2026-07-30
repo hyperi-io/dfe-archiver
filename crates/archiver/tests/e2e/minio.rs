@@ -6,7 +6,18 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-// Requires running MinIO. Run with: cargo nextest run --test e2e -- --ignored
+// Covers the `minio://` destination and `ObjectStoreBackend::new_minio` -- the
+// S3-compatible variant with path-style addressing, static keys and plain HTTP.
+//
+// MinIO here is the DEV stack, shared by the whole suite and owned by whoever
+// ran `docker compose up`. It is a precondition, not a fixture, so these stay
+// #[ignore]d: bring the stack up first, then
+//
+//     docker compose -f docker-compose.dev.yaml up -d minio minio-init
+//     cargo nextest run --test e2e --run-ignored all -E 'test(minio)'
+//
+// With the stack absent these skip locally with the reason printed, and FAIL in
+// CI rather than reporting green -- see `common::ensure_minio`.
 
 #[allow(unused_imports)]
 use crate::common;
@@ -33,15 +44,11 @@ fn get_minio_config() -> MinioConfig {
 
 /// Test `MinIO` backend basic operations
 #[tokio::test]
-#[ignore = "requires running MinIO - run with --ignored"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
 async fn test_minio_basic_operations() {
-    let Some(_guard) = common::ensure_minio() else {
-        eprintln!(
-            "Skipping: MinIO not available and could not be started via docker-compose.dev.yaml"
-        );
-        return;
-    };
-    // _guard stops MinIO on drop if this test started it; no-op if pre-existing.
+    if !common::ensure_minio() {
+        return; // `ensure_minio` prints why, and fails the run in CI
+    }
 
     let config = get_minio_config();
     let backend =
@@ -71,15 +78,14 @@ async fn test_minio_basic_operations() {
 
 /// Test `MinIO` backend with archive writer
 #[tokio::test]
-#[ignore = "requires running MinIO - run with --ignored"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
 async fn test_minio_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let Some(_guard) = common::ensure_minio() else {
-        eprintln!("Skipping: MinIO not available");
+    if !common::ensure_minio() {
         return;
-    };
+    }
 
     let minio_config = get_minio_config();
 
@@ -113,12 +119,11 @@ async fn test_minio_archive_roundtrip() {
 
 /// Test `MinIO` backend large file (rolling test)
 #[tokio::test]
-#[ignore = "requires running MinIO - run with --ignored"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
 async fn test_minio_large_file_upload() {
-    let Some(_guard) = common::ensure_minio() else {
-        eprintln!("Skipping: MinIO not available");
+    if !common::ensure_minio() {
         return;
-    };
+    }
 
     let config = get_minio_config();
     let backend = ObjectStoreBackend::new_minio(&config, "large-test".to_string(), 8 * 1024 * 1024)
@@ -147,15 +152,14 @@ async fn test_minio_large_file_upload() {
 
 /// Test `MinIO` rolling by size
 #[tokio::test]
-#[ignore = "requires running MinIO - run with --ignored"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
 async fn test_minio_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let Some(_guard) = common::ensure_minio() else {
-        eprintln!("Skipping: MinIO not available");
+    if !common::ensure_minio() {
         return;
-    };
+    }
 
     let minio_config = get_minio_config();
     let test_prefix = format!("test-rolling-{}", std::process::id());
@@ -220,12 +224,11 @@ async fn test_minio_rolling_by_size() {
 
 /// Test `create_backend` with minio:// URL
 #[tokio::test]
-#[ignore = "requires running MinIO - run with --ignored"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
 async fn test_create_backend_minio_url() {
-    let Some(_guard) = common::ensure_minio() else {
-        eprintln!("Skipping: MinIO not available");
+    if !common::ensure_minio() {
         return;
-    };
+    }
 
     let minio_config = get_minio_config();
 
