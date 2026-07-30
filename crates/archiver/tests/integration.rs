@@ -13,7 +13,9 @@
 //!
 //! Run with: `cargo nextest run --test integration`
 
-#![allow(clippy::expect_used)]
+// A panic is how a test reports failure, which is why `expect_used` is allowed
+// here too.
+#![allow(clippy::expect_used, clippy::panic)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -22,3 +24,5 @@ mod common;
 mod archive;
 #[path = "integration/config.rs"]
 mod config;
+#[path = "integration/test_runner_config.rs"]
+mod test_runner_config;
