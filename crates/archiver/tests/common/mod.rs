@@ -47,6 +47,30 @@ pub fn require_service_in_ci(service: &str, reason: &str) {
     eprintln!("{service} unavailable, test will skip: {reason}");
 }
 
+/// Poll until `host_port` accepts a TCP connection, at 250ms cadence.
+///
+/// Every container fixture below needs this AFTER its readiness wait, because a
+/// log line is not a bound socket. Under load -- eight tests starting containers
+/// at once -- the message the wait strategy matches arrives while Docker's
+/// published port is still not accepting, and the first HTTP call fails with
+/// "error sending request". Measured: three of nineteen e2e tests failed that way
+/// at `--test-threads 8` and none at the default 2.
+///
+/// Tokio's connect walks every resolved address, so this is also immune to the
+/// IPv6-first problem [`tcp_reachable`] documents.
+async fn wait_for_port(host_port: &str, attempts: u32) -> Result<(), String> {
+    for _ in 0..attempts {
+        if tokio::net::TcpStream::connect(host_port).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "nothing accepting TCP on {host_port} after {}s",
+        f64::from(attempts) * 0.25
+    ))
+}
+
 /// Is a Docker daemon reachable?
 fn docker_available() -> bool {
     std::process::Command::new("docker")
@@ -540,6 +564,10 @@ pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> 
     // process.
     let endpoint = format!("http://{host}:{port}/{AZURITE_ACCOUNT}");
 
+    if let Err(e) = wait_for_port(&format!("{host}:{port}"), 120).await {
+        require_container_in_ci("Azurite", &e);
+        return None;
+    }
     if let Err(e) = create_blob_container(&endpoint, container).await {
         require_container_in_ci("Azurite", &format!("could not create blob container: {e}"));
         return None;
@@ -692,6 +720,236 @@ pub async fn azurite_blob_len(
         .ok_or_else(|| format!("HEAD {resource} returned no usable Content-Length"))
 }
 
+// ── LocalStack (AWS S3 emulator) ──────────────────────────────────────
+
+/// `LocalStack`, on the SEMVER line only -- do NOT move this to the `CalVer` tags
+/// (`2026.07.0` etc). Those require a licence: they exit 55 with "License
+/// activation failed! ... set the `LOCALSTACK_AUTH_TOKEN` variable", so every
+/// `LocalStack` test would skip. 4.x is the newest line that boots with no token
+/// -- verified here on 4.14.0 (build 2026-02-26), which starts, prints
+/// "You are starting the `LocalStack` Community Docker image" and serves S3.
+/// Reject a `CalVer` bump. Same pin as dfe-fetcher, deliberately.
+///
+/// renovate: datasource=docker depName=localstack/localstack versioning=semver
+const LOCALSTACK_TAG: &str = "4.14";
+
+/// An S3 target for a test: a live bucket if one is configured, else a
+/// `LocalStack` this fixture owns.
+pub struct S3Fixture {
+    /// Config pointed at the target, ready for `ObjectStoreBackend::new_s3`.
+    pub config: dfe_archiver::config::S3Config,
+    container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
+}
+
+impl S3Fixture {
+    /// Did this fixture start its own container?
+    #[must_use]
+    pub fn manages_container(&self) -> bool {
+        self.container.is_some()
+    }
+}
+
+/// An S3 target for `test`, writing into `bucket`.
+///
+/// Live first, but only when `S3_BUCKET` comes with credentials -- a bucket name
+/// on its own is not evidence of access, and the repo's `.env` sets one with no
+/// keys, which is exactly the case that has to fall through to the emulator.
+///
+/// `LocalStack` rather than the dev-stack `MinIO` because the rest of the fleet
+/// already standardises on it (dfe-fetcher, dfe-receiver) and because a
+/// per-test container cleans itself up, which a shared compose service cannot.
+/// `MinIO` keeps its own tests: `new_minio` is a separate code path.
+///
+/// Returns `None` when neither is available -- having failed the run in CI.
+pub async fn acquire_s3(test: &str, bucket: &str) -> Option<S3Fixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    load_dotenv();
+    if let Ok(live_bucket) = env::var("S3_BUCKET") {
+        let key_id = env::var("S3_ACCESS_KEY_ID").ok();
+        let secret = env::var("S3_SECRET_ACCESS_KEY").ok();
+        if key_id.is_some() && secret.is_some() {
+            return Some(S3Fixture {
+                config: dfe_archiver::config::S3Config {
+                    bucket: live_bucket,
+                    region: env::var("S3_REGION")
+                        .ok()
+                        .or_else(|| Some("ap-southeast-2".to_string())),
+                    access_key_id: key_id,
+                    secret_access_key: secret
+                        .map(dfe_archiver::config::sensitive::SensitiveString::from),
+                    endpoint: env::var("S3_ENDPOINT").ok(),
+                    allow_http: env::var("S3_ALLOW_HTTP")
+                        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+                },
+                container: None,
+            });
+        }
+        eprintln!(
+            "S3_BUCKET is set but S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY are not -- using LocalStack"
+        );
+    }
+
+    let name = container_name(Some(test), "localstack");
+    // This name belongs to this test alone, so anything holding it is a leak.
+    reap_stale(&name);
+
+    let image = GenericImage::new("localstack/localstack", LOCALSTACK_TAG)
+        .with_exposed_port(4566u16.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready."))
+        // S3 only. LocalStack starts every service it is asked for, and the rest
+        // are dead weight in a storage test's startup time.
+        .with_env_var("SERVICES", "s3")
+        .with_container_name(&name)
+        .with_labels(test_labels("localstack"));
+
+    let started = match image.start().await {
+        Ok(c) => c,
+        Err(e) => {
+            require_container_in_ci("LocalStack", &format!("container start failed: {e}"));
+            return None;
+        }
+    };
+    let host = match started.get_host().await {
+        Ok(h) => h,
+        Err(e) => {
+            require_container_in_ci("LocalStack", &format!("get_host: {e}"));
+            return None;
+        }
+    };
+    let port = match started.get_host_port_ipv4(4566u16).await {
+        Ok(p) => p,
+        Err(e) => {
+            require_container_in_ci("LocalStack", &format!("get_host_port: {e}"));
+            return None;
+        }
+    };
+    let endpoint = format!("http://{host}:{port}");
+
+    if let Err(e) = wait_for_port(&format!("{host}:{port}"), 120).await {
+        require_container_in_ci("LocalStack", &e);
+        return None;
+    }
+    if let Err(e) = wait_for_localstack_s3(&endpoint).await {
+        require_container_in_ci("LocalStack", &e);
+        return None;
+    }
+    if let Err(e) = create_s3_bucket(&endpoint, bucket).await {
+        require_container_in_ci("LocalStack", &e);
+        return None;
+    }
+
+    Some(S3Fixture {
+        config: dfe_archiver::config::S3Config {
+            bucket: bucket.to_string(),
+            // object_store requires a region even where the server ignores it.
+            region: Some("us-east-1".to_string()),
+            access_key_id: Some("test".to_string()),
+            secret_access_key: Some(dfe_archiver::config::sensitive::SensitiveString::from(
+                "test".to_string(),
+            )),
+            endpoint: Some(endpoint),
+            // The emulator speaks plain HTTP, so this has to be on -- which also
+            // means the test exercises `S3Config.allow_http` doing its job.
+            allow_http: true,
+        },
+        container: Some(started),
+    })
+}
+
+/// Wait until `LocalStack`'s S3 is actually serving.
+///
+/// The "Ready." line the container waits on is printed by the supervisor BEFORE
+/// the edge gateway finishes binding, so a bucket create immediately after it
+/// fails with a connection error -- observed on 4 of 5 tests, the fifth passing
+/// only because it happened to be slower. Poll the health endpoint instead,
+/// which reports per-service state.
+///
+/// 60s ceiling, comfortably inside nextest's 120s terminate-after.
+async fn wait_for_localstack_s3(endpoint: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let url = format!("{endpoint}/_localstack/health");
+    let mut last = "no response yet".to_string();
+    for _ in 0..240 {
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                let body = response.text().await.unwrap_or_default();
+                // "available" means not yet started but supported; "running"
+                // means started. Either is enough -- LocalStack starts a service
+                // lazily on first use, and the gateway is up by then.
+                if body.contains("\"s3\"") {
+                    return Ok(());
+                }
+                last = format!("health reports no s3: {body}");
+            }
+            Ok(response) => last = format!("health -> {}", response.status()),
+            Err(e) => last = format!("health unreachable: {e}"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!("S3 did not come up within 60s ({last})"))
+}
+
+/// Create an S3 bucket, which `object_store` has no API for.
+///
+/// Unsigned: `LocalStack` does not verify `SigV4`, so a bare PUT is enough. Verified
+/// by hand -- `PUT /<bucket>` with no Authorization header returns 200 with an
+/// `x-amz-bucket-arn`.
+async fn create_s3_bucket(endpoint: &str, bucket: &str) -> Result<(), String> {
+    let url = format!("{endpoint}/{bucket}");
+    let response = reqwest::Client::new()
+        .put(&url)
+        .send()
+        .await
+        .map_err(|e| format!("PUT {url}: {e}"))?;
+    let status = response.status();
+    // 409 BucketAlreadyOwnedByYou is success as far as a test is concerned.
+    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(format!("create bucket {bucket} -> {status}: {body}"))
+}
+
+/// Byte length of an object, from a HEAD straight at the emulator.
+///
+/// `StorageBackend::exists` is true of a zero-byte object, so a multipart upload
+/// that completed with no parts would satisfy it. Unsigned, as above.
+pub async fn localstack_object_len(
+    config: &dfe_archiver::config::S3Config,
+    prefix: &str,
+    path: &str,
+) -> Result<u64, String> {
+    let endpoint = config
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| "not a LocalStack fixture: no endpoint".to_string())?;
+    let key = if prefix.is_empty() {
+        path.to_string()
+    } else {
+        format!("{prefix}/{path}")
+    };
+    let url = format!("{endpoint}/{}/{key}", config.bucket);
+
+    let response = reqwest::Client::new()
+        .head(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HEAD {url}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HEAD {url} -> {status}"));
+    }
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or_else(|| format!("HEAD {url} returned no usable Content-Length"))
+}
+
 // ── fake-gcs-server (Google Cloud Storage emulator) ───────────────────
 
 /// `fsouza/fake-gcs-server`, the maintained GCS emulator (1.55.1 published
@@ -790,6 +1048,10 @@ pub async fn acquire_gcs(test: &str, bucket: &str) -> Option<GcsFixture> {
     };
     let base_url = format!("http://{host}:{port}");
 
+    if let Err(e) = wait_for_port(&format!("{host}:{port}"), 120).await {
+        require_container_in_ci("fake-gcs-server", &e);
+        return None;
+    }
     if let Err(e) = fake_gcs_setup(&base_url, bucket).await {
         require_container_in_ci("fake-gcs-server", &e);
         return None;
