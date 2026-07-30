@@ -125,6 +125,27 @@ pub fn validate_config(config: &Config) -> Result<()> {
         )));
     }
 
+    // `Router::route` honours "expression" and treats every other value as
+    // "topic", so without this check a misspelt mode is indistinguishable from
+    // the default at runtime and the configured path layout never appears.
+    let valid_routing_modes = ["topic", "expression"];
+    if !valid_routing_modes.contains(&config.routing.mode.as_str()) {
+        return Err(Error::Config(format!(
+            "routing.mode must be one of: {} (got '{}')",
+            valid_routing_modes.join(", "),
+            config.routing.mode
+        )));
+    }
+
+    // Expression mode with no fields yields the same path as topic mode, and
+    // additionally rejects non-JSON payloads. Never what was intended.
+    if config.routing.mode == "expression" && config.routing.expression_fields.is_empty() {
+        return Err(Error::Config(
+            "routing.expression_fields cannot be empty when routing.mode is 'expression'"
+                .to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -258,6 +279,53 @@ mod tests {
             validate_config(&config).is_err(),
             "uppercase GZIP should fail"
         );
+    }
+
+    /// `Router::route` matches `routing.mode` on the exact string "expression"
+    /// and treats everything else as topic routing. An unvalidated `mode:
+    /// expresion` (or `Expression`) therefore archives by topic: the configured
+    /// per-org path layout never appears, and no log, metric or startup check
+    /// reports the mode as ignored.
+    #[test]
+    fn test_unknown_routing_mode_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.routing.mode = "expresion".to_string();
+
+        assert!(
+            validate_config(&config).is_err(),
+            "a misspelt routing.mode must be rejected, not silently treated as 'topic'"
+        );
+    }
+
+    /// `mode: expression` with no `expression_fields` produces the same path as
+    /// topic routing, so the routing it names cannot fire -- and it is strictly
+    /// worse than topic mode, because expression routing parses every payload as
+    /// JSON and errors on anything that is not.
+    #[test]
+    fn test_expression_routing_without_fields_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.routing.mode = "expression".to_string();
+        config.routing.expression_fields = vec![];
+
+        assert!(
+            validate_config(&config).is_err(),
+            "expression routing with an empty field list can never route on anything"
+        );
+    }
+
+    #[test]
+    fn test_valid_routing_modes_pass() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+
+        config.routing.mode = "topic".to_string();
+        assert!(validate_config(&config).is_ok(), "topic mode is valid");
+
+        config.routing.mode = "expression".to_string();
+        config.routing.expression_fields = vec!["org_id".to_string()];
+        assert!(validate_config(&config).is_ok(), "expression mode is valid");
     }
 
     #[test]

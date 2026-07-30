@@ -203,12 +203,86 @@ pub fn create_compressor(codec: &str, level: i32) -> Result<Box<dyn Compressor +
     }
 }
 
+/// The compressor a [`CompressionConfig`] asks for.
+///
+/// `enabled: false` means no compression whatever `codec` says. Every caller has
+/// to go through here rather than reading `codec` directly: doing that made the
+/// flag dead config, and because the default codec is `zstd`, `enabled: false`
+/// produced zstd archives with nothing reporting the setting as discarded. An
+/// unknown codec is still an error even when compression is off, so a typo
+/// surfaces at startup rather than the day the flag is flipped on.
+///
+/// # Errors
+///
+/// [`Error::Compression`] when `codec` is not a known codec name.
+pub fn compressor_for(
+    config: &crate::config::CompressionConfig,
+) -> Result<Box<dyn Compressor + Send + Sync>> {
+    let selected = create_compressor(&config.codec, config.level)?;
+    if config.enabled {
+        Ok(selected)
+    } else {
+        Ok(Box::new(NoCompressor))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
     const TEST_DATA: &[u8] = b"hello world this is test data that should compress well when repeated hello world this is test data that should compress well when repeated";
+
+    /// `enabled: false` must win over the codec. The default codec is `zstd`, so
+    /// reading the codec alone meant `enabled: false` still produced compressed
+    /// archives -- and nothing logged, metered or validated said the flag was
+    /// ignored.
+    #[test]
+    fn compressor_for_disabled_is_none_regardless_of_codec() {
+        for codec in ["zstd", "lz4", "snappy", "gzip"] {
+            let config = crate::config::CompressionConfig {
+                codec: codec.to_string(),
+                level: 3,
+                enabled: false,
+            };
+            let compressor = compressor_for(&config).expect("known codec");
+            assert_eq!(
+                compressor.name(),
+                "none",
+                "enabled: false with codec {codec} still compressed"
+            );
+            assert_eq!(
+                compressor.compress(TEST_DATA).expect("compress"),
+                TEST_DATA,
+                "the disabled compressor must pass bytes through untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn compressor_for_enabled_uses_the_codec() {
+        let config = crate::config::CompressionConfig {
+            codec: "zstd".to_string(),
+            level: 3,
+            enabled: true,
+        };
+        assert_eq!(
+            compressor_for(&config).expect("known codec").name(),
+            "zstd"
+        );
+    }
+
+    /// An unknown codec is rejected even with compression off, so a typo shows
+    /// up at startup rather than the day someone flips the flag on.
+    #[test]
+    fn compressor_for_rejects_an_unknown_codec_when_disabled() {
+        let config = crate::config::CompressionConfig {
+            codec: "zstdd".to_string(),
+            level: 3,
+            enabled: false,
+        };
+        assert!(compressor_for(&config).is_err());
+    }
 
     #[test]
     fn test_zstd_roundtrip() {

@@ -21,7 +21,7 @@ use crate::config::{Config, SharedConfig};
 use crate::metrics::ArchiverMetrics;
 use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver_core::buffer::TieredBufferManager;
-use dfe_archiver_core::compression::create_compressor;
+use dfe_archiver_core::compression::compressor_for;
 use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
@@ -727,10 +727,7 @@ impl Archiver {
             max_age_secs: self.startup_config.archive.roll_interval_secs,
         };
 
-        let compressor = create_compressor(
-            &self.startup_config.compression.codec,
-            self.startup_config.compression.level,
-        )?;
+        let compressor = compressor_for(&self.startup_config.compression)?;
 
         let mut archive_config = self.startup_config.archive.clone();
         archive_config.path_template = format!(

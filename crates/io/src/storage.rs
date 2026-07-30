@@ -521,8 +521,13 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             prefix.to_string(),
             chunk_size,
         )?))
-    } else if dest.starts_with("gs://") {
-        let rest = dest.strip_prefix("gs://").unwrap_or("");
+    } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
+        // Both spellings, because `ArchiveConfig::backend_name()` labels either
+        // as "gcs" and a destination must mean the same thing to both.
+        let rest = dest
+            .strip_prefix("gs://")
+            .or_else(|| dest.strip_prefix("gcs://"))
+            .unwrap_or("");
         let (bucket, prefix) = parse_bucket_prefix(rest);
 
         let gcs_config = config.gcs.clone().unwrap_or_else(|| GcsConfig {
@@ -557,6 +562,16 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             prefix.to_string(),
             chunk_size,
         )?))
+    } else if dest.contains("://") {
+        // URL-shaped but not a scheme this implements. The local-path branch
+        // below would create a directory named after the URL and archive into
+        // it, so a typo in `archive.destination` writes to ephemeral pod disk
+        // instead of the bucket with nothing downstream able to tell.
+        Err(Error::Config(format!(
+            "unsupported archive.destination scheme in '{dest}' \
+             (supported: file://, s3://, minio://, gs://, gcs://, az://, azure://, \
+             or a bare local path)"
+        )))
     } else {
         Ok(Box::new(FileBackend::new(dest)))
     }
@@ -707,5 +722,48 @@ mod tests {
         };
         let result = create_backend(&config);
         assert!(result.is_err(), "minio:// without config should fail");
+    }
+
+    /// `ArchiveConfig::backend_name()` accepts `gcs://` as a GCS destination and
+    /// labels every sink metric `backend="gcs"`, so `create_backend` has to
+    /// agree. Matching only `gs://` sends `gcs://bucket/prefix` to the catch-all
+    /// and archives into a local directory of that name -- data bound for a
+    /// cloud bucket on ephemeral pod disk, with the metrics claiming GCS.
+    #[test]
+    fn test_create_backend_agrees_with_backend_name_on_gcs_alias() {
+        let config = ArchiveConfig {
+            destination: "gcs://some-bucket/prefix".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.backend_name(), "gcs", "backend_name claims gcs");
+
+        match create_backend(&config) {
+            // No GCS credentials here, so a client build error is acceptable.
+            Err(_) => {}
+            Ok(backend) => assert_eq!(
+                backend.name(),
+                "gcs",
+                "gcs:// must not be silently downgraded to a local directory"
+            ),
+        }
+    }
+
+    /// A URL-shaped destination with an unsupported scheme must be rejected.
+    /// Accepting it as a relative local path archives a mistyped
+    /// `archive.destination` to pod-local disk, and neither startup, validation
+    /// nor a metric says the cloud bucket went unused. Bare paths (no `://`)
+    /// stay valid.
+    #[test]
+    fn test_create_backend_rejects_unknown_url_scheme() {
+        for dest in ["S3://upper-bucket", "blob://bucket/x", "http://host/path"] {
+            let config = ArchiveConfig {
+                destination: dest.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                create_backend(&config).is_err(),
+                "unsupported scheme '{dest}' must be rejected, not written to local disk"
+            );
+        }
     }
 }
