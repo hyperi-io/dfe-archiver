@@ -123,6 +123,18 @@ test-log = { version = ">=0.2, <0.3", features = ["trace"] }
 walkdir = ">=2.5, <3"
 reqwest = ">=0.13.3, <0.14"
 rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
+# Emulator containers for the cloud storage backends, so S3/GCS/Azure coverage
+# runs with no cloud credentials. Same major line as the rest of the fleet
+# (dfe-fetcher, dfe-loader, dfe-receiver) so the container-hygiene helpers stay
+# copy-compatible.
+testcontainers = ">=0.27.3, <0.28"
+# Azure Shared Key signing, for the one call object_store does not expose:
+# creating the blob container the tests then write into. Azurite rejects an
+# unsigned request, so there is no shortcut. Versions match what the graph
+# already resolves, so this adds no new compilation units.
+hmac = ">=0.13, <0.14"
+sha2 = ">=0.11, <0.12"
+base64 = ">=0.22.1, <0.23"
 
 [profile.release]
 lto = "thin"             # hyperi-ci overrides to "fat" at beta+ channels

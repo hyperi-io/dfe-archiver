@@ -253,6 +253,411 @@ pub fn ensure_minio() -> bool {
     false
 }
 
+// ── Container naming and cleanup ──────────────────────────────────────
+//
+// Every container this suite starts carries a name saying which repo, which
+// suite and which service it is, so an operator reading `docker ps` can tell
+// what left it behind. testcontainers' default is random hex, untraceable the
+// moment one survives.
+//
+// Naming is PER-TEST -- `dfe-archiver-test-integration-<test>-<service>` --
+// because nextest runs each test in its own PROCESS, so two tests calling the
+// same `acquire_*` start two containers whatever the name suggests. On one
+// shared name the first create wins and the rest fail with "name is already in
+// use", fall into their skip branch, and report green while testing nothing.
+// Random names already meant one container per test, so per-test naming costs
+// nothing; a shared name would be the regression.
+//
+// The dev-stack containers (`archiver-minio` and friends in
+// docker-compose.dev.yaml) are deliberately NOT renamed to this scheme. They
+// belong to the developer who ran `docker compose up` and are correctly named
+// for that -- see `ensure_minio`.
+//
+// Cleanup is belt AND braces, because Drop is not enough: normal completion and
+// a panic both unwind so Drop stops the container, but a SIGKILL, an abort or
+// Ctrl-C does not, and testcontainers 0.27 has no resource reaper. A
+// deterministic name makes that leak WORSE than a random one, because the leaked
+// container holds the name and every later run fails on it. `reap_stale` closes
+// that, so a leak costs the next run nothing.
+//
+// The label goes on as well, so a sweep can find these when the names are not
+// known:
+//   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-archiver-integration)
+
+/// Label marking every container this suite starts, for bulk cleanup.
+pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-archiver-integration");
+
+/// Labels for a container this suite starts: what it is, and whose run owns it.
+///
+/// The name says what and why; these say WHO, which is the question someone
+/// actually has on finding a leftover. `ps -p <owner-pid>` answers "is that run
+/// still going, or is this rubbish I can remove?".
+fn test_labels(service: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            TEST_SUITE_LABEL.0.to_string(),
+            TEST_SUITE_LABEL.1.to_string(),
+        ),
+        (
+            "io.hyperi.test.repo".to_string(),
+            "dfe-archiver".to_string(),
+        ),
+        ("io.hyperi.test.service".to_string(), service.to_string()),
+        (
+            "io.hyperi.test.owner-pid".to_string(),
+            std::process::id().to_string(),
+        ),
+    ]
+}
+
+/// Container name for a backing service in this suite.
+///
+/// Pass `Some(test)` -- the owning test -- for anything a test starts for
+/// itself, which is everything here. `None` is the form for a container started
+/// once for a whole test binary; nothing does that, and using it from several
+/// tests would make them collide on the name rather than share the container.
+///
+/// Names are lowercased with non-alphanumerics collapsed to `-`, because Docker
+/// only accepts `[a-zA-Z0-9][a-zA-Z0-9_.-]*` and a Rust test path
+/// (`azure::test_azure_basic_operations`) has colons in it -- unnormalised it is
+/// rejected at create time as what reads like a Docker fault.
+#[must_use]
+pub fn container_name(test: Option<&str>, service: &str) -> String {
+    let slug = |s: &str| {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
+    match test {
+        Some(t) => format!(
+            "dfe-archiver-test-integration-{}-{}",
+            slug(t),
+            slug(service)
+        ),
+        None => format!("dfe-archiver-test-integration-{}", slug(service)),
+    }
+}
+
+/// Remove a DEAD container holding `name`, so a leak from a killed run cannot
+/// block this one.
+///
+/// Only ever call this for a name that belongs to ONE test. On a shared name a
+/// peer may have created the container a moment ago and not started it yet, and
+/// removing that deletes the work of the run doing the right thing.
+///
+/// Never touches a RUNNING container even so. Two concurrent runs of this suite
+/// on one machine share these names, and force-removing a live one sabotages a
+/// process that did nothing wrong -- it surfaces over there as a baffling
+/// mid-test failure. Leaving it means the start here fails with "name is already
+/// in use", which says what actually happened.
+///
+/// Best-effort otherwise: no Docker, nothing to remove, or an already-gone
+/// container are all fine. A failure here must not fail the test; the start that
+/// follows reports the real problem.
+pub fn reap_stale(name: &str) {
+    let running = std::process::Command::new("docker")
+        .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
+        .output();
+    // Non-empty stdout means a container by this name is up. Leave it alone.
+    if let Ok(out) = &running
+        && !out.stdout.is_empty()
+    {
+        return;
+    }
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "--force", "--volumes", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+// ── Azurite (Azure Blob emulator) ─────────────────────────────────────
+
+/// Azurite, the Microsoft-published Azure Blob emulator. Pinned rather than
+/// `latest`: a floating tag retargets the suite on every image refresh, so a
+/// break lands with nothing in the diff to explain it.
+///
+/// renovate: datasource=docker depName=mcr.microsoft.com/azure-storage/azurite
+const AZURITE_TAG: &str = "3.36.0";
+
+/// Azurite's published dev account. Fixed and documented by Microsoft, not a
+/// secret -- it only ever unlocks an emulator on localhost.
+const AZURITE_ACCOUNT: &str = "devstoreaccount1";
+const AZURITE_KEY: &str =
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
+/// An Azure Blob target for a test: a live account if one is configured, else an
+/// Azurite this fixture owns. Dropping it stops and removes any container.
+pub struct AzureFixture {
+    /// Config pointed at the target, ready for `ObjectStoreBackend::new_azure`.
+    pub config: dfe_archiver::config::AzureConfig,
+    container: Option<testcontainers::ContainerAsync<testcontainers::GenericImage>>,
+}
+
+impl AzureFixture {
+    /// Did this fixture start its own container? False when a live Azure account
+    /// is configured, in which case there is nothing for a cleanup test to check.
+    #[must_use]
+    pub fn manages_container(&self) -> bool {
+        self.container.is_some()
+    }
+}
+
+/// An Azure Blob target for `test`, writing into blob container `container`.
+///
+/// A live account wins when `AZURE_STORAGE_ACCOUNT` names one that ANSWERS;
+/// otherwise an Azurite started for this test alone. Azurite is what makes the
+/// Azure backend testable with no Azure subscription: `new_azure` talks to it
+/// over the same `object_store` client it uses against Azure Blob.
+///
+/// The account is probed rather than taken on trust because a stale
+/// `AZURE_STORAGE_ACCOUNT` in a developer's `.env` would otherwise silently
+/// steer every Azure test away from the emulator and into a DNS failure -- which
+/// is exactly what the checked-in `.env` does today: it names an account that
+/// does not resolve. Presence of a variable is not evidence of a service.
+///
+/// Returns `None` when neither is available -- having failed the run in CI,
+/// where a skip would be a green job that tested nothing.
+pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    load_dotenv();
+    if let Ok(account_name) = env::var("AZURE_STORAGE_ACCOUNT") {
+        let host_port = format!("{account_name}.blob.core.windows.net:443");
+        if tcp_reachable(&host_port, Duration::from_secs(3)) {
+            return Some(AzureFixture {
+                config: dfe_archiver::config::AzureConfig {
+                    account_name,
+                    account_key: env::var("AZURE_STORAGE_KEY")
+                        .ok()
+                        .map(dfe_archiver::config::sensitive::SensitiveString::from),
+                    sas_token: None,
+                    container: env::var("AZURE_CONTAINER")
+                        .unwrap_or_else(|_| container.to_string()),
+                    use_emulator: false,
+                    endpoint: None,
+                },
+                container: None,
+            });
+        }
+        eprintln!(
+            "AZURE_STORAGE_ACCOUNT names {host_port}, which does not answer -- using Azurite"
+        );
+    }
+
+    let name = container_name(Some(test), "azurite");
+    // This name belongs to this test alone, so anything holding it is a leak.
+    reap_stale(&name);
+
+    let image = GenericImage::new("mcr.microsoft.com/azure-storage/azurite", AZURITE_TAG)
+        .with_exposed_port(10000u16.tcp())
+        .with_wait_for(WaitFor::message_on_stdout(
+            "Azurite Blob service successfully listens",
+        ))
+        // Blob only: the queue and table services are not used and each one
+        // costs another port and another readiness line to wait on.
+        // --blobHost 0.0.0.0 is required or Azurite binds 127.0.0.1 INSIDE the
+        // container, where the published port cannot reach it.
+        .with_cmd(["azurite-blob", "--blobHost", "0.0.0.0"])
+        .with_container_name(&name)
+        .with_labels(test_labels("azurite"));
+
+    let started = match image.start().await {
+        Ok(c) => c,
+        Err(e) => {
+            require_service_in_ci("Azurite", &format!("container start failed: {e}"));
+            return None;
+        }
+    };
+    let host = match started.get_host().await {
+        Ok(h) => h,
+        Err(e) => {
+            require_service_in_ci("Azurite", &format!("get_host: {e}"));
+            return None;
+        }
+    };
+    let port = match started.get_host_port_ipv4(10000u16).await {
+        Ok(p) => p,
+        Err(e) => {
+            require_service_in_ci("Azurite", &format!("get_host_port: {e}"));
+            return None;
+        }
+    };
+
+    // Azurite serves the legacy emulator URL layout, account name in the path:
+    // http://host:port/devstoreaccount1/<container>/<blob>. Baking the account
+    // into the endpoint is what makes object_store's non-emulator code path
+    // produce those URLs -- and the Shared Key signature it computes then
+    // matches, because the canonicalised resource is /<account> plus the URL
+    // path either way.
+    //
+    // `use_emulator` is deliberately NOT set. object_store's emulator branch
+    // takes its URL from the AZURITE_BLOB_STORAGE_URL env var and ignores
+    // `with_endpoint`, so it cannot address a random published port without
+    // mutating process env -- unsound under `cargo test`, where tests share a
+    // process.
+    let endpoint = format!("http://{host}:{port}/{AZURITE_ACCOUNT}");
+
+    if let Err(e) = create_blob_container(&endpoint, container).await {
+        require_service_in_ci("Azurite", &format!("could not create blob container: {e}"));
+        return None;
+    }
+
+    Some(AzureFixture {
+        config: dfe_archiver::config::AzureConfig {
+            account_name: AZURITE_ACCOUNT.to_string(),
+            account_key: Some(dfe_archiver::config::sensitive::SensitiveString::from(
+                AZURITE_KEY.to_string(),
+            )),
+            sas_token: None,
+            container: container.to_string(),
+            use_emulator: false,
+            endpoint: Some(endpoint),
+        },
+        container: Some(started),
+    })
+}
+
+/// The API version every signed request below declares.
+const AZURITE_API_VERSION: &str = "2025-05-05";
+
+/// Send a Shared Key signed request to Azurite.
+///
+/// Needed because Azurite rejects unsigned requests (403 `AuthorizationFailure`)
+/// and `object_store` exposes neither container creation nor a raw signed
+/// request. Recipe per
+/// <https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-shared-key>,
+/// checked field-by-field against Azurite's own `[STRING TO SIGN]` debug line.
+///
+/// `resource` is the path under the account (`<container>[/<blob>]`) and `query`
+/// is appended to both the URL and the canonicalised resource -- it must already
+/// be lowercase and sorted, which for the single-parameter calls here is free.
+async fn azurite_signed(
+    method: reqwest::Method,
+    endpoint: &str,
+    resource: &str,
+    query: Option<(&str, &str)>,
+) -> Result<reqwest::Response, String> {
+    use base64::Engine as _;
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    // CanonicalizedResource is /<account> followed by the URL path -- which on
+    // the emulator layout already starts with the account, so the account
+    // appears twice. That is what Azurite expects.
+    let account_path = endpoint
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(_, p)| p)
+        .ok_or_else(|| format!("endpoint has no account path: {endpoint}"))?;
+
+    let (url, canonical) = match query {
+        Some((key, value)) => (
+            format!("{endpoint}/{resource}?{key}={value}"),
+            format!("/{AZURITE_ACCOUNT}/{account_path}/{resource}\n{key}:{value}"),
+        ),
+        None => (
+            format!("{endpoint}/{resource}"),
+            format!("/{AZURITE_ACCOUNT}/{account_path}/{resource}"),
+        ),
+    };
+
+    let ms_date = chrono::Utc::now()
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+
+    // Field order is fixed by the spec: verb, then Content-Encoding,
+    // Content-Language, Content-Length, Content-MD5, Content-Type, Date,
+    // If-Modified-Since, If-Match, If-None-Match, If-Unmodified-Since, Range.
+    // All empty here -- Content-Length is the empty string when zero and Date is
+    // empty because x-ms-date carries it -- then the x-ms-* headers, then the
+    // canonicalised resource.
+    let string_to_sign = format!(
+        "{method}\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{ms_date}\nx-ms-version:{AZURITE_API_VERSION}\n{canonical}"
+    );
+
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(AZURITE_KEY)
+        .map_err(|e| format!("emulator key is not base64: {e}"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|e| format!("hmac key: {e}"))?;
+    mac.update(string_to_sign.as_bytes());
+    let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+    reqwest::Client::new()
+        .request(method.clone(), &url)
+        .header("x-ms-date", &ms_date)
+        .header("x-ms-version", AZURITE_API_VERSION)
+        .header(
+            "Authorization",
+            format!("SharedKey {AZURITE_ACCOUNT}:{signature}"),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("{method} {url}: {e}"))
+}
+
+/// Create a blob container, which `object_store` has no API for.
+async fn create_blob_container(endpoint: &str, container: &str) -> Result<(), String> {
+    let response = azurite_signed(
+        reqwest::Method::PUT,
+        endpoint,
+        container,
+        Some(("restype", "container")),
+    )
+    .await?;
+
+    let status = response.status();
+    // 409 ContainerAlreadyExists is success as far as a test is concerned.
+    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(format!("create container {container} -> {status}: {body}"))
+}
+
+/// Byte length of a blob, from Azurite, via a signed HEAD.
+///
+/// `StorageBackend::exists` only reports existence, and existence is true of a
+/// zero-byte blob -- so a multipart upload that committed an empty block list
+/// would satisfy it. This asks the server how many bytes actually landed.
+///
+/// Only usable against an Azurite fixture (it signs with the emulator key).
+pub async fn azurite_blob_len(
+    config: &dfe_archiver::config::AzureConfig,
+    prefix: &str,
+    path: &str,
+) -> Result<u64, String> {
+    let endpoint = config
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| "not an Azurite fixture: no endpoint".to_string())?;
+    let resource = if prefix.is_empty() {
+        format!("{}/{path}", config.container)
+    } else {
+        format!("{}/{prefix}/{path}", config.container)
+    };
+
+    let response = azurite_signed(reqwest::Method::HEAD, endpoint, &resource, None).await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HEAD {resource} -> {status}"));
+    }
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or_else(|| format!("HEAD {resource} returned no usable Content-Length"))
+}
+
 // ── Test data helpers ────────────────────────────────────────────────
 
 /// Generate unique topic name for tests

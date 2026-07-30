@@ -274,13 +274,32 @@ impl ObjectStoreBackend {
         if let Some(ref sas) = config.sas_token {
             builder = builder.with_sas_authorization(parse_sas_pairs(sas.expose()));
         }
-        if config.use_emulator {
-            builder = builder.with_use_emulator(true);
-        }
+        // `use_emulator` and `endpoint` cannot both apply. object_store's
+        // emulator branch takes its URL from the `AZURITE_BLOB_STORAGE_URL` env
+        // var (default `http://127.0.0.1:10000`) and never reads
+        // `with_endpoint`, so setting both used to drop the endpoint in silence
+        // and address whatever answered on the local default port -- or, with
+        // nothing there, `<account>.blob.core.windows.net` out on the internet,
+        // which resolves for `devstoreaccount1` and returns 403.
+        //
+        // So an explicit endpoint wins. An emulator behind one needs its own
+        // credential, because there is no managed identity to fall back on and
+        // the emulator's key is not ours to assume.
         if let Some(ref endpoint) = config.endpoint {
+            if config.use_emulator && config.account_key.is_none() && config.sas_token.is_none() {
+                return Err(Error::Config(
+                    "azure.use_emulator together with azure.endpoint needs \
+                     azure.account_key or azure.sas_token (for Azurite, its published \
+                     devstoreaccount1 key); or drop azure.endpoint and let \
+                     AZURITE_BLOB_STORAGE_URL address the emulator"
+                        .to_string(),
+                ));
+            }
             builder = builder
                 .with_endpoint(endpoint.clone())
                 .with_allow_http(true);
+        } else if config.use_emulator {
+            builder = builder.with_use_emulator(true);
         }
 
         let store = builder
@@ -746,6 +765,52 @@ mod tests {
                 "gcs:// must not be silently downgraded to a local directory"
             ),
         }
+    }
+
+    /// `use_emulator` plus an `endpoint` used to archive somewhere else entirely.
+    ///
+    /// `object_store`'s emulator branch reads `AZURITE_BLOB_STORAGE_URL` and never
+    /// looks at `with_endpoint`, so the endpoint was dropped in silence and the
+    /// client addressed `http://127.0.0.1:10000` -- or, failing that,
+    /// `devstoreaccount1.blob.core.windows.net`, which really resolves. Rather
+    /// than guess which the operator meant, say so.
+    #[test]
+    fn test_azure_emulator_with_endpoint_needs_a_credential() {
+        let config = AzureConfig {
+            account_name: "devstoreaccount1".to_string(),
+            account_key: None,
+            sas_token: None,
+            container: "archive-test".to_string(),
+            use_emulator: true,
+            endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
+        };
+        let err = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024)
+            .err()
+            .expect("use_emulator with an endpoint and no credential must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("azure.account_key"),
+            "the error must name the setting that fixes it, got: {message}"
+        );
+    }
+
+    /// The same pair WITH a credential is the Azurite-on-a-random-port case the
+    /// e2e tests use, and it must build.
+    #[test]
+    fn test_azure_emulator_with_endpoint_and_key_builds() {
+        let config = AzureConfig {
+            account_name: "devstoreaccount1".to_string(),
+            account_key: Some(dfe_archiver_core::config::sensitive::SensitiveString::from(
+                "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".to_string(),
+            )),
+            sas_token: None,
+            container: "archive-test".to_string(),
+            use_emulator: true,
+            endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
+        };
+        let backend = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024)
+            .expect("emulator behind an explicit endpoint with a key must build");
+        assert_eq!(backend.name(), "azure");
     }
 
     /// A URL-shaped destination with an unsupported scheme must be rejected.

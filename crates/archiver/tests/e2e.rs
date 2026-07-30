@@ -22,6 +22,8 @@ mod common;
 
 #[path = "e2e/azure.rs"]
 mod azure;
+#[path = "e2e/container_hygiene.rs"]
+mod container_hygiene;
 #[path = "e2e/gcs.rs"]
 mod gcs;
 #[path = "e2e/kafka.rs"]

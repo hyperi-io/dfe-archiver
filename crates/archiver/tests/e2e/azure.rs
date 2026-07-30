@@ -6,45 +6,32 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-// Requires Azure credentials. Run with: cargo nextest run --test e2e -- --ignored
+// Runs against Azurite, Microsoft's own Azure Blob emulator, so the Azure write
+// path is exercised with no Azure subscription and no manual setup -- just
+// Docker. `common::acquire_azure` prefers a live account when
+// AZURE_STORAGE_ACCOUNT is set, so pointing these at real Azure is still a
+// matter of exporting credentials.
+//
+// These are deliberately NOT #[ignore]d. Ignoring them is what kept the Azure
+// backend at zero automated coverage for as long as it has had any.
+
 #[allow(unused_imports)]
 use crate::common;
-use dfe_archiver::config::{ArchiveConfig, AzureConfig};
+use dfe_archiver::config::ArchiveConfig;
 use dfe_archiver::io::{ObjectStoreBackend, create_backend};
 use dfe_archiver::storage::StorageBackend;
-use std::env;
-
-/// Get Azure configuration from environment.
-///
-/// Loads `.env` from the project root first so tests use host-configured credentials.
-fn get_azure_config() -> Option<AzureConfig> {
-    common::load_dotenv();
-    let account_name = env::var("AZURE_STORAGE_ACCOUNT").ok()?;
-    Some(AzureConfig {
-        account_name,
-        account_key: env::var("AZURE_STORAGE_KEY")
-            .ok()
-            .map(dfe_archiver::config::sensitive::SensitiveString::from),
-        sas_token: None,
-        container: env::var("AZURE_CONTAINER").unwrap_or_else(|_| "archive-test".to_string()),
-        use_emulator: false,
-        endpoint: None,
-    })
-}
 
 /// Test Azure backend basic operations (create, append, close, exists, delete)
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_basic_operations() {
-    let config = if let Some(c) = get_azure_config() {
-        c
-    } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
-        return;
+    let Some(azure) = common::acquire_azure("test_azure_basic_operations", "archive-test").await
+    else {
+        return; // reason printed by acquire_azure, and a hard failure in CI
     };
 
-    let backend = ObjectStoreBackend::new_azure(&config, "test-basic".to_string(), 8 * 1024 * 1024)
-        .expect("create Azure backend");
+    let backend =
+        ObjectStoreBackend::new_azure(&azure.config, "test-basic".to_string(), 8 * 1024 * 1024)
+            .expect("create Azure backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -63,29 +50,31 @@ async fn test_azure_basic_operations() {
 
     backend.delete(&test_path).await.expect("delete");
     assert!(!backend.exists(&test_path).await.expect("not exists"));
-
-    println!("Azure basic operations test passed");
 }
 
-/// Test Azure multipart upload with large file
+/// Test Azure multipart upload with large file.
+///
+/// Azure's multipart is Put Block plus Put Block List, a different API from
+/// S3's, and Azurite implements both -- so a chunked upload that only assembles
+/// correctly at close is genuinely covered here.
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_multipart_large_file() {
-    let config = if let Some(c) = get_azure_config() {
-        c
-    } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+    let Some(azure) =
+        common::acquire_azure("test_azure_multipart_large_file", "archive-test").await
+    else {
         return;
     };
 
     let backend =
-        ObjectStoreBackend::new_azure(&config, "test-multipart".to_string(), 5 * 1024 * 1024)
+        ObjectStoreBackend::new_azure(&azure.config, "test-multipart".to_string(), 5 * 1024 * 1024)
             .expect("create Azure backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
     backend.create(&test_path).await.expect("create");
 
+    // 20MB in 1MB writes, against a 5MB chunk size -- four blocks, so the block
+    // list has to be assembled and committed rather than a single put.
     let chunk = vec![b'X'; 1024 * 1024];
     for _ in 0..20 {
         backend.append(&test_path, &chunk).await.expect("append");
@@ -95,30 +84,38 @@ async fn test_azure_multipart_large_file() {
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
-    backend.delete(&test_path).await.expect("delete");
+    // `exists` is true of a zero-byte blob, so ask Azurite how much actually
+    // arrived -- an empty committed block list would pass the check above.
+    if azure.manages_container() {
+        let len = common::azurite_blob_len(&azure.config, "test-multipart", &test_path)
+            .await
+            .expect("HEAD the uploaded blob");
+        assert_eq!(
+            len,
+            20 * 1024 * 1024,
+            "all 20MB should have been committed by the block list"
+        );
+    }
 
-    println!("Azure multipart large file test passed (20MB uploaded)");
+    backend.delete(&test_path).await.expect("delete");
 }
 
 /// Test Azure with full archive writer and compression
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = if let Some(c) = get_azure_config() {
-        c
-    } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+    let Some(azure) = common::acquire_azure("test_azure_archive_roundtrip", "archive-test").await
+    else {
         return;
     };
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/test-archive", azure_config.container),
+        destination: format!("az://{}/test-archive", azure.config.container),
         path_template: "data/{timestamp}".to_string(),
         file_extension: "jsonl".to_string(),
-        azure: Some(azure_config),
+        azure: Some(azure.config.clone()),
         ..Default::default()
     };
 
@@ -139,30 +136,39 @@ async fn test_azure_archive_roundtrip() {
 
     writer.close().await.expect("close");
 
-    println!("Azure archive roundtrip test passed");
+    // The writer reports success on a failed upload if nothing reads the object
+    // back, so confirm an archive actually landed in the container.
+    let verify =
+        ObjectStoreBackend::new_azure(&azure.config, "test-archive".to_string(), 8 * 1024 * 1024)
+            .expect("create verify backend");
+    let objects = verify
+        .list_prefix("data/", None)
+        .await
+        .expect("list objects");
+    assert!(
+        !objects.is_empty(),
+        "the writer closed but nothing is in the container"
+    );
 }
 
 /// Test Azure rolling by size
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_azure_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
 
-    let azure_config = if let Some(c) = get_azure_config() {
-        c
-    } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+    let Some(azure) = common::acquire_azure("test_azure_rolling_by_size", "archive-test").await
+    else {
         return;
     };
 
     let test_prefix = format!("test-rolling-{}", std::process::id());
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/{test_prefix}", azure_config.container),
+        destination: format!("az://{}/{test_prefix}", azure.config.container),
         path_template: "data/{timestamp}".to_string(),
         file_extension: "jsonl".to_string(),
-        azure: Some(azure_config.clone()),
+        azure: Some(azure.config.clone()),
         ..Default::default()
     };
 
@@ -188,7 +194,7 @@ async fn test_azure_rolling_by_size() {
     writer.close().await.expect("close");
 
     let verify_backend =
-        ObjectStoreBackend::new_azure(&azure_config, test_prefix.clone(), 8 * 1024 * 1024)
+        ObjectStoreBackend::new_azure(&azure.config, test_prefix.clone(), 8 * 1024 * 1024)
             .expect("create verify backend");
 
     let objects = verify_backend
@@ -199,11 +205,6 @@ async fn test_azure_rolling_by_size() {
     assert!(
         objects.len() >= 3,
         "expected at least 3 rolled files, got {}",
-        objects.len()
-    );
-
-    println!(
-        "Azure rolling by size created {} files (500 byte threshold)",
         objects.len()
     );
 
@@ -218,23 +219,30 @@ async fn test_azure_rolling_by_size() {
 
 /// Test `create_backend` with az:// URL
 #[tokio::test]
-#[ignore = "requires Azure credentials - run with --ignored"]
 async fn test_create_backend_azure_url() {
-    let azure_config = if let Some(c) = get_azure_config() {
-        c
-    } else {
-        eprintln!("Skipping: AZURE_STORAGE_ACCOUNT not set");
+    let Some(azure) = common::acquire_azure("test_create_backend_azure_url", "archive-test").await
+    else {
         return;
     };
 
     let archive_config = ArchiveConfig {
-        destination: format!("az://{}/prefix", azure_config.container),
-        azure: Some(azure_config),
+        destination: format!("az://{}/prefix", azure.config.container),
+        azure: Some(azure.config.clone()),
         ..Default::default()
     };
 
     let backend = create_backend(&archive_config).expect("create backend");
     assert_eq!(backend.name(), "azure");
 
-    println!("create_backend with az:// URL test passed");
+    // `name()` alone would pass on a backend that cannot reach anything, so put
+    // a byte through the thing create_backend handed back.
+    let test_path = format!("url-{}.txt", std::process::id());
+    backend.create(&test_path).await.expect("create");
+    backend
+        .append(&test_path, b"routed via az:// URL")
+        .await
+        .expect("append");
+    backend.close(&test_path).await.expect("close");
+    assert!(backend.exists(&test_path).await.expect("exists check"));
+    backend.delete(&test_path).await.expect("delete");
 }
