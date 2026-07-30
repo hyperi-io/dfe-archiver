@@ -266,10 +266,7 @@ mod tests {
             level: 3,
             enabled: true,
         };
-        assert_eq!(
-            compressor_for(&config).expect("known codec").name(),
-            "zstd"
-        );
+        assert_eq!(compressor_for(&config).expect("known codec").name(), "zstd");
     }
 
     /// An unknown codec is rejected even with compression off, so a typo shows
