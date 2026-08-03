@@ -46,7 +46,7 @@ services:
 
   # Redpanda Console (Kafka UI)
   redpanda-console:
-    image: redpandadata/console:v2.7.0
+    image: redpandadata/console:v3.9.0
     container_name: archiver-console
     depends_on:
       redpanda:
