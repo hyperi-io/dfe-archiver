@@ -1,3 +1,10 @@
+# Changelog
+
+Rendered by CI and committed back at the end of a release -- do not edit by
+hand. Release notes also appear on the GitHub Releases page, one per tag.
+
+## [1.7.11](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.10...v1.7.11) (2026-08-03)
+
 ## [1.7.3](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.2...v1.7.3) (2026-05-28)
 
 
