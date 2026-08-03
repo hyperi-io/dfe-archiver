@@ -15,7 +15,10 @@ services:
   # Redpanda (Kafka-compatible, lighter weight)
   # =========================================================================
   redpanda:
-    image: redpandadata/redpanda:v24.2.1
+    # Matches KAFKA_TAG in scripts/pgo-workload.sh. Two pins of the same image
+    # on different majors makes Renovate track two lines and open a PR for each.
+    # renovate: datasource=docker depName=redpandadata/redpanda
+    image: redpandadata/redpanda:v26.2.1
     container_name: archiver-redpanda
     command:
       - redpanda
@@ -46,7 +49,8 @@ services:
 
   # Redpanda Console (Kafka UI)
   redpanda-console:
-    image: redpandadata/console:v2.7.0
+    # renovate: datasource=docker depName=redpandadata/console
+    image: redpandadata/console:v3.9.0
     container_name: archiver-console
     depends_on:
       redpanda:
