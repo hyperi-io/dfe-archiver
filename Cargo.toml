@@ -15,6 +15,7 @@ members = [
 ]
 
 [workspace.package]
+description = "Archives event streams to S3, GCS or Azure object storage, spooling to local disk when the sink is unreachable. Runs standalone or as part of the HyperI Data Fusion Engine."
 edition = "2024"
 rust-version = "1.94"
 license = "BUSL-1.1"
