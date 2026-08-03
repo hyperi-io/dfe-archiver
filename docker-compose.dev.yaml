@@ -15,7 +15,7 @@ services:
   # Redpanda (Kafka-compatible, lighter weight)
   # =========================================================================
   redpanda:
-    image: redpandadata/redpanda:v24.2.1
+    image: redpandadata/redpanda:v26.1.14
     container_name: archiver-redpanda
     command:
       - redpanda
