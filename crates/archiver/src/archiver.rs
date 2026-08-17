@@ -170,9 +170,17 @@ impl Archiver {
         // Shutdown token — created early so the DLQ drain task can be tied to it.
         let cancel = CancellationToken::new();
 
-        // Create DLQ (file-only mode — cascade to Kafka is optional via config)
-        let dlq = scalo::dlq::Dlq::spawn(&config.dlq, "dfe-archiver", None, cancel.clone())
-            .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
+        // Create DLQ. The Kafka backend rides the same config conversion as
+        // the consumer transport -- dead-letters land on the broker the data
+        // came from.
+        let dlq_kafka = dfe_archiver_io::kafka::convert_config(&config.kafka);
+        let dlq = scalo::dlq::Dlq::spawn(
+            &config.dlq,
+            "dfe-archiver",
+            Some(&dlq_kafka),
+            cancel.clone(),
+        )
+        .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
         if config.dlq.enabled {
             info!(mode = ?config.dlq.mode, "DLQ enabled");
         }

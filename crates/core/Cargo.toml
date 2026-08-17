@@ -20,7 +20,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq", "config-schema"] }
+# dlq-kafka: the file backend is an EROFS no-op on the charts' read-only
+# rootfs, so kafka is the only DLQ backend that works deployed.
+scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq", "dlq-kafka", "config-schema"] }
 
 # JSON Schema derivation for the reflectable config-schema capability (scalo-rs#6).
 schemars = { workspace = true }
