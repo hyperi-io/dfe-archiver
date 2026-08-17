@@ -114,9 +114,9 @@
         },
         "kafka": {
           "enabled": true,
-          "routing": "per_table",
+          "routing": "common",
           "topic_suffix": ".dlq",
-          "common_topic": "dfe.dlq",
+          "common_topic": "dfe_archiver_dlq",
           "send_timeout_ms": 5000
         }
       }

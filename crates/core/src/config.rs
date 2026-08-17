@@ -33,7 +33,6 @@ pub use scalo::scaling::ScalingPressureConfig;
 /// - `buffer.writer_parallelism` — structural buffer manager config
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
     /// Kafka consumer configuration
     pub kafka: KafkaConfig,
@@ -61,6 +60,32 @@ pub struct Config {
 
     /// Dead letter queue configuration
     pub dlq: DlqConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            kafka: KafkaConfig::default(),
+            archive: ArchiveConfig::default(),
+            buffer: BufferConfig::default(),
+            memory: MemoryConfig::default(),
+            routing: RoutingConfig::default(),
+            metrics: MetricsConfig::default(),
+            compression: CompressionConfig::default(),
+            scaling: ScalingPressureConfig::default(),
+            // Fleet DLQ standard defaults: fixed per-app topic, routing=common.
+            // Archiver entry destinations are archive PATHS (slashes), so
+            // scalo's per-table default would build invalid topic names.
+            // Applies when the config file has no `dlq:` key; a partial `dlq:`
+            // block reverts nested fields to scalo's own defaults.
+            dlq: {
+                let mut dlq = DlqConfig::default();
+                dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
+                dlq.kafka.common_topic = "dfe_archiver_dlq".to_string();
+                dlq
+            },
+        }
+    }
 }
 
 /// Kafka consumer configuration
@@ -440,7 +465,14 @@ impl ApplyFlatEnv for Config {
                 "fan_out" => DlqMode::FanOut,
                 "file_only" => DlqMode::FileOnly,
                 "kafka_only" => DlqMode::KafkaOnly,
-                _ => DlqMode::Cascade,
+                "cascade" => DlqMode::Cascade,
+                other => {
+                    // A typo'd mode must not silently pick a backend -- cascade
+                    // includes the file backend, an EROFS no-op deployed, and
+                    // the archiver aborts boot when that backend fails to init.
+                    tracing::warn!(mode = %other, "unknown DLQ_MODE, using cascade");
+                    DlqMode::Cascade
+                }
             };
         }
 
