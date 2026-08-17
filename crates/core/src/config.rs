@@ -424,6 +424,26 @@ impl ApplyFlatEnv for Config {
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         }
 
+        // DLQ (fleet-uniform names: DLQ_ENABLED / DLQ_TOPIC / DLQ_MODE).
+        // TOPIC routes every entry to one fixed topic (the per-app standard,
+        // e.g. dfe_archiver_dlq) rather than per-destination suffix topics.
+        if let Some(v) = flat_env::flat_env_bool("DLQ", "ENABLED") {
+            self.dlq.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("DLQ", "TOPIC") {
+            self.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
+            self.dlq.kafka.common_topic = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("DLQ", "MODE") {
+            use scalo::dlq::DlqMode;
+            self.dlq.mode = match v.as_str() {
+                "fan_out" => DlqMode::FanOut,
+                "file_only" => DlqMode::FileOnly,
+                "kafka_only" => DlqMode::KafkaOnly,
+                _ => DlqMode::Cascade,
+            };
+        }
+
         // Archive
         if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
             self.archive.destination = v;

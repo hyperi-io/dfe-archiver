@@ -290,8 +290,11 @@ impl KafkaStatsEmitter {
     }
 }
 
-/// Convert local config to the scalo transport config
-fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
+/// Convert local config to the scalo transport config.
+///
+/// Public because the DLQ producer rides the SAME conversion as the consumer
+/// transport -- dead-letters must land on the broker the data came from.
+pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
     // Force librdkafka statistics on so `transport.stats()` (and hence
     // `assigned_lag()`) populates -- the unified ScalingPressure's Kafka
     // inbound term and the `dfe_archiver_kafka_lag` gauge both read it. scalo
