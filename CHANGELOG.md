@@ -3,6 +3,8 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.14](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.13...v1.7.14) (2026-08-18)
+
 ## [1.7.13](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.12...v1.7.13) (2026-08-17)
 
 ## [1.7.12](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.11...v1.7.12) (2026-08-04)
