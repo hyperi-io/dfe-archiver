@@ -163,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn test_default_dlq_routes_common_to_standard_topic() {
+        let config = Config::default();
+        assert_eq!(config.dlq.kafka.routing, scalo::dlq::DlqRouting::Common);
+        assert_eq!(config.dlq.kafka.common_topic, "dfe_archiver_dlq");
+    }
+
+    #[test]
     fn test_empty_brokers_fails() {
         let mut config = Config::default();
         config.kafka.brokers = vec![];
