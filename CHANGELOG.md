@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.17](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.16...v1.7.17) (2026-08-23)
+
+### Bug Fixes
+
+* **ci:** pin LOG_FORMAT=json for the PGO workload ([3d885ce](https://github.com/hyperi-io/dfe-archiver/commit/3d885ce960b9a79a471e62903f9d6ce3ace5af42))
+* **deps:** adopt scalo 2.10.13 ([#51](https://github.com/hyperi-io/dfe-archiver/issues/51)) ([6c6dd35](https://github.com/hyperi-io/dfe-archiver/commit/6c6dd35120a25a0c79b80b740096aebb105d5276))
+
 ## [1.7.16](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.15...v1.7.16) (2026-08-18)
 
 ## [1.7.15](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.14...v1.7.15) (2026-08-18)
