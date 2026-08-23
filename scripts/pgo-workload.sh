@@ -264,6 +264,11 @@ echo "pgo-workload: archive dir: $ARCHIVE_DIR"
 export LLVM_PROFILE_FILE="${LLVM_PROFILE_FILE:-$PROJECT_ROOT/target/pgo-profiles/pgo-%p_%m.profraw}"
 mkdir -p "$(dirname "$LLVM_PROFILE_FILE")"
 
+# The readiness grep below parses json-shaped log output, and scalo >= 2.10.13
+# defaults to lines format when no OTEL_EXPORTER_OTLP_ENDPOINT is set. Pin the
+# format the script parses.
+export LOG_FORMAT=json
+
 "$ARCHIVER_BIN" --config "$CONFIG_FILE" \
     >"$WORK_DIR/archiver.log" 2>&1 &
 ARCHIVER_PID=$!
