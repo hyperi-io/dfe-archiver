@@ -341,7 +341,7 @@ impl Default for MemoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
-    /// Routing mode: "topic" (default) or "expression"
+    /// Routing mode: "expression" (default) or "topic"
     pub mode: String,
 
     /// Field paths for expression-based routing (dot notation)
@@ -355,8 +355,8 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            mode: "topic".to_string(),
-            expression_fields: vec![],
+            mode: "expression".to_string(),
+            expression_fields: vec!["org_id".to_string()],
             default_segment: "unknown".to_string(),
         }
     }
