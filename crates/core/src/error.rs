@@ -43,6 +43,10 @@ pub enum Error {
         source: Option<BoxSource>,
     },
 
+    /// Already exists (file create was overwriting)
+    #[error("already exists: {path}")]
+    AlreadyExists { path: String },
+
     /// Compression error
     #[error("compression error: {0}")]
     Compression(String),
@@ -126,6 +130,7 @@ impl Error {
             Self::Kafka { .. }
             | Self::Storage { .. }
             | Self::Runtime(_)
+            | Self::AlreadyExists { .. }
             | Self::BufferOverflow { .. } => ErrorCategory::Transient,
 
             // Data - DLQ

@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
+const MAX_OPEN_RETRIES: u32 = 10_000;
+
 /// Stats returned from a flush operation (for metrics wiring)
 #[derive(Debug, Clone)]
 pub struct FlushStats {
@@ -234,13 +236,24 @@ impl ArchiveWriter {
         Ok(close_stats)
     }
 
-    /// Open a new archive file
+    /// Open a new archive file - iterates through existing sequence numbers
     async fn open_new_file(&mut self) -> Result<()> {
-        self.file_seq += 1;
         let now = Utc::now();
-        let path = self.generate_path(&now);
 
-        self.storage.create(&path).await?;
+        let mut retries = 0;
+        let path = loop {
+            self.file_seq += 1;
+            let path = self.generate_path(&now);
+
+            match self.storage.create(&path).await {
+                Ok(()) => break path,
+                Err(crate::Error::AlreadyExists { .. }) if retries < MAX_OPEN_RETRIES => {
+                    retries += 1;
+                    info!(path = %path, "Archive file exists - advancing sequence");
+                }
+                Err(e) => return Err(e),
+            }
+        };
 
         self.state = Some(ArchiveState {
             path: path.clone(),
@@ -254,7 +267,6 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    /// Generate path from template
     fn generate_path(&self, timestamp: &DateTime<Utc>) -> String {
         let mut path = self.config.path_template.clone();
 
@@ -355,10 +367,13 @@ mod tests {
     #[async_trait]
     impl StorageBackend for MemoryBackend {
         async fn create(&self, path: &str) -> Result<()> {
-            self.files
-                .lock()
-                .expect("lock")
-                .insert(path.to_string(), Vec::new());
+            let mut files = self.files.lock().expect("lock");
+            if files.contains_key(path) {
+                return Err(crate::Error::AlreadyExists {
+                    path: path.to_string(),
+                });
+            }
+            files.insert(path.to_string(), Vec::new());
             Ok(())
         }
 
@@ -408,6 +423,16 @@ mod tests {
     }
 
     fn test_writer(policy: RollingPolicy, codec: &str) -> (ArchiveWriter, Arc<MemoryBackend>) {
+        let backend = Arc::new(MemoryBackend::new());
+        let writer = test_writer_on(&backend, policy, codec);
+        (writer, backend)
+    }
+
+    fn test_writer_on(
+        backend: &Arc<MemoryBackend>,
+        policy: RollingPolicy,
+        codec: &str,
+    ) -> ArchiveWriter {
         let config = ArchiveConfig {
             destination: "memory://test".to_string(),
             path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
@@ -415,14 +440,12 @@ mod tests {
             ..Default::default()
         };
         let compressor = create_compressor(codec, 0).expect("compressor");
-        let backend = Arc::new(MemoryBackend::new());
-        let writer = ArchiveWriter::new(
+        ArchiveWriter::new(
             config,
             policy,
             compressor,
-            Box::new(MemoryBackendRef(Arc::clone(&backend))),
-        );
-        (writer, backend)
+            Box::new(MemoryBackendRef(Arc::clone(backend))),
+        )
     }
 
     /// Wrapper to use Arc<MemoryBackend> as Box<dyn StorageBackend>
@@ -489,6 +512,39 @@ mod tests {
         let path = writer.test_generate_path(&ts);
 
         assert!(path.ends_with(".jsonl.zst"), "should have .zst ext: {path}");
+    }
+
+    #[tokio::test]
+    async fn test_new_writer_does_not_truncate_existing_file() {
+        let policy = RollingPolicy {
+            max_size_bytes: 1024 * 1024,
+            max_age_secs: 3600,
+        };
+        let backend = Arc::new(MemoryBackend::new());
+
+        let mut first = test_writer_on(&backend, policy.clone(), "none");
+        first.write_record(b"before_restart").await.expect("write");
+        first.close().await.expect("close");
+
+        let after_first = backend.total_bytes();
+        assert_eq!(backend.file_count(), 1);
+        assert!(after_first > 0);
+
+        // Second writer on the same hour (ensure sequence is advanced)
+        let mut second = test_writer_on(&backend, policy, "none");
+        second.write_record(b"after_restart").await.expect("write");
+        second.close().await.expect("close");
+
+        assert_eq!(
+            backend.file_count(),
+            2,
+            "second writer must open a new file, not reopen the first"
+        );
+        assert!(
+            backend.total_bytes() > after_first,
+            "first file was truncated: {after_first} bytes before, {} total after",
+            backend.total_bytes()
+        );
     }
 
     #[test]

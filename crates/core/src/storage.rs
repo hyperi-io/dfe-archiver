@@ -12,7 +12,7 @@ use async_trait::async_trait;
 /// Storage backend trait
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// Create a new file/object
+    /// Create a new file/object (does not overwrite existing)
     async fn create(&self, path: &str) -> Result<()>;
 
     /// Append data to existing file/object
