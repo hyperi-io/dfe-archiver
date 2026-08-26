@@ -19,7 +19,7 @@ use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::fs::{File, OpenOptions};
+use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
@@ -57,7 +57,17 @@ impl StorageBackend for FileBackend {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        File::create(&full_path).await?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full_path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => Error::AlreadyExists {
+                    path: path.to_string(),
+                },
+                _ => Error::Io(e),
+            })?;
         debug!(path = %full_path.display(), "Created file");
 
         Ok(())
@@ -356,6 +366,12 @@ impl StorageBackend for ObjectStoreBackend {
     async fn create(&self, path: &str) -> Result<()> {
         let object_path = self.object_path(path);
 
+        if self.exists(path).await? {
+            return Err(Error::AlreadyExists {
+                path: path.to_string(),
+            });
+        }
+
         let upload = self.store.put_multipart(&object_path).await.map_err(|e| {
             Error::storage_with(
                 format!("{}: multipart init failed for {path}", self.backend_name),
@@ -633,6 +649,31 @@ mod tests {
 
         backend.delete("test/file.txt").await.expect("delete");
         assert!(!backend.exists("test/file.txt").await.expect("not exists"));
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_create_refuses_to_clobber() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let backend = FileBackend::new(temp_dir.path());
+
+        backend.create("hour/06-0001.jsonl").await.expect("create");
+        backend
+            .append("hour/06-0001.jsonl", b"before_restart")
+            .await
+            .expect("append");
+        backend.close("hour/06-0001.jsonl").await.expect("close");
+
+        let err = backend
+            .create("hour/06-0001.jsonl")
+            .await
+            .expect_err("second create must not clobber");
+        assert!(
+            matches!(err, Error::AlreadyExists { .. }),
+            "expected AlreadyExists, got {err:?}"
+        );
+
+        let content = std::fs::read(temp_dir.path().join("hour/06-0001.jsonl")).expect("read");
+        assert_eq!(content, b"before_restart", "existing file was truncated");
     }
 
     #[tokio::test]
