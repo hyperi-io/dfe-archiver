@@ -75,6 +75,7 @@ pub struct ArchiveWriter {
     state: Option<ArchiveState>,
     buffer: Vec<u8>,
     file_seq: u64,
+    last_stem: Option<String>,
 }
 
 impl ArchiveWriter {
@@ -93,6 +94,7 @@ impl ArchiveWriter {
             state: None,
             buffer: Vec::with_capacity(1024 * 1024),
             file_seq: 0,
+            last_stem: None,
         }
     }
 
@@ -239,6 +241,12 @@ impl ArchiveWriter {
     /// Open a new archive file - iterates through existing sequence numbers
     async fn open_new_file(&mut self) -> Result<()> {
         let now = Utc::now();
+        let stem = self.path_stem(&now);
+
+        if self.last_stem.as_deref() != Some(stem.as_str()) {
+            self.file_seq = 0;
+            self.last_stem = Some(stem);
+        }
 
         let mut retries = 0;
         let path = loop {
@@ -267,7 +275,7 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    fn generate_path(&self, timestamp: &DateTime<Utc>) -> String {
+    fn path_stem(&self, timestamp: &DateTime<Utc>) -> String {
         let mut path = self.config.path_template.clone();
 
         path = path.replace("{year}", &timestamp.format("%Y").to_string());
@@ -276,7 +284,14 @@ impl ArchiveWriter {
         path = path.replace("{hour}", &timestamp.format("%H").to_string());
         path = path.replace("{minute}", &timestamp.format("%M").to_string());
         path = path.replace("{timestamp}", &timestamp.timestamp().to_string());
-        path = path.replace("{seq}", &format!("{:04}", self.file_seq));
+
+        path
+    }
+
+    fn generate_path(&self, timestamp: &DateTime<Utc>) -> String {
+        let path = self
+            .path_stem(timestamp)
+            .replace("{seq}", &format!("{:04}", self.file_seq));
 
         let ext = &self.config.file_extension;
         let compression_ext = self.compressor.extension();
@@ -323,6 +338,12 @@ impl ArchiveWriter {
     #[cfg(test)]
     pub fn test_should_roll(&self) -> Option<&'static str> {
         self.should_roll()
+    }
+
+    /// Path of the currently open file for testing
+    #[cfg(test)]
+    pub fn test_current_path(&self) -> Option<&str> {
+        self.state.as_ref().map(|s| s.path.as_str())
     }
 }
 
@@ -433,9 +454,23 @@ mod tests {
         policy: RollingPolicy,
         codec: &str,
     ) -> ArchiveWriter {
+        test_writer_with_template(
+            backend,
+            policy,
+            codec,
+            "{year}/{month}/{day}/{hour}/archive",
+        )
+    }
+
+    fn test_writer_with_template(
+        backend: &Arc<MemoryBackend>,
+        policy: RollingPolicy,
+        codec: &str,
+        template: &str,
+    ) -> ArchiveWriter {
         let config = ArchiveConfig {
             destination: "memory://test".to_string(),
-            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            path_template: template.to_string(),
             file_extension: "jsonl".to_string(),
             ..Default::default()
         };
@@ -544,6 +579,33 @@ mod tests {
             backend.total_bytes() > after_first,
             "first file was truncated: {after_first} bytes before, {} total after",
             backend.total_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seq_resets_when_path_stem_changes() {
+        let backend = Arc::new(MemoryBackend::new());
+        // `{timestamp}` gives a different stem each second
+        let mut writer = test_writer_with_template(
+            &backend,
+            RollingPolicy::default(),
+            "none",
+            "data/{timestamp}",
+        );
+
+        writer.write_record(b"first").await.expect("write");
+        let first = writer.test_current_path().expect("open file").to_string();
+        assert!(first.ends_with("-0001.jsonl"), "expected -0001: {first}");
+
+        writer.close().await.expect("close");
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        writer.write_record(b"second").await.expect("write");
+
+        let second = writer.test_current_path().expect("open file");
+        assert_ne!(first, second, "stem should have changed");
+        assert!(
+            second.ends_with("-0001.jsonl"),
+            "sequence should restart in a new stem, got {second}"
         );
     }
 
