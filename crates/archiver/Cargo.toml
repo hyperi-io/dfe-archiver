@@ -44,7 +44,7 @@ scalo = { workspace = true, features = [
     # `expression` backs the CEL surface used by config/scaling tunables.
     # dlq-kafka: the file backend is an EROFS no-op on the charts' read-only
     # rootfs, so kafka is the only DLQ backend that works deployed.
-    "scaling", "governor", "expression", "deployment", "config-schema", "cli-service", "memory", "health", "shutdown", "dlq", "dlq-kafka", "worker-pool",
+    "scaling", "governor", "expression", "deployment", "config-schema", "cli-service", "memory", "health", "shutdown", "dlq", "dlq-kafka", "worker-pool", "version-check",
 ] }
 
 # Async
