@@ -123,6 +123,17 @@ impl ServiceApp for App {
             "Detailed configuration"
         );
 
+        // Fire-and-forget startup version check; no-op unless the cascade
+        // sets version_check.enabled + api_url.
+        {
+            use scalo::version_check::{VersionCheck, VersionCheckConfig};
+            let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
+                "dfe-archiver",
+                env!("CARGO_PKG_VERSION"),
+            ));
+            checker.check_on_startup();
+        }
+
         // Register archiver-specific metrics on the runtime's existing manager
         let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
         let metrics = init_metrics(&mut runtime.metrics, commit);
