@@ -15,7 +15,7 @@
 # - AWS_DEFAULT_REGION:  AWS region of the target service.
 
 # Optional Environment Variables:
-# - _207_SINK_AWS_S3_BATCH_MAX_BYTES: settings for maximum size of a batch that is processed 
+# - _207_SINK_AWS_S3_BATCH_MAX_BYTES: settings for maximum size of a batch that is processed
 # - _207_SINK_AWS_S3_BATCH_TIMEOUT_SECS: settings for maximum age of a batch before it is flushed
 # - VECTOR_BUFFER_SIZE: settings for maximum size of the buffer on disk
 
