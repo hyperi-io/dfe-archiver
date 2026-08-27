@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.18](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.17...v1.7.18) (2026-08-27)
+
+### Bug Fixes
+
+* never overwrite an existing archive file ([8ff3bb8](https://github.com/hyperi-io/dfe-archiver/commit/8ff3bb8f1a9ac1632a6de1951041d0ed7c8592b0))
+* reset archive file sequence per hour ([caa7a36](https://github.com/hyperi-io/dfe-archiver/commit/caa7a36fa6d881de1db8926a8993485906480049))
+* scalo 2.10.14 + startup version check ([b974c3d](https://github.com/hyperi-io/dfe-archiver/commit/b974c3d67d067f5b80b0166e9792acf4e25ed181))
+
 ## [1.7.17](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.16...v1.7.17) (2026-08-23)
 
 ### Bug Fixes
