@@ -123,17 +123,6 @@ impl ServiceApp for App {
             "Detailed configuration"
         );
 
-        // Fire-and-forget startup version check; no-op unless the cascade
-        // sets version_check.enabled + api_url.
-        {
-            use scalo::version_check::{VersionCheck, VersionCheckConfig};
-            let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
-                "dfe-archiver",
-                env!("CARGO_PKG_VERSION"),
-            ));
-            checker.check_on_startup();
-        }
-
         // Register archiver-specific metrics on the runtime's existing manager
         let commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
         let metrics = init_metrics(&mut runtime.metrics, commit);
@@ -258,6 +247,15 @@ impl ServiceApp for App {
 
     fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(deployment_contract())
+    }
+
+    fn version_check_defaults(&self) -> scalo::version_check::VersionCheckConfig {
+        // The runtime overlays the version_check cascade keys on this, so a
+        // deployment's explicit enabled: false always wins.
+        scalo::version_check::VersionCheckConfig {
+            api_url: "https://releases.hyperi.io/api/v1/check".into(),
+            ..Default::default()
+        }
     }
 }
 
