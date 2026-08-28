@@ -163,12 +163,12 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
                     │                                                          │
                     └─────────────────────────▼───────────────────────────────┘
                                               │
-                    ┌─────────────────────────▼───────────────────────────────┐
-                    │  Router                                                  │
-                    │  - Topic-based routing (default)                         │
-                    │  - Expression-based routing (JSON field extraction)     │
-                    │    e.g., route by org_id, event_type                    │
-                    └─────────────────────────▼───────────────────────────────┘
+                    ┌─────────────────────────▼────────────────────────────────────┐
+                    │  Router                                                      │
+                    │  - Topic-based routing                                       │
+                    │  - Expression-based routing (default, JSON field extraction) │
+                    │    e.g., route by org_id, event_type                         │
+                    └─────────────────────────▼────────────────────────────────────┘
                                               │
                     ┌─────────────────────────▼───────────────────────────────┐
                     │  Tiered Buffer Manager                                   │

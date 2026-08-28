@@ -19,7 +19,7 @@ contract).
 
 - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
 - **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none
-- **Smart routing**: By topic or JSON field expressions (e.g., `org_id`)
+- **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
 - **At-least-once delivery**: Kafka offset commit only after successful archive write
 - **Memory-capped**: Tiered buffering with configurable limits

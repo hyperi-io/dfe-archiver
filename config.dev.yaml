@@ -52,13 +52,12 @@ memory:
   tracking_enabled: true
 
 routing:
-  mode: "topic"
-  # Uncomment for expression-based routing:
-  # mode: "expression"
-  # expression_fields:
-  #   - "org_id"
-  #   - "event_type"
-  # default_segment: "unknown"
+  mode: "expression"
+  expression_fields:
+    - "org_id"
+  default_segment: "unknown"
+  # Uncomment for topic-based routing:
+  # mode: "topic"
 
 compression:
   codec: "zstd"

@@ -203,7 +203,7 @@ pub fn create_compressor(codec: &str, level: i32) -> Result<Box<dyn Compressor +
     }
 }
 
-/// The compressor a [`CompressionConfig`] asks for.
+/// The compressor a [`crate::config::CompressionConfig`] asks for.
 ///
 /// `enabled: false` means no compression whatever `codec` says. Every caller has
 /// to go through here rather than reading `codec` directly: doing that made the

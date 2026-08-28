@@ -72,8 +72,9 @@ properties:
     description: Routing configuration
     $ref: '#/$defs/RoutingConfig'
     default:
-      mode: topic
-      expression_fields: []
+      mode: expression
+      expression_fields:
+      - org_id
       default_segment: unknown
   metrics:
     description: Metrics configuration
@@ -431,9 +432,9 @@ $defs:
     type: object
     properties:
       mode:
-        description: 'Routing mode: "topic" (default) or "expression"'
+        description: 'Routing mode: "expression" (default) or "topic"'
         type: string
-        default: topic
+        default: expression
       expression_fields:
         description: |-
           Field paths for expression-based routing (dot notation)
@@ -441,7 +442,8 @@ $defs:
         type: array
         items:
           type: string
-        default: []
+        default:
+        - org_id
       default_segment:
         description: Default path segment when field not found
         type: string
