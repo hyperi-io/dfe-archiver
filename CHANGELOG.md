@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.19](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.18...v1.7.19) (2026-08-28)
+
+### Bug Fixes
+
+* clear local quality gate findings ([6d21091](https://github.com/hyperi-io/dfe-archiver/commit/6d210912ed37cf44576acecac1927d31ffe67618))
+* default to split on expression with org_id (instead of topic) ([3d04ac4](https://github.com/hyperi-io/dfe-archiver/commit/3d04ac47cf8662af15cfb6b7309dc38a8fa12962))
+* version check on by default via the releases endpoint ([bce6932](https://github.com/hyperi-io/dfe-archiver/commit/bce6932d5eeceb8bd9d10108490c73fa5ea7a382))
+
 ## [1.7.18](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.17...v1.7.18) (2026-08-27)
 
 ### Bug Fixes
