@@ -117,6 +117,10 @@ tikv-jemallocator = ">=0.7.0, <0.8"
 
 # Dev dependencies
 tempfile = ">=3.27, <4"
+# Scoped env-var set/restore, so a test can prove a deployment env var reaches
+# the setting it names without the workspace-forbidden `unsafe` around
+# `std::env::set_var`. Same major line as dfe-receiver.
+temp-env = ">=0.3.6, <0.4"
 criterion = { version = ">=0.8, <0.9", features = ["html_reports", "async_tokio"] }
 proptest = ">=1.11, <2"
 tokio-test = ">=0.4, <0.5"

@@ -668,8 +668,19 @@ Configuration follows a cascade (highest to lowest priority):
 | `S3_ACCESS_KEY_ID` | S3 access key | (from env chain) |
 | `S3_SECRET_ACCESS_KEY` | S3 secret key | (from env chain) |
 | `S3_ENDPOINT` | S3 endpoint (for MinIO) | (none) |
-| `METRICS_ADDRESS` | Metrics server address | `0.0.0.0:9090` |
+| `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
+| `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
+| `ARCHIVER_MEMORY_CGROUP_HEADROOM` | Fraction of the cgroup limit to use | `0.85` |
+| `ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD` | Ratio that forces scaling pressure to 100 | `0.8` |
+| `ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
+| `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
+
+The memory guard, the metrics listener and the scaling-pressure engine are built
+by the scalo runtime before the config file is read, so they take the variables
+above and never a `memory:`, `metrics:` or `scaling:` block in the config file.
+The single-underscore names are read directly; the double-underscore ones nest
+into the config cascade (`ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
 
 ### Full Config Example
 
@@ -705,10 +716,6 @@ routing:
   expression_fields:
     - org_id
     - event_type
-
-metrics:
-  enabled: true
-  address: 0.0.0.0:9090
 ```
 
 ---

@@ -117,8 +117,7 @@ impl ServiceApp for App {
             archive_roll_interval_secs = config.archive.roll_interval_secs,
             archive_path_template = %config.archive.path_template,
             routing_mode = %config.routing.mode,
-            metrics_enabled = config.metrics.enabled,
-            metrics_address = %config.metrics.address,
+            metrics_address = %self.common.effective_metrics_addr(),
             dlq_enabled = config.dlq.enabled,
             "Detailed configuration"
         );
@@ -170,12 +169,12 @@ impl ServiceApp for App {
         // Kafka receiver gets the inbound pause-partitions brake. When
         // self_regulation is disabled, `runtime.governor` is None and the
         // receiver is built without a gate (byte-identical to pre-governor).
-        // Share the runtime's unified ScalingPressure engine -- the one
-        // `/scaling/pressure` serves to KEDA, built from the components
-        // `scaling_components()` registers below. The archiver's loops drive
-        // its values (kafka_lag, buffer_depth, memory, circuit) directly. When
-        // the `scaling` section/feature is off the runtime hands back None;
-        // fall back to a standalone engine so the gauge path is unchanged.
+        // Share the runtime's unified ScalingPressure engine, built from the
+        // components `scaling_components()` registers below and reaching KEDA
+        // as the `dfe_scaling_pressure` gauge. The archiver's loops drive its
+        // values (kafka_lag, buffer_depth, memory, circuit) directly. When the
+        // `scaling` feature is off the runtime hands back None; fall back to a
+        // standalone engine so the gauge path is unchanged.
         let archiver = Arc::new(
             Archiver::new(
                 shared_config,
@@ -238,7 +237,7 @@ impl ServiceApp for App {
 
     fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
         // Register the archiver's weighted KEDA components on the runtime's
-        // unified ScalingPressure -- the engine `/scaling/pressure` serves. The
+        // unified ScalingPressure. The
         // pipeline drives these values (kafka_lag from assigned-partition lag,
         // buffer_depth from hot-buffer count, memory from the cgroup guard) plus
         // the object-store circuit gate, so KEDA scales on the single composite.
@@ -252,10 +251,7 @@ impl ServiceApp for App {
     fn version_check_defaults(&self) -> scalo::version_check::VersionCheckConfig {
         // The runtime overlays the version_check cascade keys on this, so a
         // deployment's explicit enabled: false always wins.
-        scalo::version_check::VersionCheckConfig {
-            api_url: "https://releases.hyperi.io/api/v1/check".into(),
-            ..Default::default()
-        }
+        dfe_archiver::version_check_defaults()
     }
 }
 

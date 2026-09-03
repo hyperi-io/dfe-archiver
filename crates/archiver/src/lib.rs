@@ -42,21 +42,35 @@ pub use dfe_archiver_io as io;
 
 // Re-export key config types
 pub use dfe_archiver_core::config::{
-    ArchiveConfig, BufferConfig, CompressionConfig, KafkaConfig, MemoryConfig, MetricsConfig,
-    RoutingConfig,
+    ArchiveConfig, BufferConfig, CompressionConfig, KafkaConfig, RoutingConfig,
 };
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The archiver's version-check defaults: the releases endpoint the check
+/// targets, with scalo's own defaults for everything else.
+///
+/// Sits UNDER the config cascade, so any `version_check.*` key a deployment
+/// sets wins -- including the `<PREFIX>_VERSION_CHECK__ENABLED=false` the
+/// chart renders for an air-gapped install. That overlay only happens because
+/// `config::load_config` initialises the cascade; see the test
+/// `contract_env_prefix_reaches_the_version_check_it_names`.
+#[must_use]
+pub fn version_check_defaults() -> scalo::version_check::VersionCheckConfig {
+    scalo::version_check::VersionCheckConfig {
+        api_url: "https://releases.hyperi.io/api/v1/check".into(),
+        ..Default::default()
+    }
+}
+
 /// The archiver's weighted KEDA scaling components.
 ///
 /// Single source of truth shared by the `ServiceApp::scaling_components`
-/// override (which registers them on the runtime's unified `ScalingPressure`,
-/// the engine `/scaling/pressure` serves) and the `Archiver`'s standalone
-/// fallback engine (built only when the runtime has `scaling` disabled). Both
-/// MUST register the same component set so the gauge and the served pressure
-/// agree. Weights/saturations mirror the legacy archiver model:
+/// override (which registers them on the runtime's unified `ScalingPressure`)
+/// and the `Archiver`'s standalone fallback engine (built only when the
+/// `scaling` feature is compiled out). Both MUST register the same component
+/// set so the two agree. Weights/saturations mirror the legacy archiver model:
 /// `kafka_lag` (assigned-partition lag), `buffer_depth` (hot-buffer count), and
 /// `memory` (cgroup guard pressure ratio).
 #[must_use]

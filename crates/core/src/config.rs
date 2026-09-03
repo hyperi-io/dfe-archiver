@@ -12,25 +12,27 @@ use serde::{Deserialize, Serialize};
 
 pub use scalo::config::sensitive;
 pub use scalo::dlq::DlqConfig;
-pub use scalo::scaling::ScalingPressureConfig;
 
 /// Root configuration for dfe-archiver.
 ///
+/// Covers the archiver's own sections only. The memory guard, the metrics
+/// listener and the scaling-pressure engine are scalo's, built by
+/// `ServiceRuntime` before the archiver exists, and are configured through the
+/// cascade (`ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
+/// `METRICS_ADDR` / `ARCHIVER_METRICS__ADDRESS` for the listener,
+/// `ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
+/// `scaling:` block here parsed, validated and reached nothing.
+///
 /// ## Hot-reload behavior
 ///
-/// **Hot-reloaded (takes effect on next batch):**
-/// - `kafka.batch_size`
-/// - `buffer.flush_bytes` / `flush_age_secs` / `flush_records`
-/// - `memory.limit_bytes` / `pressure_threshold` / `tracking_enabled`
-/// - `scaling.enabled` / `memory_gate_threshold`
+/// **Hot-reloaded**, because the pipeline re-reads them from the shared config:
+/// - `kafka.batch_size` — once per receive
+/// - `buffer.backpressure_pause_secs` — on each backpressure pause
 ///
-/// **Requires pod restart:**
-/// - `kafka.*` (except `batch_size`) — transport connection established at startup
-/// - `archive.*` — storage backend and rolling policy bound at startup
-/// - `routing.*` — archive path structure, must be atomic
-/// - `compression.*` — file format consistency across rolling set
-/// - `metrics.*` — HTTP server binds at startup
-/// - `buffer.writer_parallelism` — structural buffer manager config
+/// **Requires pod restart** — everything else. `Archiver` snapshots the config
+/// at construction into `startup_config`, so a reload of `archive.*`,
+/// `routing.*`, `compression.*` or the `buffer.*` flush thresholds is accepted
+/// and validated but does not reach the running pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
@@ -43,20 +45,11 @@ pub struct Config {
     /// Buffer management configuration
     pub buffer: BufferConfig,
 
-    /// Memory limits configuration
-    pub memory: MemoryConfig,
-
     /// Routing configuration
     pub routing: RoutingConfig,
 
-    /// Metrics configuration
-    pub metrics: MetricsConfig,
-
     /// Compression configuration
     pub compression: CompressionConfig,
-
-    /// Scaling pressure configuration for KEDA autoscaling
-    pub scaling: ScalingPressureConfig,
 
     /// Dead letter queue configuration
     pub dlq: DlqConfig,
@@ -68,11 +61,8 @@ impl Default for Config {
             kafka: KafkaConfig::default(),
             archive: ArchiveConfig::default(),
             buffer: BufferConfig::default(),
-            memory: MemoryConfig::default(),
             routing: RoutingConfig::default(),
-            metrics: MetricsConfig::default(),
             compression: CompressionConfig::default(),
-            scaling: ScalingPressureConfig::default(),
             // Fleet DLQ standard defaults: fixed per-app topic, routing=common.
             // Archiver entry destinations are archive PATHS (slashes), so
             // scalo's per-table default would build invalid topic names.
@@ -313,30 +303,6 @@ impl Default for BufferConfig {
     }
 }
 
-/// Memory limits configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MemoryConfig {
-    /// Hard limit on total memory usage (bytes)
-    pub limit_bytes: usize,
-
-    /// Pressure threshold (0.0-1.0) - trigger aggressive flush
-    pub pressure_threshold: f64,
-
-    /// Enable memory tracking
-    pub tracking_enabled: bool,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            limit_bytes: 512 * 1024 * 1024, // 512MB
-            pressure_threshold: 0.8,
-            tracking_enabled: true,
-        }
-    }
-}
-
 /// Routing configuration
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -358,30 +324,6 @@ impl Default for RoutingConfig {
             mode: "expression".to_string(),
             expression_fields: vec!["org_id".to_string()],
             default_segment: "unknown".to_string(),
-        }
-    }
-}
-
-/// Metrics configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct MetricsConfig {
-    /// Enable metrics server
-    pub enabled: bool,
-
-    /// Bind address for metrics HTTP server
-    pub address: String,
-
-    /// Metrics path
-    pub path: String,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            address: "0.0.0.0:9090".to_string(),
-            path: "/metrics".to_string(),
         }
     }
 }
@@ -413,10 +355,15 @@ impl Default for CompressionConfig {
 /// Apply flat environment variable overrides.
 ///
 /// Uses multiple prefixes to preserve the existing env var contract:
-/// `KAFKA_*`, `ARCHIVER_*`, `METRICS_*`, `S3_*`.
+/// `KAFKA_*`, `ARCHIVER_*`, `DLQ_*`, `S3_*`.
 ///
 /// CRITICAL: These env var names are the contract with dfe-engine.
 /// Do NOT rename them.
+///
+/// `ARCHIVER_MEMORY_*` is absent by design: those names belong to scalo's
+/// `MemoryGuard`, which reads them itself. Mapping them here would shadow the
+/// guard with an unread second copy, and reject its `0` (auto-detect from the
+/// cgroup) as invalid.
 impl ApplyFlatEnv for Config {
     fn apply_flat_env(&mut self, _prefix: &str) {
         // Kafka transport
@@ -492,16 +439,8 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_parsed::<u64>("ARCHIVER", "FLUSH_INTERVAL_SECS") {
             self.buffer.flush_age_secs = v;
         }
-        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MEMORY_LIMIT_BYTES") {
-            self.memory.limit_bytes = v;
-        }
         if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MULTIPART_CHUNK_SIZE") {
             self.archive.multipart_chunk_size = v;
-        }
-
-        // Metrics
-        if let Some(v) = flat_env::flat_env_string("METRICS", "ADDRESS") {
-            self.metrics.address = v;
         }
 
         // S3
@@ -546,19 +485,18 @@ impl Normalize for Config {
 }
 
 impl Config {
-    /// Register all config sections in the scalo config registry.
+    /// Register all config sections in the scalo config registry, which drives
+    /// redaction of sensitive fields such as `sasl_password`.
     ///
-    /// Enables the `/config` admin endpoint to dump effective config
-    /// (with automatic redaction of sensitive fields like `sasl_password`).
+    /// The registry also backs a `/config` dump, but that route belongs to
+    /// `scalo::http_server` and the archiver serves only the metrics listener,
+    /// so this binary exposes no such endpoint.
     pub fn register_in_registry(&self) {
         use scalo::config::registry;
         registry::register("kafka", &self.kafka);
         registry::register("archive", &self.archive);
         registry::register("buffer", &self.buffer);
-        registry::register("memory", &self.memory);
         registry::register("routing", &self.routing);
-        registry::register("metrics", &self.metrics);
         registry::register("compression", &self.compression);
-        registry::register("scaling", &self.scaling);
     }
 }
