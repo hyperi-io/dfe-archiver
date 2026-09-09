@@ -12,7 +12,9 @@ description: |-
   - `scaling.enabled` / `memory_gate_threshold`
 
   **Requires pod restart:**
+  - `transport` — the inbound transport is bound at startup
   - `kafka.*` (except `batch_size`) — transport connection established at startup
+  - `grpc.*` — the Push listener binds at startup
   - `archive.*` — storage backend and rolling policy bound at startup
   - `routing.*` — archive path structure, must be atomic
   - `compression.*` — file format consistency across rolling set
@@ -20,6 +22,14 @@ description: |-
   - `buffer.writer_parallelism` — structural buffer manager config
 type: object
 properties:
+  transport:
+    description: |-
+      Which transport carries records IN: `kafka` (a broker holds them between
+      stages) or `grpc` (the scalo Push listener, point to point). Same two
+      spellings as dfe-loader's `transport`, because a deployment sets both
+      from the one `kafka.mode` dial.
+    type: string
+    default: kafka
   kafka:
     description: Kafka consumer configuration
     $ref: '#/$defs/KafkaConfig'
@@ -28,6 +38,11 @@ properties:
       - localhost:9092
       group_id: dfe-archiver
       topics: []
+      topic_include: []
+      topic_exclude:
+      - ^__
+      - _dlq$
+      topic_refresh_secs: 60
       sasl_mechanism: null
       security_protocol: PLAINTEXT
       sasl_username: null
@@ -37,11 +52,21 @@ properties:
       batch_size: 10000
       max_poll_interval_ms: 300000
       session_timeout_ms: 30000
+  grpc:
+    description: Push listener configuration, read when `transport` is `grpc`.
+    $ref: '#/$defs/GrpcConfig'
+    default:
+      listen: null
+      recv_buffer_size: 10000
+      recv_timeout_ms: 100
+      max_message_size: 16777216
+      compression: false
+      default_topic: default_land
   archive:
     description: Archive output configuration
     $ref: '#/$defs/ArchiveConfig'
     default:
-      destination: file:///var/data/archive
+      destination: ''
       path_template: '{year}/{month}/{day}/{hour}'
       file_extension: jsonl
       roll_size_bytes: 1073741824
@@ -134,11 +159,40 @@ $defs:
         type: string
         default: dfe-archiver
       topics:
-        description: Topics to consume
+        description: |-
+          Topics to consume. Empty turns on scalo's broker-side auto-discovery,
+          filtered by `topic_include`/`topic_exclude` and refreshed every
+          `topic_refresh_secs`, so a source added after this pod started is
+          archived without a restart.
         type: array
         items:
           type: string
         default: []
+      topic_include:
+        description: |-
+          Regex patterns a discovered topic must match (OR). Empty means every
+          topic the broker holds that `topic_exclude` does not drop.
+        type: array
+        items:
+          type: string
+        default: []
+      topic_exclude:
+        description: |-
+          Regex patterns that drop a discovered topic (OR). Exclude wins over
+          include. Defaults to scalo's list, which already drops the DLQ and
+          Kafka's own internal topics.
+        type: array
+        items:
+          type: string
+        default:
+        - ^__
+        - _dlq$
+      topic_refresh_secs:
+        description: How often the discovered topic list is re-read from the broker.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 60
       sasl_mechanism:
         description: SASL mechanism (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)
         type:
@@ -198,14 +252,59 @@ $defs:
         format: uint32
         minimum: 0
         default: 30000
+  GrpcConfig:
+    description: |-
+      Push listener configuration for the direct transport.
+
+      Mirrors dfe-loader's `grpc` block key for key, because both stages receive
+      the same scalo Push RPC and an operator reading one config should not have
+      to learn a second set of names.
+    type: object
+    properties:
+      listen:
+        description: Listen address, e.g. `0.0.0.0:6000`. Required when `transport` is `grpc`.
+        type:
+        - string
+        - 'null'
+        default: null
+      recv_buffer_size:
+        description: Records buffered from incoming RPCs before the sender is held.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 10000
+      recv_timeout_ms:
+        description: Receive timeout in milliseconds (0 = non-blocking).
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 100
+      max_message_size:
+        description: Maximum message size in bytes.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 16777216
+      compression:
+        description: Enable gzip compression for gRPC messages.
+        type: boolean
+        default: false
+      default_topic:
+        description: Archive destination key for a record whose sender set no routing key.
+        type: string
+        default: default_land
   ArchiveConfig:
     description: Archive output configuration
     type: object
     properties:
       destination:
-        description: Destination URL (file://, s3://, gs://, az://, minio://)
+        description: |-
+          Destination URL (file://, s3://, gs://, az://, minio://). Empty until an
+          operator names one, which is an idle archiver rather than a default
+          path: a container-local directory nobody asked for looks like it is
+          archiving and loses every file when the pod is replaced.
         type: string
-        default: file:///var/data/archive
+        default: ''
       path_template:
         description: 'Path template with placeholders: {topic}, {date}, {hour}, etc.'
         type: string

@@ -23,11 +23,11 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
-    /// Kafka transport error. `source` carries the underlying
-    /// `scalo::transport::TransportError` (or rdkafka error) when
-    /// the failure originated outside this crate.
-    #[error("kafka error: {message}")]
-    Kafka {
+    /// Inbound transport error, on the bus or the Push listener. `source`
+    /// carries the underlying `scalo::transport::TransportError` (or rdkafka
+    /// error) when the failure originated outside this crate.
+    #[error("transport error: {message}")]
+    Transport {
         message: String,
         #[source]
         source: Option<BoxSource>,
@@ -77,17 +77,17 @@ pub enum Error {
 }
 
 impl Error {
-    /// Construct a Kafka error without an underlying source.
-    pub fn kafka(message: impl Into<String>) -> Self {
-        Self::Kafka {
+    /// Construct a transport error without an underlying source.
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
             message: message.into(),
             source: None,
         }
     }
 
-    /// Construct a Kafka error wrapping the underlying error chain.
-    pub fn kafka_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
-        Self::Kafka {
+    /// Construct a transport error wrapping the underlying error chain.
+    pub fn transport_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Transport {
             message: message.into(),
             source: Some(source.into()),
         }
@@ -127,7 +127,7 @@ impl Error {
     pub fn category(&self) -> ErrorCategory {
         match self {
             // Transient - retry
-            Self::Kafka { .. }
+            Self::Transport { .. }
             | Self::Storage { .. }
             | Self::Runtime(_)
             | Self::AlreadyExists { .. }
@@ -169,8 +169,8 @@ mod tests {
         let e = Error::Config("bad value".to_string());
         assert_eq!(format!("{e}"), "configuration error: bad value");
 
-        let e = Error::kafka("connection refused");
-        assert_eq!(format!("{e}"), "kafka error: connection refused");
+        let e = Error::transport("connection refused");
+        assert_eq!(format!("{e}"), "transport error: connection refused");
 
         let e = Error::storage("permission denied");
         assert_eq!(format!("{e}"), "storage error: permission denied");
@@ -186,7 +186,10 @@ mod tests {
 
     #[test]
     fn test_error_categories() {
-        assert_eq!(Error::kafka("timeout").category(), ErrorCategory::Transient);
+        assert_eq!(
+            Error::transport("timeout").category(),
+            ErrorCategory::Transient
+        );
         assert_eq!(
             Error::storage("network").category(),
             ErrorCategory::Transient
@@ -239,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_is_retryable() {
-        assert!(Error::kafka("timeout").is_retryable());
+        assert!(Error::transport("timeout").is_retryable());
         assert!(!Error::Config("bad".into()).is_retryable());
         assert!(!Error::Routing("no dest".into()).is_retryable());
     }
@@ -259,14 +262,14 @@ mod tests {
     }
 
     #[test]
-    fn test_kafka_with_preserves_source_chain() {
+    fn test_transport_with_preserves_source_chain() {
         use std::error::Error as _;
 
         let inner = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "broker down");
-        let err = Error::kafka_with("recv failed", inner);
+        let err = Error::transport_with("recv failed", inner);
 
         // Top-level message is the wrapper text only.
-        assert_eq!(format!("{err}"), "kafka error: recv failed");
+        assert_eq!(format!("{err}"), "transport error: recv failed");
 
         // source() walks reach the underlying io::Error.
         let src = err.source().expect("source set");

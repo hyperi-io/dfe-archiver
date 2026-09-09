@@ -1,6 +1,6 @@
 # Project:      dfe-archiver
 # File:         crates/io/Cargo.toml
-# Purpose:      I/O layer - Kafka transport and storage backends
+# Purpose:      I/O layer - inbound transports and storage backends
 # Language:     TOML
 #
 # License:      BUSL-1.1
@@ -9,7 +9,7 @@
 [package]
 name = "dfe-archiver-io"
 version = "1.7.3"
-description = "I/O layer for dfe-archiver: Kafka transport and storage backends"
+description = "I/O layer for dfe-archiver: inbound transports and storage backends"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 dfe-archiver-core = { workspace = true }
-scalo = { workspace = true, features = ["transport-kafka", "metrics", "governor"] }
+scalo = { workspace = true, features = ["transport-kafka", "transport-grpc", "metrics", "governor"] }
 rdkafka = { workspace = true }
 
 # Cloud storage
