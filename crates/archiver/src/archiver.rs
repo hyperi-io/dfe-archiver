@@ -26,7 +26,7 @@ use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
-use dfe_archiver_io::{KafkaStatsEmitter, TransportAdapter};
+use dfe_archiver_io::{KafkaStatsEmitter, SourceTransport};
 use lru::LruCache;
 use rayon::prelude::*;
 use scalo::SelfRegulationGovernor;
@@ -57,11 +57,11 @@ pub struct Archiver {
     startup_config: Config,
     /// Shared config for hot-reloadable fields (buffer, memory, scaling tunables)
     shared_config: SharedConfig<Config>,
-    /// Kafka transport. `TransportAdapter` methods take `&self` and scalo's
-    /// `KafkaTransport` is `Send+Sync` with internal locking on the recv hot
+    /// The inbound transport, bus or direct. Its methods take `&self` and the
+    /// scalo transports are `Send+Sync` with internal locking on the recv hot
     /// path, so no outer `Mutex` is required. This lets recv and commit run
     /// concurrently from different async tasks.
-    transport: TransportAdapter,
+    transport: SourceTransport,
     router: Router,
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
@@ -129,7 +129,7 @@ impl Archiver {
         scaling: Option<Arc<ScalingPressure>>,
     ) -> Result<Self> {
         let config = shared_config.get();
-        let transport = TransportAdapter::new(&config.kafka, governor).await?;
+        let transport = SourceTransport::from_config(&config, governor).await?;
 
         let router = Router::new(config.routing.clone());
 
@@ -158,12 +158,17 @@ impl Archiver {
             ))
         });
 
-        // Start rdkafka stats sidecar (non-fatal if it fails)
-        let stats_emitter = match KafkaStatsEmitter::new(&config.kafka) {
-            Ok(emitter) => Some(emitter),
-            Err(e) => {
-                warn!(error = %e, "Failed to start Kafka stats emitter (non-fatal)");
-                None
+        // Start rdkafka stats sidecar (non-fatal if it fails). Skipped on the
+        // direct transport, which reaches no broker to collect stats from.
+        let stats_emitter = if config.is_direct() {
+            None
+        } else {
+            match KafkaStatsEmitter::new(&config.kafka) {
+                Ok(emitter) => Some(emitter),
+                Err(e) => {
+                    warn!(error = %e, "Failed to start Kafka stats emitter (non-fatal)");
+                    None
+                }
             }
         };
 
@@ -173,19 +178,31 @@ impl Archiver {
         // Create DLQ. The Kafka backend rides the same config conversion as
         // the consumer transport -- dead-letters land on the broker the data
         // came from.
-        let dlq_kafka = dfe_archiver_io::kafka::convert_config(&config.kafka);
+        let mut dlq_config = config.dlq.clone();
+        let dlq_kafka = if config.is_direct() {
+            // No broker to dead-letter to, and the file backend is an EROFS
+            // no-op on a read-only rootfs, so there is no backend to offer.
+            if dlq_config.enabled {
+                warn!("no broker on the direct transport -- the DLQ is disabled");
+                dlq_config.enabled = false;
+            }
+            None
+        } else {
+            Some(dfe_archiver_io::kafka::convert_config(&config.kafka))
+        };
         let dlq = scalo::dlq::Dlq::spawn(
-            &config.dlq,
+            &dlq_config,
             "dfe-archiver",
-            Some(&dlq_kafka),
+            dlq_kafka.as_ref(),
             cancel.clone(),
         )
         .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
-        if config.dlq.enabled {
-            info!(mode = ?config.dlq.mode, "DLQ enabled");
+        if dlq_config.enabled {
+            info!(mode = ?dlq_config.mode, "DLQ enabled");
         }
 
         info!(
+            transport = %config.transport,
             brokers = %config.kafka.brokers.join(","),
             topics = %config.kafka.topics.join(","),
             destination = %config.archive.destination,
@@ -213,12 +230,12 @@ impl Archiver {
         })
     }
 
-    /// Check Kafka connection (transport connects on creation)
+    /// Check the inbound transport (it connects or binds on creation).
     pub fn check_connection(&self) -> Result<()> {
         if !self.transport.is_healthy() {
-            return Err(Error::kafka("Kafka transport is not healthy"));
+            return Err(Error::transport("inbound transport is not healthy"));
         }
-        info!("Kafka connection verified");
+        info!(transport = %self.startup_config.transport, "Inbound transport verified");
         Ok(())
     }
 
@@ -314,7 +331,7 @@ impl Archiver {
                         }
                         Err(e) => {
                             if log_debounced(&self.log_guards.recv_error_last, 5000) {
-                                error!(error = %e, "Failed to receive from Kafka (debounced, max 1/5s)");
+                                error!(error = %e, "Failed to receive from the inbound transport (debounced, max 1/5s)");
                             }
                             self.metrics.record_error();
                             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -531,9 +548,13 @@ impl Archiver {
     /// serves at `/scaling/pressure` to KEDA, weighted + saturated per
     /// `scaling_components()`. `assigned_lag()` sums lag over THIS pod's ASSIGNED
     /// partitions, so it is scale-invariant: as the consumer group grows each
-    /// pod's lag falls and the term relaxes.
+    /// pod's lag falls and the term relaxes. The direct transport keeps no
+    /// backlog this pod can read, so it leaves the component at whatever the
+    /// engine last held rather than writing a false zero.
     fn push_kafka_lag_signal(&self) {
-        let lag = self.transport.assigned_lag();
+        let Some(lag) = self.transport.assigned_lag() else {
+            return;
+        };
         // assigned_lag() is >= 0 (clamped in the adapter).
         let lag = u64::try_from(lag).unwrap_or(0);
         self.metrics.set_kafka_lag(lag);

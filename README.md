@@ -64,7 +64,7 @@ cargo build --release
 # Run with environment variables
 KAFKA_BROKERS=localhost:9092 \
 KAFKA_TOPICS=events \
-ARCHIVER_DESTINATION=file:///var/data/archive \
+ARCHIVER_DESTINATION=file://./data/archive \
 ./target/release/dfe-archiver
 
 # Or with config file
@@ -85,25 +85,51 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
 | `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated) | (required) |
+| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
+| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
 | `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
 | `KAFKA_SASL_USER` | SASL username | (none) |
 | `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output URL | `file:///var/data/archive` |
+| `ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
 | `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
 | `METRICS_ADDRESS` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
+Names use a single underscore throughout. This app reads its own flat-env
+contract rather than figment's nested cascade, so a `__` variable applies to
+nothing.
+
+### Which transport, and idling until configured
+
+`transport` picks how records arrive. On `kafka` the archiver joins a consumer
+group and reads the landing topics; on `grpc` it binds the scalo Push listener
+and the previous stage sends to it point to point, which is how a deployment
+with no broker still archives. A deployment sets it from the same dial that
+decides the rest of the stack's transport, so it is not normally hand-authored.
+
+The archiver starts, passes readiness and serves health and metrics with no
+work to do -- no destination, or no topics and no discovery pattern. It opens
+no broker connection and binds no listener while idle, reports the
+`work_config` health component Degraded with the reason, holds the
+`pipeline_idle` gauge at 1, and starts the moment a config change gives it
+work. `Config::idle_reason` is the whole predicate.
+
 ### Config File Example
 
 ```yaml
+transport: kafka               # or "grpc" for the Push listener
+
 kafka:
   brokers:
     - kafka:9092
   group_id: dfe-archiver
-  topics:
+  topics:                      # omit to discover, filtered by topic_include
     - events
     - logs
   sasl_mechanism: SCRAM-SHA-256
@@ -149,7 +175,9 @@ or file polling (5-second interval).
 - `archive.roll_size_bytes`, `archive.roll_interval_secs`
 
 **Requires pod restart:**
+- `transport` - the inbound transport is bound at startup
 - `kafka.*` (except `batch_size`) - transport connection established at startup
+- `grpc.*` - the Push listener binds at startup
 - `archive.destination`, `archive.path_template`, `archive.s3/gcs/azure/minio`
 - `routing.*` - archive path structure must be atomic
 - `compression.*` - file format consistency across rolling set

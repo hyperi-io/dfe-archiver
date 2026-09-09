@@ -38,7 +38,7 @@ dfe-archiver-core = { workspace = true }
 dfe-archiver-io = { workspace = true }
 scalo = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "service-metrics",
-    "transport-kafka", "http-server", "tiered-sink", "spool",
+    "transport-kafka", "transport-grpc", "http-server", "tiered-sink", "spool",
     # `scaling` exposes the unified ScalingPressure engine served at
     # /scaling/pressure; `governor` exposes the self-regulation inbound brake.
     # `expression` backs the CEL surface used by config/scaling tunables.
