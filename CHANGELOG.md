@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.21](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.20...v1.7.21) (2026-09-10)
+
+### Bug Fixes
+
+* **config:** make the deployment's env vars reach the settings they name ([8365f44](https://github.com/hyperi-io/dfe-archiver/commit/8365f44ea09fd8bd9666068aa9f5128e3ae4923d))
+* **health:** prove the archive sink answers before claiming healthy ([63b4023](https://github.com/hyperi-io/dfe-archiver/commit/63b4023f3de776b26fda180ca7a91e8085be34d0))
+
 ## [1.7.20](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.19...v1.7.20) (2026-09-09)
 
 ### Bug Fixes
