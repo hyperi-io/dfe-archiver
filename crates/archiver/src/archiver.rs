@@ -73,8 +73,10 @@ pub struct Archiver {
     writers: parking_lot::Mutex<LruCache<String, Arc<Mutex<ArchiveWriter>>>>,
     /// Cancellation token for graceful shutdown
     cancel: CancellationToken,
-    /// The unified KEDA `ScalingPressure` engine -- the one the runtime serves
-    /// at `/scaling/pressure`. scalo 2.9 collapsed the old dual model (the app's
+    /// The unified KEDA `ScalingPressure` engine, reaching KEDA as the
+    /// `dfe_scaling_pressure` gauge on the metrics listener -- the runtime
+    /// starts that listener without the `/scaling/pressure` route, so nothing
+    /// serves the composite over HTTP. scalo 2.9 collapsed the old dual model (the app's
     /// weighted pressure + a separate runtime signal cell) into this single
     /// engine: the components are registered via `ServiceApp::scaling_components`
     /// and the archiver's loops drive their values directly (`kafka_lag` from
@@ -116,11 +118,11 @@ impl Archiver {
     /// `Some`, attaches the Kafka pause-partitions inbound gate to the receiver
     /// (default-on self-regulation); `None` means self-regulation is disabled.
     ///
-    /// `scaling` is the runtime's unified `ScalingPressure` engine (the one
-    /// `/scaling/pressure` serves to KEDA), shared so the archiver's loops drive
-    /// the served gauge. `None` when the runtime's `scaling` feature/section is
-    /// off; a standalone engine (registering the same components) is built as a
-    /// fallback so the local pressure gauge keeps working.
+    /// `scaling` is the runtime's unified `ScalingPressure` engine, shared so
+    /// the archiver's loops drive the `dfe_scaling_pressure` gauge KEDA scales
+    /// on. `None` when the runtime's `scaling` feature is off; a standalone
+    /// engine (registering the same components) is built as a fallback so the
+    /// local pressure gauge keeps working.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -146,14 +148,14 @@ impl Archiver {
         };
         let buffer = TieredBufferManager::new(buffer_config)?;
 
-        // Use the runtime's unified ScalingPressure (the engine /scaling/pressure
-        // serves) when present, so the archiver's loops drive the served KEDA
-        // gauge directly. Fall back to a standalone engine registering the SAME
-        // components (and the config's gate thresholds) when the runtime has
-        // scaling disabled -- keeps the local pressure gauge functioning.
+        // The runtime's unified ScalingPressure, so the archiver's loops drive
+        // the engine that emits the KEDA gauge. Its thresholds come from the
+        // `scaling` cascade section (`ARCHIVER_SCALING__*`), not from this
+        // file's config. `None` only when the `scaling` feature is compiled
+        // out, where a standalone engine keeps the components registered.
         let scaling = scaling.unwrap_or_else(|| {
             Arc::new(ScalingPressure::new(
-                config.scaling.clone(),
+                scalo::scaling::ScalingPressureConfig::from_cascade(),
                 crate::scaling_components(),
             ))
         });
@@ -544,8 +546,8 @@ impl Archiver {
     /// `ScalingPressure` `kafka_lag` component AND the `dfe_archiver_kafka_lag`
     /// gauge.
     ///
-    /// The component is the Kafka inbound term of the composite the engine
-    /// serves at `/scaling/pressure` to KEDA, weighted + saturated per
+    /// The component is the Kafka inbound term of the composite KEDA scales on,
+    /// weighted + saturated per
     /// `scaling_components()`. `assigned_lag()` sums lag over THIS pod's ASSIGNED
     /// partitions, so it is scale-invariant: as the consumer group grows each
     /// pod's lag falls and the term relaxes. The direct transport keeps no

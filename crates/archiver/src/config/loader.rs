@@ -12,6 +12,38 @@ use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
 use std::path::Path;
 use tracing::info;
 
+/// The env prefix for the scalo config cascade. Must equal the contract's
+/// `env_prefix` and `ServiceApp::env_prefix` -- it is the prefix the charts
+/// build their `<PREFIX>_SECTION__KEY` variables from.
+const ENV_PREFIX: &str = "ARCHIVER";
+
+/// Initialise scalo's global config cascade.
+///
+/// `ServiceRuntime` resolves `version_check`, `metrics`, `logger`,
+/// `self_regulation`, `scaling` and `worker_pool` through `from_cascade()`,
+/// which returns each type's own default when the cascade was never set up --
+/// indistinguishable from a cascade that says "default", and silent. Without
+/// this call no `ARCHIVER_*__*` variable a chart renders reaches anything.
+///
+/// The config reloader re-enters on SIGHUP and on every file change, and the
+/// cascade is a `OnceLock`, so a repeat setup is a no-op rather than an error.
+fn init_cascade() {
+    let opts = scalo::config::ConfigOptions {
+        env_prefix: ENV_PREFIX.to_string(),
+        // `main` runs dotenvy before arg parsing, so `.env` is already in the
+        // process environment; re-loading it here would tie every test that
+        // loads config to whatever `.env` sits in the working tree.
+        load_dotenv: false,
+        ..Default::default()
+    };
+    if let Err(e) = scalo::config::setup(opts)
+        && !matches!(e, scalo::config::ConfigError::AlreadyInitialised)
+    {
+        // Every reader falls back to its own default, outranking the deployment.
+        tracing::warn!(error = %e, "config cascade setup failed; deployment overrides will not apply");
+    }
+}
+
 /// Load configuration with cascade: CLI → ENV → .env → file → defaults
 ///
 /// Priority (highest to lowest):
@@ -20,7 +52,16 @@ use tracing::info;
 /// 3. .env file (loaded by dotenvy in main)
 /// 4. Config file (YAML)
 /// 5. Hard-coded defaults
+///
+/// The app's own sections are read straight from `config_path`. Sections scalo
+/// owns (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`,
+/// `worker_pool`) come from the cascade `init_cascade` sets up, so they are set
+/// by `<PREFIX>_SECTION__KEY` env vars or a `settings.yaml`, NOT by this file --
+/// scalo's cascade discovers config files by name and cannot ingest an
+/// arbitrary `--config` path (scalo-rs#50).
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
+    init_cascade();
+
     let mut config = Config::default();
 
     if let Some(path) = config_path {
@@ -119,18 +160,6 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
-    if config.memory.limit_bytes == 0 {
-        return Err(Error::Config(
-            "memory.limit_bytes must be greater than 0".to_string(),
-        ));
-    }
-
-    if config.memory.pressure_threshold <= 0.0 || config.memory.pressure_threshold > 1.0 {
-        return Err(Error::Config(
-            "memory.pressure_threshold must be between 0.0 and 1.0".to_string(),
-        ));
-    }
-
     if config.archive.multipart_chunk_size > 0
         && config.archive.multipart_chunk_size < 5 * 1024 * 1024
     {
@@ -204,15 +233,6 @@ mod tests {
     fn test_invalid_compression_codec_fails() {
         let mut config = Config::default();
         config.compression.codec = "invalid".to_string();
-
-        let result = validate_config(&config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_zero_memory_limit_fails() {
-        let mut config = Config::default();
-        config.memory.limit_bytes = 0;
 
         let result = validate_config(&config);
         assert!(result.is_err());
@@ -351,21 +371,6 @@ mod tests {
         config.buffer.flush_bytes = 0;
 
         assert!(validate_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_pressure_threshold_out_of_range() {
-        let mut config = Config::default();
-        config.kafka.brokers = vec!["localhost:9092".to_string()];
-
-        config.memory.pressure_threshold = 0.0;
-        assert!(validate_config(&config).is_err());
-
-        config.memory.pressure_threshold = 1.5;
-        assert!(validate_config(&config).is_err());
-
-        config.memory.pressure_threshold = 0.85;
-        assert!(validate_config(&config).is_ok());
     }
 
     #[test]

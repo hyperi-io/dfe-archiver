@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "Root configuration for dfe-archiver.\n\n## Hot-reload behavior\n\n**Hot-reloaded (takes effect on next batch):**\n- `kafka.batch_size`\n- `buffer.flush_bytes` / `flush_age_secs` / `flush_records`\n- `memory.limit_bytes` / `pressure_threshold` / `tracking_enabled`\n- `scaling.enabled` / `memory_gate_threshold`\n\n**Requires pod restart:**\n- `transport` — the inbound transport is bound at startup\n- `kafka.*` (except `batch_size`) — transport connection established at startup\n- `grpc.*` — the Push listener binds at startup\n- `archive.*` — storage backend and rolling policy bound at startup\n- `routing.*` — archive path structure, must be atomic\n- `compression.*` — file format consistency across rolling set\n- `metrics.*` — HTTP server binds at startup\n- `buffer.writer_parallelism` — structural buffer manager config",
+  "description": "Root configuration for dfe-archiver.\n\nCovers the archiver's own sections only. The memory guard, the metrics\nlistener and the scaling-pressure engine are scalo's, built by\n`ServiceRuntime` before the archiver exists, and are configured through the\ncascade (`ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /\n`METRICS_ADDR` / `ARCHIVER_METRICS__ADDRESS` for the listener,\n`ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /\n`scaling:` block here parsed, validated and reached nothing.\n\n## Hot-reload behavior\n\n**Hot-reloaded**, because the pipeline re-reads them from the shared config:\n- `kafka.batch_size` — once per receive\n- `buffer.backpressure_pause_secs` — on each backpressure pause\n\n**Requires pod restart** — everything else. `Archiver` snapshots the config\nat construction into `startup_config`, so a reload of `transport`,\n`kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*` or the\n`buffer.*` flush thresholds is accepted and validated but does not reach the\nrunning pipeline.",
   "type": "object",
   "properties": {
     "transport": {
@@ -75,15 +75,6 @@
         "backpressure_pause_secs": 5
       }
     },
-    "memory": {
-      "description": "Memory limits configuration",
-      "$ref": "#/$defs/MemoryConfig",
-      "default": {
-        "limit_bytes": 536870912,
-        "pressure_threshold": 0.8,
-        "tracking_enabled": true
-      }
-    },
     "routing": {
       "description": "Routing configuration",
       "$ref": "#/$defs/RoutingConfig",
@@ -95,15 +86,6 @@
         "default_segment": "unknown"
       }
     },
-    "metrics": {
-      "description": "Metrics configuration",
-      "$ref": "#/$defs/MetricsConfig",
-      "default": {
-        "enabled": true,
-        "address": "0.0.0.0:9090",
-        "path": "/metrics"
-      }
-    },
     "compression": {
       "description": "Compression configuration",
       "$ref": "#/$defs/CompressionConfig",
@@ -111,14 +93,6 @@
         "codec": "zstd",
         "level": 3,
         "enabled": true
-      }
-    },
-    "scaling": {
-      "description": "Scaling pressure configuration for KEDA autoscaling",
-      "$ref": "#/$defs/ScalingPressureConfig",
-      "default": {
-        "enabled": true,
-        "memory_gate_threshold": 0.8
       }
     },
     "dlq": {
@@ -598,30 +572,6 @@
         }
       }
     },
-    "MemoryConfig": {
-      "description": "Memory limits configuration",
-      "type": "object",
-      "properties": {
-        "limit_bytes": {
-          "description": "Hard limit on total memory usage (bytes)",
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0,
-          "default": 536870912
-        },
-        "pressure_threshold": {
-          "description": "Pressure threshold (0.0-1.0) - trigger aggressive flush",
-          "type": "number",
-          "format": "double",
-          "default": 0.8
-        },
-        "tracking_enabled": {
-          "description": "Enable memory tracking",
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
     "RoutingConfig": {
       "description": "Routing configuration",
       "type": "object",
@@ -648,27 +598,6 @@
         }
       }
     },
-    "MetricsConfig": {
-      "description": "Metrics configuration",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Enable metrics server",
-          "type": "boolean",
-          "default": true
-        },
-        "address": {
-          "description": "Bind address for metrics HTTP server",
-          "type": "string",
-          "default": "0.0.0.0:9090"
-        },
-        "path": {
-          "description": "Metrics path",
-          "type": "string",
-          "default": "/metrics"
-        }
-      }
-    },
     "CompressionConfig": {
       "description": "Compression configuration",
       "type": "object",
@@ -688,23 +617,6 @@
           "description": "Enable compression",
           "type": "boolean",
           "default": true
-        }
-      }
-    },
-    "ScalingPressureConfig": {
-      "description": "Base configuration for scaling pressure calculation.\n\nLives in the app's config cascade so thresholds are env-var overridable\n(e.g., `DFE_LOADER__SCALING__MEMORY_GATE_THRESHOLD=0.9`).\n\nComponent weights and saturation points are app-specific -- defined in\neach app's config and passed to [`super::ScalingPressure::new`] via\n[`ScalingComponent`].",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Enable scaling pressure calculation.\nWhen disabled, `calculate()` always returns 0.0.",
-          "type": "boolean",
-          "default": true
-        },
-        "memory_gate_threshold": {
-          "description": "Memory usage ratio that triggers the memory gate (0.0-1.0).\n\nWhen `memory_used / memory_limit >= threshold`, scaling pressure\nis forced to 100.0 to trigger immediate scale-up before OOM.",
-          "type": "number",
-          "format": "double",
-          "default": 0.8
         }
       }
     },

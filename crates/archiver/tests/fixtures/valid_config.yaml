@@ -21,11 +21,6 @@ buffer:
   flush_records: 100000
   writer_parallelism: 4
 
-memory:
-  limit_bytes: 1073741824
-  pressure_threshold: 0.85
-  tracking_enabled: true
-
 routing:
   mode: topic
   default_segment: unknown
@@ -33,8 +28,3 @@ routing:
 compression:
   codec: zstd
   level: 3
-
-metrics:
-  enabled: true
-  address: "0.0.0.0:9090"
-  path: /metrics

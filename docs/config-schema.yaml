@@ -3,23 +3,25 @@ title: Config
 description: |-
   Root configuration for dfe-archiver.
 
+  Covers the archiver's own sections only. The memory guard, the metrics
+  listener and the scaling-pressure engine are scalo's, built by
+  `ServiceRuntime` before the archiver exists, and are configured through the
+  cascade (`ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
+  `METRICS_ADDR` / `ARCHIVER_METRICS__ADDRESS` for the listener,
+  `ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
+  `scaling:` block here parsed, validated and reached nothing.
+
   ## Hot-reload behavior
 
-  **Hot-reloaded (takes effect on next batch):**
-  - `kafka.batch_size`
-  - `buffer.flush_bytes` / `flush_age_secs` / `flush_records`
-  - `memory.limit_bytes` / `pressure_threshold` / `tracking_enabled`
-  - `scaling.enabled` / `memory_gate_threshold`
+  **Hot-reloaded**, because the pipeline re-reads them from the shared config:
+  - `kafka.batch_size` — once per receive
+  - `buffer.backpressure_pause_secs` — on each backpressure pause
 
-  **Requires pod restart:**
-  - `transport` — the inbound transport is bound at startup
-  - `kafka.*` (except `batch_size`) — transport connection established at startup
-  - `grpc.*` — the Push listener binds at startup
-  - `archive.*` — storage backend and rolling policy bound at startup
-  - `routing.*` — archive path structure, must be atomic
-  - `compression.*` — file format consistency across rolling set
-  - `metrics.*` — HTTP server binds at startup
-  - `buffer.writer_parallelism` — structural buffer manager config
+  **Requires pod restart** — everything else. `Archiver` snapshots the config
+  at construction into `startup_config`, so a reload of `transport`,
+  `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*` or the
+  `buffer.*` flush thresholds is accepted and validated but does not reach the
+  running pipeline.
 type: object
 properties:
   transport:
@@ -86,13 +88,6 @@ properties:
       flush_records: 100000
       writer_parallelism: 4
       backpressure_pause_secs: 5
-  memory:
-    description: Memory limits configuration
-    $ref: '#/$defs/MemoryConfig'
-    default:
-      limit_bytes: 536870912
-      pressure_threshold: 0.8
-      tracking_enabled: true
   routing:
     description: Routing configuration
     $ref: '#/$defs/RoutingConfig'
@@ -101,13 +96,6 @@ properties:
       expression_fields:
       - org_id
       default_segment: unknown
-  metrics:
-    description: Metrics configuration
-    $ref: '#/$defs/MetricsConfig'
-    default:
-      enabled: true
-      address: 0.0.0.0:9090
-      path: /metrics
   compression:
     description: Compression configuration
     $ref: '#/$defs/CompressionConfig'
@@ -115,12 +103,6 @@ properties:
       codec: zstd
       level: 3
       enabled: true
-  scaling:
-    description: Scaling pressure configuration for KEDA autoscaling
-    $ref: '#/$defs/ScalingPressureConfig'
-    default:
-      enabled: true
-      memory_gate_threshold: 0.8
   dlq:
     description: Dead letter queue configuration
     $ref: '#/$defs/DlqConfig'
@@ -507,25 +489,6 @@ $defs:
         format: uint64
         minimum: 0
         default: 5
-  MemoryConfig:
-    description: Memory limits configuration
-    type: object
-    properties:
-      limit_bytes:
-        description: Hard limit on total memory usage (bytes)
-        type: integer
-        format: uint
-        minimum: 0
-        default: 536870912
-      pressure_threshold:
-        description: Pressure threshold (0.0-1.0) - trigger aggressive flush
-        type: number
-        format: double
-        default: 0.8
-      tracking_enabled:
-        description: Enable memory tracking
-        type: boolean
-        default: true
   RoutingConfig:
     description: Routing configuration
     type: object
@@ -547,22 +510,6 @@ $defs:
         description: Default path segment when field not found
         type: string
         default: unknown
-  MetricsConfig:
-    description: Metrics configuration
-    type: object
-    properties:
-      enabled:
-        description: Enable metrics server
-        type: boolean
-        default: true
-      address:
-        description: Bind address for metrics HTTP server
-        type: string
-        default: 0.0.0.0:9090
-      path:
-        description: Metrics path
-        type: string
-        default: /metrics
   CompressionConfig:
     description: Compression configuration
     type: object
@@ -580,33 +527,6 @@ $defs:
         description: Enable compression
         type: boolean
         default: true
-  ScalingPressureConfig:
-    description: |-
-      Base configuration for scaling pressure calculation.
-
-      Lives in the app's config cascade so thresholds are env-var overridable
-      (e.g., `DFE_LOADER__SCALING__MEMORY_GATE_THRESHOLD=0.9`).
-
-      Component weights and saturation points are app-specific -- defined in
-      each app's config and passed to [`super::ScalingPressure::new`] via
-      [`ScalingComponent`].
-    type: object
-    properties:
-      enabled:
-        description: |-
-          Enable scaling pressure calculation.
-          When disabled, `calculate()` always returns 0.0.
-        type: boolean
-        default: true
-      memory_gate_threshold:
-        description: |-
-          Memory usage ratio that triggers the memory gate (0.0-1.0).
-
-          When `memory_used / memory_limit >= threshold`, scaling pressure
-          is forced to 100.0 to trigger immediate scale-up before OOM.
-        type: number
-        format: double
-        default: 0.8
   DlqConfig:
     description: Top-level DLQ configuration.
     type: object

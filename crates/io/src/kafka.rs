@@ -231,6 +231,12 @@ impl KafkaStatsEmitter {
         if let Some(ref pass) = config.sasl_password {
             client_config.set("sasl.password", pass.expose());
         }
+        // Same private-CA trust as the consumer transport. Without it a broker
+        // on a private CA fails this sidecar's TLS handshake and every
+        // `rdkafka_*` metric disappears behind one non-fatal warn line.
+        if let Some(ref ca) = config.ssl_ca_location {
+            client_config.set("ssl.ca.location", ca);
+        }
 
         let consumer: rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext> =
             client_config

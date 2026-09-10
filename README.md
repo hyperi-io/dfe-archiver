@@ -98,12 +98,18 @@ Configuration follows a cascade (highest to lowest priority):
 | `KAFKA_SASL_PASSWORD` | SASL password | (none) |
 | `ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
 | `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
-| `METRICS_ADDRESS` | Metrics server address | `0.0.0.0:9090` |
+| `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
+| `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
+| `ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
+| `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-Names use a single underscore throughout. This app reads its own flat-env
-contract rather than figment's nested cascade, so a `__` variable applies to
-nothing.
+The memory guard, the metrics listener and the scaling-pressure engine belong to
+the scalo runtime and are built before the config file is read, so they are set
+by the variables above (or `--metrics-addr`), never by a `memory:`, `metrics:`
+or `scaling:` block in the config file. The archiver's own sections take a
+single underscore; the double-underscore names belong to those scalo sections
+and reach them through the cascade.
 
 ### Which transport, and idling until configured
 
@@ -156,10 +162,6 @@ routing:
   expression_fields:
     - org_id
     - event_type
-
-metrics:
-  enabled: true
-  address: 0.0.0.0:9090
 ```
 
 ### Hot-Reload Configuration
@@ -168,20 +170,15 @@ The archiver supports hot-reloading configuration without restart via SIGHUP
 or file polling (5-second interval).
 
 **Hot-reloaded (takes effect on next batch):**
-- `kafka.batch_size`
-- `buffer.flush_bytes`, `buffer.flush_age_secs`, `buffer.flush_records`
-- `memory.limit_bytes`, `memory.pressure_threshold`
-- `scaling.enabled`, `scaling.memory_gate_threshold`
-- `archive.roll_size_bytes`, `archive.roll_interval_secs`
+- `kafka.batch_size` - re-read once per receive
+- `buffer.backpressure_pause_secs` - re-read on each backpressure pause
 
-**Requires pod restart:**
-- `transport` - the inbound transport is bound at startup
-- `kafka.*` (except `batch_size`) - transport connection established at startup
-- `grpc.*` - the Push listener binds at startup
-- `archive.destination`, `archive.path_template`, `archive.s3/gcs/azure/minio`
-- `routing.*` - archive path structure must be atomic
-- `compression.*` - file format consistency across rolling set
-- `metrics.*` - HTTP server binds at startup
+**Requires pod restart** - everything else. The pipeline snapshots the config at
+startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `routing.*`,
+`compression.*` and the rest of `buffer.*` (the flush thresholds included) keep
+their startup values until the process restarts. A reload updates the shared
+config and passes validation, so a change to one of those is accepted and then
+has no effect until the roll.
 
 ## Storage Backends
 
