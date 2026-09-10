@@ -90,6 +90,17 @@ impl ServiceApp for App {
         load_config(path).map_err(|e| CliError::Config(e.to_string()))
     }
 
+    /// The archiver has work when it has somewhere to write and something to
+    /// read. `Config::idle_reason` is the whole predicate, so the charts, the
+    /// tests and this hook cannot disagree about what "no work" means.
+    fn work_state(&self, config: &Self::Config) -> scalo::lifecycle::WorkState {
+        config
+            .idle_reason()
+            .map_or(scalo::lifecycle::WorkState::Active, |reason| {
+                scalo::lifecycle::WorkState::idle(reason)
+            })
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn run_service(
         &self,
@@ -97,6 +108,7 @@ impl ServiceApp for App {
         mut runtime: scalo::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(
+            transport = %config.transport,
             kafka_brokers = %config.kafka.brokers.join(","),
             kafka_group_id = %config.kafka.group_id,
             kafka_topics = %config.kafka.topics.join(","),
@@ -193,9 +205,10 @@ impl ServiceApp for App {
             .check_connection()
             .map_err(|e| CliError::Service(e.to_string()))?;
 
-        // Register health checks
+        // Register health checks. Named for the role, not for one transport:
+        // the same component reports the bus consumer or the Push listener.
         let archiver_health = Arc::clone(&archiver);
-        scalo::health::HealthRegistry::register("kafka", move || {
+        scalo::health::HealthRegistry::register("transport", move || {
             if archiver_health.is_transport_healthy() {
                 scalo::health::HealthStatus::Healthy
             } else {

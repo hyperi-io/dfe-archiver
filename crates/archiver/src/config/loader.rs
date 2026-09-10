@@ -6,7 +6,7 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use dfe_archiver_core::config::Config;
+use dfe_archiver_core::config::{Config, TRANSPORT_GRPC, TRANSPORT_KAFKA};
 use dfe_archiver_core::{Error, Result};
 use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
 use std::path::Path;
@@ -107,29 +107,51 @@ fn load_from_file(path: &str) -> Result<Config> {
 
 /// Validate configuration
 ///
+/// STRUCTURAL faults only -- a contradictory or unusable setting, which the
+/// service refuses loudly. A config that is valid and merely EMPTY of work
+/// (no topics, no destination) is `Config::idle_reason`'s to answer, and the
+/// scalo idle gate keeps the service Ready while it waits for one that names
+/// work.
+///
 /// Called by `load_config` and by the `ConfigReloader` on hot-reload.
 pub fn validate_config(config: &Config) -> Result<()> {
-    if config.kafka.brokers.is_empty() {
-        return Err(Error::Config("kafka.brokers cannot be empty".to_string()));
+    let known_transports = [TRANSPORT_KAFKA, TRANSPORT_GRPC];
+    if !known_transports.contains(&config.transport.as_str()) {
+        return Err(Error::Config(format!(
+            "transport must be one of: {} (got '{}')",
+            known_transports.join(", "),
+            config.transport
+        )));
     }
 
-    if config.kafka.group_id.is_empty() {
-        return Err(Error::Config("kafka.group_id cannot be empty".to_string()));
-    }
+    if config.is_direct() {
+        if config
+            .grpc
+            .listen
+            .as_ref()
+            .is_none_or(|l| l.trim().is_empty())
+        {
+            return Err(Error::Config(
+                "grpc.listen is required when transport is 'grpc'".to_string(),
+            ));
+        }
+    } else {
+        if config.kafka.brokers.is_empty() {
+            return Err(Error::Config("kafka.brokers cannot be empty".to_string()));
+        }
 
-    if config.kafka.sasl_mechanism.is_some()
-        && (config.kafka.sasl_username.is_none() || config.kafka.sasl_password.is_none())
-    {
-        return Err(Error::Config(
-            "kafka.sasl_username and kafka.sasl_password required when sasl_mechanism is set"
-                .to_string(),
-        ));
-    }
+        if config.kafka.group_id.is_empty() {
+            return Err(Error::Config("kafka.group_id cannot be empty".to_string()));
+        }
 
-    if config.archive.destination.is_empty() {
-        return Err(Error::Config(
-            "archive.destination cannot be empty".to_string(),
-        ));
+        if config.kafka.sasl_mechanism.is_some()
+            && (config.kafka.sasl_username.is_none() || config.kafka.sasl_password.is_none())
+        {
+            return Err(Error::Config(
+                "kafka.sasl_username and kafka.sasl_password required when sasl_mechanism is set"
+                    .to_string(),
+            ));
+        }
     }
 
     if config.buffer.flush_bytes == 0 {
@@ -237,13 +259,98 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 
+    /// An archiver with nowhere to write is valid and IDLE, never a refusal:
+    /// the deployment stands it up before an operator names a destination, and
+    /// a refusal there is a crash loop with no probe surface.
     #[test]
-    fn test_empty_destination_fails() {
+    fn test_empty_destination_is_idle_not_invalid() {
         let mut config = Config::default();
         config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.kafka.topics = vec!["default_land".to_string()];
         config.archive.destination = String::new();
 
+        validate_config(&config).expect("an empty destination is not a structural fault");
+        assert_eq!(
+            config.idle_reason(),
+            Some("archive.destination is empty -- nowhere to write")
+        );
+    }
+
+    /// The bus form with neither an explicit topic list nor a discovery
+    /// pattern would subscribe to every topic on the broker, which is never
+    /// what an unconfigured archiver should start doing.
+    #[test]
+    fn test_no_topics_and_no_discovery_pattern_is_idle() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.destination = "file:///tmp/archive".to_string();
+
+        validate_config(&config).expect("an empty topic list is not a structural fault");
+        assert_eq!(
+            config.idle_reason(),
+            Some("no kafka.topics and no kafka.topic_include to discover with")
+        );
+    }
+
+    #[test]
+    fn test_explicit_topics_or_a_discovery_pattern_is_work() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.destination = "file:///tmp/archive".to_string();
+
+        config.kafka.topics = vec!["default_land".to_string()];
+        assert_eq!(config.idle_reason(), None);
+
+        config.kafka.topics = vec![];
+        config.kafka.topic_include = vec!["_land$".to_string()];
+        assert_eq!(config.idle_reason(), None);
+    }
+
+    /// A bound listener has work the moment a sender dials it, and nothing in
+    /// the config says whether one will.
+    #[test]
+    fn test_a_bound_listener_is_never_idle_for_want_of_topics() {
+        let mut config = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        config.archive.destination = "file:///tmp/archive".to_string();
+        config.kafka.brokers = vec![];
+        config.kafka.topics = vec![];
+
+        validate_config(&config).expect("the direct form needs no broker");
+        assert_eq!(config.idle_reason(), None);
+    }
+
+    #[test]
+    fn test_direct_transport_without_a_listen_address_fails() {
+        let mut config = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        config.grpc.listen = None;
+
+        assert!(
+            validate_config(&config).is_err(),
+            "transport: grpc with no listen address can never receive anything"
+        );
+    }
+
+    #[test]
+    fn test_unknown_transport_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.transport = "rabbit".to_string();
+
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_default_transport_is_the_bus() {
+        let config = Config::default();
+        assert_eq!(config.transport, TRANSPORT_KAFKA);
+        assert!(!config.is_direct());
     }
 
     #[test]

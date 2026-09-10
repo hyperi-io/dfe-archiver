@@ -30,14 +30,24 @@ pub use scalo::dlq::DlqConfig;
 /// - `buffer.backpressure_pause_secs` — on each backpressure pause
 ///
 /// **Requires pod restart** — everything else. `Archiver` snapshots the config
-/// at construction into `startup_config`, so a reload of `archive.*`,
-/// `routing.*`, `compression.*` or the `buffer.*` flush thresholds is accepted
-/// and validated but does not reach the running pipeline.
+/// at construction into `startup_config`, so a reload of `transport`,
+/// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*` or the
+/// `buffer.*` flush thresholds is accepted and validated but does not reach the
+/// running pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
+    /// Which transport carries records IN: `kafka` (a broker holds them between
+    /// stages) or `grpc` (the scalo Push listener, point to point). Same two
+    /// spellings as dfe-loader's `transport`, because a deployment sets both
+    /// from the one `kafka.mode` dial.
+    pub transport: String,
+
     /// Kafka consumer configuration
     pub kafka: KafkaConfig,
+
+    /// Push listener configuration, read when `transport` is `grpc`.
+    pub grpc: GrpcConfig,
 
     /// Archive output configuration
     pub archive: ArchiveConfig,
@@ -58,7 +68,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            transport: default_transport(),
             kafka: KafkaConfig::default(),
+            grpc: GrpcConfig::default(),
             archive: ArchiveConfig::default(),
             buffer: BufferConfig::default(),
             routing: RoutingConfig::default(),
@@ -78,6 +90,86 @@ impl Default for Config {
     }
 }
 
+/// `transport` value selecting the bus: a broker holds records between stages.
+pub const TRANSPORT_KAFKA: &str = "kafka";
+
+/// `transport` value selecting the direct form: the scalo Push listener.
+pub const TRANSPORT_GRPC: &str = "grpc";
+
+fn default_transport() -> String {
+    TRANSPORT_KAFKA.to_string()
+}
+
+impl Config {
+    /// Whether records arrive on the Push listener rather than a broker.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.transport == TRANSPORT_GRPC
+    }
+
+    /// Why this configuration gives the archiver nothing to do, or `None` when
+    /// it has work.
+    ///
+    /// THE emptiness predicate -- the one place that decides idle, read by
+    /// `ServiceApp::work_state` and by the tests. Structural faults are
+    /// `validate_config`'s; this answers only "valid, but nothing to archive".
+    ///
+    /// A bound listener always has work: a sender can arrive at any moment and
+    /// nothing in the config says whether one will. So the direct form idles
+    /// only for a missing destination.
+    #[must_use]
+    pub fn idle_reason(&self) -> Option<&'static str> {
+        if self.archive.destination.trim().is_empty() {
+            return Some("archive.destination is empty -- nowhere to write");
+        }
+        if !self.is_direct() && self.kafka.topics.is_empty() && self.kafka.topic_include.is_empty()
+        {
+            return Some("no kafka.topics and no kafka.topic_include to discover with");
+        }
+        None
+    }
+}
+
+/// Push listener configuration for the direct transport.
+///
+/// Mirrors dfe-loader's `grpc` block key for key, because both stages receive
+/// the same scalo Push RPC and an operator reading one config should not have
+/// to learn a second set of names.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GrpcConfig {
+    /// Listen address, e.g. `0.0.0.0:6000`. Required when `transport` is `grpc`.
+    pub listen: Option<String>,
+
+    /// Records buffered from incoming RPCs before the sender is held.
+    pub recv_buffer_size: usize,
+
+    /// Receive timeout in milliseconds (0 = non-blocking).
+    pub recv_timeout_ms: u64,
+
+    /// Maximum message size in bytes.
+    pub max_message_size: usize,
+
+    /// Enable gzip compression for gRPC messages.
+    pub compression: bool,
+
+    /// Archive destination key for a record whose sender set no routing key.
+    pub default_topic: String,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            recv_buffer_size: 10_000,
+            recv_timeout_ms: 100,
+            max_message_size: 16 * 1024 * 1024,
+            compression: false,
+            default_topic: "default_land".to_string(),
+        }
+    }
+}
+
 /// Kafka consumer configuration
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -88,8 +180,23 @@ pub struct KafkaConfig {
     /// Consumer group ID
     pub group_id: String,
 
-    /// Topics to consume
+    /// Topics to consume. Empty turns on scalo's broker-side auto-discovery,
+    /// filtered by `topic_include`/`topic_exclude` and refreshed every
+    /// `topic_refresh_secs`, so a source added after this pod started is
+    /// archived without a restart.
     pub topics: Vec<String>,
+
+    /// Regex patterns a discovered topic must match (OR). Empty means every
+    /// topic the broker holds that `topic_exclude` does not drop.
+    pub topic_include: Vec<String>,
+
+    /// Regex patterns that drop a discovered topic (OR). Exclude wins over
+    /// include. Defaults to scalo's list, which already drops the DLQ and
+    /// Kafka's own internal topics.
+    pub topic_exclude: Vec<String>,
+
+    /// How often the discovered topic list is re-read from the broker.
+    pub topic_refresh_secs: u64,
 
     /// SASL mechanism (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)
     pub sasl_mechanism: Option<String>,
@@ -130,6 +237,11 @@ impl Default for KafkaConfig {
             brokers: vec!["localhost:9092".to_string()],
             group_id: "dfe-archiver".to_string(),
             topics: vec![],
+            topic_include: vec![],
+            // Taken from scalo rather than restated, so a new internal-topic
+            // pattern reaches this app with the transport it belongs to.
+            topic_exclude: scalo::transport::KafkaConfig::default().topic_exclude,
+            topic_refresh_secs: scalo::transport::KafkaConfig::default().topic_refresh_secs,
             sasl_mechanism: None,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_username: None,
@@ -147,7 +259,10 @@ impl Default for KafkaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ArchiveConfig {
-    /// Destination URL (file://, s3://, gs://, az://, minio://)
+    /// Destination URL (file://, s3://, gs://, az://, minio://). Empty until an
+    /// operator names one, which is an idle archiver rather than a default
+    /// path: a container-local directory nobody asked for looks like it is
+    /// archiving and loses every file when the pod is replaced.
     pub destination: String,
 
     /// Path template with placeholders: {topic}, {date}, {hour}, etc.
@@ -209,7 +324,7 @@ impl ArchiveConfig {
 impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {
-            destination: "file:///var/data/archive".to_string(),
+            destination: String::new(),
             // Topic is already prepended as a directory by the archiver (per-topic writers).
             // Do not include {topic} here — it would result in double topic paths.
             path_template: "{year}/{month}/{day}/{hour}".to_string(),
@@ -355,7 +470,10 @@ impl Default for CompressionConfig {
 /// Apply flat environment variable overrides.
 ///
 /// Uses multiple prefixes to preserve the existing env var contract:
-/// `KAFKA_*`, `ARCHIVER_*`, `DLQ_*`, `S3_*`.
+/// `KAFKA_*`, `ARCHIVER_*`, `DLQ_*`, `S3_*`. Single underscore throughout,
+/// because these are the archiver's own sections. The double-underscore names
+/// (`ARCHIVER_VERSION_CHECK__ENABLED` and the rest) belong to the scalo runtime
+/// sections and reach them through the cascade, never through here.
 ///
 /// CRITICAL: These env var names are the contract with dfe-engine.
 /// Do NOT rename them.
@@ -366,7 +484,28 @@ impl Default for CompressionConfig {
 /// cgroup) as invalid.
 impl ApplyFlatEnv for Config {
     fn apply_flat_env(&mut self, _prefix: &str) {
-        // Kafka transport
+        self.apply_transport_env();
+        self.apply_kafka_env();
+        self.apply_dlq_env();
+        self.apply_archive_env();
+    }
+}
+
+impl Config {
+    /// Which transport carries records in, and where its listener binds. The
+    /// chart sets these from the deployment-wide `kafka.mode` dial, so a
+    /// brokerless profile authors no config blob to switch the archiver over.
+    fn apply_transport_env(&mut self) {
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "TRANSPORT") {
+            self.transport = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "GRPC_LISTEN") {
+            self.grpc.listen = Some(v);
+        }
+    }
+
+    /// The broker, its credentials, and which topics to read.
+    fn apply_kafka_env(&mut self) {
         if let Some(v) = flat_env::flat_env_list("KAFKA", "BROKERS") {
             self.kafka.brokers = v;
         }
@@ -375,6 +514,15 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPICS") {
             self.kafka.topics = v;
+        }
+        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPIC_INCLUDE") {
+            self.kafka.topic_include = v;
+        }
+        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPIC_EXCLUDE") {
+            self.kafka.topic_exclude = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u64>("KAFKA", "TOPIC_REFRESH_SECS") {
+            self.kafka.topic_refresh_secs = v;
         }
         if let Some(v) = flat_env::flat_env_string("KAFKA", "SASL_MECHANISM") {
             self.kafka.sasl_mechanism = Some(v);
@@ -395,10 +543,11 @@ impl ApplyFlatEnv for Config {
             self.kafka.allow_insecure_transport =
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         }
+    }
 
-        // DLQ (fleet-uniform names: DLQ_ENABLED / DLQ_TOPIC / DLQ_MODE).
-        // TOPIC routes every entry to one fixed topic (the per-app standard,
-        // e.g. dfe_archiver_dlq) rather than per-destination suffix topics.
+    /// Fleet-uniform DLQ names. TOPIC routes every entry to one fixed topic
+    /// (the per-app standard) rather than per-destination suffix topics.
+    fn apply_dlq_env(&mut self) {
         if let Some(v) = flat_env::flat_env_bool("DLQ", "ENABLED") {
             self.dlq.enabled = v;
         }
@@ -422,8 +571,11 @@ impl ApplyFlatEnv for Config {
                 }
             };
         }
+    }
 
-        // Archive
+    /// Where archives are written, how they are rolled and compressed, plus the
+    /// metrics address and the S3 credentials the same operator supplies.
+    fn apply_archive_env(&mut self) {
         if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
             self.archive.destination = v;
         }
@@ -494,6 +646,7 @@ impl Config {
     pub fn register_in_registry(&self) {
         use scalo::config::registry;
         registry::register("kafka", &self.kafka);
+        registry::register("grpc", &self.grpc);
         registry::register("archive", &self.archive);
         registry::register("buffer", &self.buffer);
         registry::register("routing", &self.routing);

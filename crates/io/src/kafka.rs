@@ -12,22 +12,10 @@ use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
 use rdkafka::consumer::Consumer;
 use scalo::SelfRegulationGovernor;
-use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
 use tracing::{debug, info, trace};
 
-/// A received block: the passing messages plus any inbound-filter DLQ entries.
-///
-/// The DLQ entries are surfaced (never silently dropped) so the orchestrator
-/// can route them onward. The archiver configures no inbound scalo filters,
-/// so `dlq_entries` is empty in practice -- but the no-silent-drop contract is
-/// honoured regardless.
-pub struct ReceivedBatch {
-    /// Passing messages, each carrying its own commit token.
-    pub messages: Vec<KafkaMessage>,
-    /// Inbound-filter DLQ entries carried forward from the transport.
-    pub dlq_entries: Vec<FilteredDlqEntry>,
-}
+use crate::transport::ReceivedBatch;
 
 /// Transport adapter wrapping the scalo Kafka transport
 pub struct TransportAdapter {
@@ -62,7 +50,7 @@ impl TransportAdapter {
         let hs_config = convert_config(config);
         let transport = KafkaTransport::new(&hs_config)
             .await
-            .map_err(|e| Error::kafka_with("transport creation failed", e))?;
+            .map_err(|e| Error::transport_with("transport creation failed", e))?;
 
         // Attach the self-regulation pause-partitions gate over the runtime's
         // shared pressure (the gate is evaluated automatically inside `recv`).
@@ -91,7 +79,7 @@ impl TransportAdapter {
             .transport
             .recv(max_messages)
             .await
-            .map_err(|e| Error::kafka_with("recv failed", e))?;
+            .map_err(|e| Error::transport_with("recv failed", e))?;
 
         debug!(
             count = batch.records.len(),
@@ -153,7 +141,7 @@ impl TransportAdapter {
         self.transport
             .commit(&tokens)
             .await
-            .map_err(|e| Error::kafka_with("commit failed", e))?;
+            .map_err(|e| Error::transport_with("commit failed", e))?;
 
         debug!(count, "Committed offsets to Kafka");
         Ok(())
@@ -189,7 +177,7 @@ impl TransportAdapter {
         self.transport
             .close()
             .await
-            .map_err(|e| Error::kafka_with("close failed", e))?;
+            .map_err(|e| Error::transport_with("close failed", e))?;
         Ok(())
     }
 }
@@ -253,13 +241,21 @@ impl KafkaStatsEmitter {
         let consumer: rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext> =
             client_config
                 .create_with_context(stats_ctx)
-                .map_err(|e| Error::kafka_with("stats consumer creation failed", e))?;
+                .map_err(|e| Error::transport_with("stats consumer creation failed", e))?;
 
-        // Subscribe to same topics so we get partition-level lag stats
-        let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
-        consumer
-            .subscribe(&topic_refs)
-            .map_err(|e| Error::kafka_with("stats subscribe failed", e))?;
+        // Subscribe to same topics so we get partition-level lag stats. An
+        // empty list is auto-discovery, which this sidecar does not run: it
+        // still reports the global and per-broker stats, without per-partition
+        // lag. `assigned_lag()` reads the main consumer, so the KEDA signal is
+        // unaffected either way.
+        if config.topics.is_empty() {
+            info!("Kafka topics are discovered, so the stats sidecar reports no per-partition lag");
+        } else {
+            let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
+            consumer
+                .subscribe(&topic_refs)
+                .map_err(|e| Error::transport_with("stats subscribe failed", e))?;
+        }
 
         let consumer = std::sync::Arc::new(consumer);
 
@@ -311,6 +307,20 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
     librdkafka_overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
     scalo::transport::KafkaConfig {
+        // An empty topic list discovers instead, so a source added after this
+        // pod started is archived without a restart; scalo's refresh loop
+        // subscribes when the first matching topic appears.
+        auto_discover: config.topics.is_empty(),
+        topic_include: config.topic_include.clone(),
+        topic_exclude: config.topic_exclude.clone(),
+        topic_refresh_secs: config.topic_refresh_secs,
+        // The archiver keeps the record as it arrived, so a source with both
+        // topics is archived from the landing one -- the reverse of the
+        // loader's rule.
+        topic_suppression_rules: vec![scalo::transport::kafka::SuppressionRule {
+            preferred_suffix: "_land".to_string(),
+            suppressed_suffix: "_load".to_string(),
+        }],
         // Archiver is consume-only (Kafka -> storage). scalo 2.9 KafkaConfig is
         // profile-based (no `role` field): a non-empty `group` + subscribed
         // `topics` make this a consumer; no produce calls means no idle producer

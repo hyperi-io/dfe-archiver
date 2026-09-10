@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.20](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.19...v1.7.20) (2026-09-09)
+
+### Bug Fixes
+
+* the archiver idles until configured and receives on direct ([732f1be](https://github.com/hyperi-io/dfe-archiver/commit/732f1be878021a85ea4ceab30d94dde08c5786ac))
+
 ## [1.7.19](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.18...v1.7.19) (2026-08-28)
 
 ### Bug Fixes

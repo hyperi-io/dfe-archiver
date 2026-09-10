@@ -17,17 +17,18 @@ High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 1. [Building & Artifacts](#building--artifacts)
 2. [Overview](#overview)
 3. [Architecture](#architecture)
-4. [Data Flow](#data-flow)
-5. [Tiered Buffer Design](#tiered-buffer-design)
-6. [At-Least-Once Delivery](#at-least-once-delivery)
-7. [Rolling Policy](#rolling-policy)
-8. [Disk Protection](#disk-protection)
-9. [Routing](#routing)
-10. [Compression](#compression)
-11. [Storage Backends](#storage-backends)
-12. [Configuration](#configuration)
-13. [Metrics](#metrics)
-14. [Deployment](#deployment)
+4. [Inbound transport](#inbound-transport)
+5. [Data Flow](#data-flow)
+6. [Tiered Buffer Design](#tiered-buffer-design)
+7. [At-Least-Once Delivery](#at-least-once-delivery)
+8. [Rolling Policy](#rolling-policy)
+9. [Disk Protection](#disk-protection)
+10. [Routing](#routing)
+11. [Compression](#compression)
+12. [Storage Backends](#storage-backends)
+13. [Configuration](#configuration)
+14. [Metrics](#metrics)
+15. [Deployment](#deployment)
 
 ---
 
@@ -226,17 +227,53 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 
 ---
 
+## Inbound transport
+
+`transport` selects how records reach the archiver, and it is the only thing
+about the pipeline that differs between the two forms.
+
+| `transport` | How records arrive | Release point |
+|---|---|---|
+| `kafka` | a consumer group over the landing topics | broker offset commit after a confirmed write |
+| `grpc` | the scalo Push listener, from the previous stage | the Push RPC response |
+
+On `kafka` an empty `topics` list turns on broker-side discovery: the topic set
+is re-read every `topic_refresh_secs` and filtered by `topic_include` and
+`topic_exclude`, so a source added later is archived without a restart. Where a
+source has both a landing and a transformed topic, discovery keeps the landing
+one -- the archiver's job is the record as it arrived, which is the reverse of
+the loader's preference.
+
+`grpc` exists so a deployment with no broker can still archive: the previous
+stage fans a matched record out to the loader and to the archiver over the same
+Push RPC. A push stream keeps no backlog, so the KEDA composite drops its
+`kafka_lag` term there rather than reading a false zero.
+
+### Idle until configured
+
+An archiver with no destination, or on the bus with no topics and no discovery
+pattern, has nothing to do. It starts anyway: it stays Ready, serves health and
+metrics, opens no broker connection and binds no listener, reports the
+`work_config` health component Degraded with the reason, and holds
+`pipeline_idle` at 1. The first config change that gives it work starts the
+pipeline with no restart. That behaviour is scalo's (`scalo::lifecycle`); the
+predicate is this app's, in `Config::idle_reason`.
+
+Structural faults are the other half of the split and still refuse loudly: an
+unknown transport, a `grpc` form with no listen address, a bus form with no
+brokers, a codec or routing mode that does not exist.
+
 ## Data Flow
 
 ### Message Processing Pipeline
 
-1. **Kafka Consumption**: Batch receive from Kafka (10K messages default)
+1. **Ingest**: Batch receive from the configured transport (10K messages default)
 2. **Routing**: Determine destination based on topic or JSON expression
 3. **Buffering**: Buffer in hot memory tier, spill to disk if LRU evicted
 4. **Flush Triggers**: Size (64MB), records (100K), or age (60s)
 5. **Compression**: Compress batch with configured codec
 6. **Storage Write**: Write compressed data to storage backend
-7. **Offset Commit**: Commit Kafka offsets only after confirmed write
+7. **Release**: Commit offsets only after a confirmed write (a no-op on `grpc`)
 
 ### Critical Path Optimizations
 
@@ -272,7 +309,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 ### Tier 1: Hot Buffers
 
 - **Purpose**: Fast path for active destinations
-- **Capacity**: 64 buffers × 1MB each = 64MB max memory
+- **Capacity**: 64 buffers x 1MB each = 64MB max memory
 - **Eviction**: LRU when capacity exceeded
 - **Flush Triggers**: Size (1MB), age (30s)
 
@@ -469,7 +506,7 @@ routing:
     - tags.category
 ```
 
-Message: `{"tags": {"category": "security"}}` → Destination: `events/security/`
+Message: `{"tags": {"category": "security"}}` -> Destination: `events/security/`
 
 ### Default Segment
 
@@ -519,7 +556,7 @@ compression:
 
 ```yaml
 archive:
-  destination: file:///var/data/archive
+  destination: file:///var/data/archive   # a mounted volume, never the rootfs
 ```
 
 ### AWS S3
@@ -537,7 +574,7 @@ instance metadata are picked up automatically.
 
 1. Config-level `access_key_id` / `secret_access_key` (highest priority)
 2. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars
-3. Web identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` — used by EKS IRSA)
+3. Web identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` -- used by EKS IRSA)
 4. EC2/ECS instance metadata (IMDS)
 
 #### Deployment Scenarios
@@ -654,13 +691,18 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
 | `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated) | (required) |
+| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
+| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
 | `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
 | `KAFKA_SASL_USER` | SASL username | (none) |
 | `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output destination URL | `file:///var/data/archive` |
+| `ARCHIVER_DESTINATION` | Output destination URL | (none -- idles) |
 | `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
 | `ARCHIVER_MULTIPART_CHUNK_SIZE` | Multipart upload chunk size | `8388608` (8MB) |
 | `S3_BUCKET` | S3 bucket name | (from config) |

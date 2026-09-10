@@ -64,7 +64,7 @@ cargo build --release
 # Run with environment variables
 KAFKA_BROKERS=localhost:9092 \
 KAFKA_TOPICS=events \
-ARCHIVER_DESTINATION=file:///var/data/archive \
+ARCHIVER_DESTINATION=file://./data/archive \
 ./target/release/dfe-archiver
 
 # Or with config file
@@ -85,13 +85,18 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
 | `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated) | (required) |
+| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
+| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
 | `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
 | `KAFKA_SASL_USER` | SASL username | (none) |
 | `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output URL | `file:///var/data/archive` |
+| `ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
 | `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
 | `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
 | `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
@@ -102,16 +107,35 @@ Configuration follows a cascade (highest to lowest priority):
 The memory guard, the metrics listener and the scaling-pressure engine belong to
 the scalo runtime and are built before the config file is read, so they are set
 by the variables above (or `--metrics-addr`), never by a `memory:`, `metrics:`
-or `scaling:` block in the config file.
+or `scaling:` block in the config file. The archiver's own sections take a
+single underscore; the double-underscore names belong to those scalo sections
+and reach them through the cascade.
+
+### Which transport, and idling until configured
+
+`transport` picks how records arrive. On `kafka` the archiver joins a consumer
+group and reads the landing topics; on `grpc` it binds the scalo Push listener
+and the previous stage sends to it point to point, which is how a deployment
+with no broker still archives. A deployment sets it from the same dial that
+decides the rest of the stack's transport, so it is not normally hand-authored.
+
+The archiver starts, passes readiness and serves health and metrics with no
+work to do -- no destination, or no topics and no discovery pattern. It opens
+no broker connection and binds no listener while idle, reports the
+`work_config` health component Degraded with the reason, holds the
+`pipeline_idle` gauge at 1, and starts the moment a config change gives it
+work. `Config::idle_reason` is the whole predicate.
 
 ### Config File Example
 
 ```yaml
+transport: kafka               # or "grpc" for the Push listener
+
 kafka:
   brokers:
     - kafka:9092
   group_id: dfe-archiver
-  topics:
+  topics:                      # omit to discover, filtered by topic_include
     - events
     - logs
   sasl_mechanism: SCRAM-SHA-256
@@ -150,10 +174,11 @@ or file polling (5-second interval).
 - `buffer.backpressure_pause_secs` - re-read on each backpressure pause
 
 **Requires pod restart** - everything else. The pipeline snapshots the config at
-startup, so `archive.*`, `routing.*`, `compression.*` and the rest of `buffer.*`
-(the flush thresholds included) keep their startup values until the process
-restarts. A reload updates the shared config and passes validation, so a change
-to one of those is accepted and then has no effect until the roll.
+startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `routing.*`,
+`compression.*` and the rest of `buffer.*` (the flush thresholds included) keep
+their startup values until the process restarts. A reload updates the shared
+config and passes validation, so a change to one of those is accepted and then
+has no effect until the roll.
 
 ## Storage Backends
 
