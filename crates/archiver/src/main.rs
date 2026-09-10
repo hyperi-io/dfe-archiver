@@ -200,9 +200,10 @@ impl ServiceApp for App {
         );
         let archiver_run = Arc::clone(&archiver);
 
-        // Verify Kafka connection
+        // Verify the inbound transport and probe the archive sink.
         archiver
             .check_connection()
+            .await
             .map_err(|e| CliError::Service(e.to_string()))?;
 
         // Register health checks. Named for the role, not for one transport:
@@ -214,6 +215,13 @@ impl ServiceApp for App {
             } else {
                 scalo::health::HealthStatus::Unhealthy
             }
+        });
+
+        // The archive sink, reported separately so an unreachable bucket shows
+        // on the health endpoint instead of only in the scaling gauge.
+        let archiver_sink = Arc::clone(&archiver);
+        scalo::health::HealthRegistry::register("archive_sink", move || {
+            archiver_sink.sink_health()
         });
 
         // Use runtime's shutdown token (signal handler already installed with pre-stop delay)

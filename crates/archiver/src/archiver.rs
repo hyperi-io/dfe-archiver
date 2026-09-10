@@ -23,6 +23,7 @@ use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver_core::buffer::TieredBufferManager;
 use dfe_archiver_core::compression::compressor_for;
 use dfe_archiver_core::routing::Router;
+use dfe_archiver_core::storage::probe_sink;
 use dfe_archiver_core::types::KafkaOffset;
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
@@ -232,13 +233,47 @@ impl Archiver {
         })
     }
 
-    /// Check the inbound transport (it connects or binds on creation).
-    pub fn check_connection(&self) -> Result<()> {
+    /// Check the inbound transport (it connects or binds on creation) and prove
+    /// the archive sink answers.
+    ///
+    /// # Errors
+    /// Returns an error when the inbound transport is not serving.
+    pub async fn check_connection(&self) -> Result<()> {
         if !self.transport.is_healthy() {
             return Err(Error::transport("inbound transport is not healthy"));
         }
         info!(transport = %self.startup_config.transport, "Inbound transport verified");
+        self.verify_sink().await;
         Ok(())
+    }
+
+    /// List one object under the configured prefix and latch what came back.
+    ///
+    /// A sink that is out never blocks startup -- refusing to start brings no
+    /// object store back, and the archiver keeps consuming, buffering and
+    /// dead-lettering while it recovers.
+    async fn verify_sink(&self) {
+        let destination = &self.startup_config.archive.destination;
+        let backend = self.startup_config.archive.backend_name();
+        let probe = match create_backend(&self.startup_config.archive) {
+            Ok(client) => probe_sink(client.as_ref()).await,
+            Err(e) => Err(e),
+        };
+        match probe {
+            Ok(()) => {
+                info!(backend, destination = %destination, "Archive sink verified");
+                self.set_sink_circuit(false);
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    backend,
+                    destination = %destination,
+                    "Archive sink did not answer -- degraded until a write succeeds"
+                );
+                self.set_sink_circuit(true);
+            }
+        }
     }
 
     /// Run the main archiver loop
@@ -569,16 +604,21 @@ impl Archiver {
     /// moment any write succeeds. The engine zeroes the composite while the
     /// circuit is open (more pods cannot relieve a dead object store).
     fn update_sink_circuit(&self, cycle_ok: usize, cycle_err: usize) {
-        if cycle_ok > 0 {
-            self.sink_circuit_open
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+        let open = if cycle_ok > 0 {
+            false
         } else if cycle_err > 0 {
+            true
+        } else {
             self.sink_circuit_open
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        let open = self
-            .sink_circuit_open
-            .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        self.set_sink_circuit(open);
+    }
+
+    /// Latch the sink circuit and publish it everywhere it is read.
+    fn set_sink_circuit(&self, open: bool) {
+        self.sink_circuit_open
+            .store(open, std::sync::atomic::Ordering::Relaxed);
         // Feed the unified ScalingPressure circuit gate directly -- KEDA reads
         // the resulting /scaling/pressure (0.0 while open).
         self.scaling.set_circuit_open(open);
@@ -907,6 +947,23 @@ impl Archiver {
     /// Sync transport health check (for `HealthRegistry` callback).
     pub fn is_transport_healthy(&self) -> bool {
         self.transport.is_healthy()
+    }
+
+    /// Archive-sink status for the `HealthRegistry` callback, seeded by the
+    /// startup probe and driven thereafter by each write cycle's outcome.
+    ///
+    /// Degraded rather than Unhealthy: taking this pod out of readiness brings
+    /// no object store back, and the archiver keeps consuming, buffering and
+    /// dead-lettering while the sink is out.
+    pub fn sink_health(&self) -> scalo::health::HealthStatus {
+        if self
+            .sink_circuit_open
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            scalo::health::HealthStatus::Degraded
+        } else {
+            scalo::health::HealthStatus::Healthy
+        }
     }
 }
 
