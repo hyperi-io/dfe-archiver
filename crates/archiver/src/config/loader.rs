@@ -160,6 +160,14 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    // The tiered buffer creates this directory at construction, so an empty
+    // value fails the boot with an errno the operator cannot place.
+    if config.buffer.spool_dir.trim().is_empty() {
+        return Err(Error::Config(
+            "buffer.spool_dir cannot be empty".to_string(),
+        ));
+    }
+
     if config.archive.multipart_chunk_size > 0
         && config.archive.multipart_chunk_size < 5 * 1024 * 1024
     {
@@ -248,6 +256,19 @@ mod tests {
         config.normalize();
 
         assert_eq!(config.kafka.sasl_mechanism, Some("PLAIN".to_string()));
+    }
+
+    #[test]
+    fn test_empty_spool_dir_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.spool_dir = String::new();
+
+        let err = validate_config(&config).expect_err("empty spool_dir should fail");
+        assert!(
+            err.to_string().contains("buffer.spool_dir"),
+            "error must name the setting: {err}"
+        );
     }
 
     #[test]

@@ -103,6 +103,21 @@ pub struct Archiver {
     log_guards: LogSpamGuards,
 }
 
+/// Map the operator's `buffer` section onto the tiered buffer's own config.
+fn buffer_config(config: &Config) -> dfe_archiver_core::buffer::TieredBufferConfig {
+    dfe_archiver_core::buffer::TieredBufferConfig {
+        max_hot_buffers: 64,
+        hot_buffer_size: 1024 * 1024, // 1MB
+        hot_buffer_age_secs: config.buffer.flush_age_secs,
+        spool_dir: config.buffer.spool_dir.clone().into(),
+        max_writers: config.buffer.writer_parallelism,
+        staging_batch_size: config.buffer.flush_bytes,
+        max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
+        min_free_disk_bytes: 1024 * 1024 * 1024,  // 1GB
+        spool_compression: true,
+    }
+}
+
 impl Archiver {
     /// Create new archiver from shared configuration.
     ///
@@ -136,18 +151,7 @@ impl Archiver {
 
         let router = Router::new(config.routing.clone());
 
-        let buffer_config = dfe_archiver_core::buffer::TieredBufferConfig {
-            max_hot_buffers: 64,
-            hot_buffer_size: 1024 * 1024, // 1MB
-            hot_buffer_age_secs: config.buffer.flush_age_secs,
-            spool_dir: ".tmp/archiver-spool".into(),
-            max_writers: config.buffer.writer_parallelism,
-            staging_batch_size: config.buffer.flush_bytes,
-            max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-            min_free_disk_bytes: 1024 * 1024 * 1024,  // 1GB
-            spool_compression: true,
-        };
-        let buffer = TieredBufferManager::new(buffer_config)?;
+        let buffer = TieredBufferManager::new(buffer_config(&config))?;
 
         // The runtime's unified ScalingPressure, so the archiver's loops drive
         // the engine that emits the KEDA gauge. Its thresholds come from the
@@ -970,8 +974,11 @@ impl Archiver {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use super::buffer_config;
     use crate::config::validate_config;
+    use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
     use dfe_archiver_core::config::Config;
+    use std::path::Path;
 
     #[test]
     fn test_cleared_brokers_fails_validation() {
@@ -980,6 +987,32 @@ mod tests {
         assert!(
             validate_config(&config).is_err(),
             "empty brokers should fail"
+        );
+    }
+
+    /// The configured spool has to be the directory the buffer creates, not a
+    /// path compiled into the binary.
+    #[test]
+    fn test_configured_spool_dir_reaches_the_buffer() {
+        let mut config = Config::default();
+        config.buffer.spool_dir = "/srv/dfe/spool".to_string();
+
+        assert_eq!(
+            buffer_config(&config).spool_dir,
+            Path::new("/srv/dfe/spool"),
+        );
+    }
+
+    /// A default deployment writes under the path the image pre-creates, and
+    /// an absolute one, because the container working directory is root-owned.
+    #[test]
+    fn test_default_spool_dir_is_the_absolute_image_path() {
+        let config = Config::default();
+
+        assert_eq!(config.buffer.spool_dir, DEFAULT_SPOOL_DIR);
+        assert_eq!(
+            buffer_config(&config).spool_dir,
+            Path::new("/var/spool/dfe/archiver"),
         );
     }
 }

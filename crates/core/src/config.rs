@@ -6,6 +6,7 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use crate::buffer::DEFAULT_SPOOL_DIR;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
@@ -404,6 +405,10 @@ pub struct BufferConfig {
     /// Lower values cycle faster but burn more CPU when downstream is slow;
     /// higher values let buffers drain but increase tail latency.
     pub backpressure_pause_secs: u64,
+
+    /// Tier 2 spool directory, created at startup. Absolute because a relative
+    /// path resolves under the container WORKDIR, which appuser cannot write.
+    pub spool_dir: String,
 }
 
 impl Default for BufferConfig {
@@ -414,6 +419,7 @@ impl Default for BufferConfig {
             flush_records: 100_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            spool_dir: DEFAULT_SPOOL_DIR.to_string(),
         }
     }
 }
@@ -573,8 +579,9 @@ impl Config {
         }
     }
 
-    /// Where archives are written, how they are rolled and compressed, plus the
-    /// metrics address and the S3 credentials the same operator supplies.
+    /// Where archives are written, how they are rolled and compressed, where
+    /// the tier-2 spool lives, plus the metrics address and the S3 credentials
+    /// the same operator supplies.
     fn apply_archive_env(&mut self) {
         if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
             self.archive.destination = v;
@@ -593,6 +600,9 @@ impl Config {
         }
         if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MULTIPART_CHUNK_SIZE") {
             self.archive.multipart_chunk_size = v;
+        }
+        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "SPOOL_DIR") {
+            self.buffer.spool_dir = v;
         }
 
         // S3

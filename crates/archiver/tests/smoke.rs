@@ -44,6 +44,7 @@ fn smoke_startup_boots_with_default_config() {
         flush_records: config.buffer.flush_records,
         writer_parallelism: config.buffer.writer_parallelism,
         backpressure_pause_secs: config.buffer.backpressure_pause_secs,
+        spool_dir: config.buffer.spool_dir.clone(),
     });
 
     // Compressor

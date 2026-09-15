@@ -55,6 +55,9 @@ fn env_example_assignments() -> Vec<(String, String)> {
 /// 3. `.env.example` starts the binary. It says `cp .env.example .env`, and
 ///    dotenvy loads that file before config resolves, so every name in it is a
 ///    live override.
+/// 4. `ARCHIVER_SPOOL_DIR` moves the tier-2 spool. It is the deployment's only
+///    way off the default path, and the image is the only place that path
+///    exists, so a name that reaches nothing is a boot failure in a container.
 #[test]
 fn deployment_env_surface_reaches_the_settings_it_names() {
     let version_check_var = format!(
@@ -101,6 +104,7 @@ fn deployment_env_surface_reaches_the_settings_it_names() {
         // Beyond "it validated": .env.example's own ARCHIVER_DESTINATION has to
         // be the destination, or none of the assignments reached the config.
         assert_eq!(config.archive.destination, "file:///tmp/dfe-archiver-test");
+        assert_eq!(config.buffer.spool_dir, "/tmp/dfe-archiver-spool");
     });
 }
 
