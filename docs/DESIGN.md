@@ -328,7 +328,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 | `max_hot_buffers` | 64 | Maximum Tier 1 buffers |
 | `hot_buffer_size` | 1MB | Per-buffer size limit |
 | `hot_buffer_age_secs` | 30 | Age-based flush trigger |
-| `spool_dir` | `.tmp/archiver-spool` | Tier 2 spool directory |
+| `spool_dir` | `/var/spool/dfe/archiver` | Tier 2 spool directory (`buffer.spool_dir` / `ARCHIVER_SPOOL_DIR`) |
 | `max_writers` | 8 | Concurrent archive writers |
 | `staging_batch_size` | 64MB | Batch size for archive write |
 | `max_spool_bytes` | 10GB | Spool size limit (disk protection) |
@@ -848,8 +848,8 @@ docker run -d \
   -e KAFKA_BROKERS=kafka:9092 \
   -e KAFKA_TOPICS=events \
   -e ARCHIVER_DESTINATION=s3://bucket/archive \
-  -v /data/spool:/tmp/archiver-spool \
-  hyperi/dfe-archiver:latest
+  -v /data/spool:/var/spool/dfe/archiver \
+  ghcr.io/hyperi-io/dfe-archiver:latest
 ```
 
 ---

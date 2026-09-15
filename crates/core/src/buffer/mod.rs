@@ -10,4 +10,6 @@ mod manager;
 mod tiered;
 
 pub use manager::BufferManager;
-pub use tiered::{BufferStatsSnapshot, StagedBatch, TieredBufferConfig, TieredBufferManager};
+pub use tiered::{
+    BufferStatsSnapshot, DEFAULT_SPOOL_DIR, StagedBatch, TieredBufferConfig, TieredBufferManager,
+};

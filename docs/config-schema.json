@@ -72,7 +72,8 @@
         "flush_age_secs": 60,
         "flush_records": 100000,
         "writer_parallelism": 4,
-        "backpressure_pause_secs": 5
+        "backpressure_pause_secs": 5,
+        "spool_dir": "/var/spool/dfe/archiver"
       }
     },
     "routing": {
@@ -569,6 +570,11 @@
           "format": "uint64",
           "minimum": 0,
           "default": 5
+        },
+        "spool_dir": {
+          "description": "Tier 2 spool directory, created at startup. Absolute because a relative\npath resolves under the container WORKDIR, which appuser cannot write.",
+          "type": "string",
+          "default": "/var/spool/dfe/archiver"
         }
       }
     },

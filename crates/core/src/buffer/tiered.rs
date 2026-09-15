@@ -29,6 +29,10 @@ struct LogSpamGuards {
     disk_low: AtomicBool,
 }
 
+/// Default tier 2 spool directory, and the path the image pre-creates for
+/// `appuser`. A relative default resolves under the root-owned WORKDIR.
+pub const DEFAULT_SPOOL_DIR: &str = "/var/spool/dfe/archiver";
+
 /// Configuration for tiered buffer manager
 #[derive(Debug, Clone)]
 pub struct TieredBufferConfig {
@@ -66,7 +70,7 @@ impl Default for TieredBufferConfig {
             max_hot_buffers: 64,
             hot_buffer_size: 1024 * 1024,
             hot_buffer_age_secs: 30,
-            spool_dir: PathBuf::from(".tmp/archiver-spool"),
+            spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
             max_writers: 8,
             staging_batch_size: 64 * 1024 * 1024,
             max_spool_bytes: 10 * 1024 * 1024 * 1024,
@@ -502,14 +506,28 @@ mod tests {
         KafkaMessage::for_test(payload.to_vec(), topic, 0, offset)
     }
 
-    #[test]
-    fn test_lru_eviction() {
+    /// The manager creates its spool on construction, so every test gets its
+    /// own directory rather than the absolute default the image provides.
+    /// Hold the returned `TempDir` for the test body -- dropping it removes
+    /// the spool.
+    fn spooled(
+        max_hot_buffers: usize,
+        hot_buffer_size: usize,
+    ) -> (tempfile::TempDir, TieredBufferConfig) {
+        let spool = tempfile::tempdir().expect("tempdir");
         let config = TieredBufferConfig {
-            max_hot_buffers: 2,
-            hot_buffer_size: 10000,
+            max_hot_buffers,
+            hot_buffer_size,
             hot_buffer_age_secs: 3600,
+            spool_dir: spool.path().to_path_buf(),
             ..Default::default()
         };
+        (spool, config)
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let (_spool, config) = spooled(2, 10000);
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
@@ -532,12 +550,7 @@ mod tests {
 
     #[test]
     fn test_size_based_flush() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 10,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 10);
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
@@ -554,12 +567,7 @@ mod tests {
 
     #[test]
     fn test_flush_all() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 10000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 10000);
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
@@ -579,12 +587,7 @@ mod tests {
 
     #[test]
     fn test_lru_access_order() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 3,
-            hot_buffer_size: 100_000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(3, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         manager.push("a", make_message(b"1", "t", 0)).expect("push");
         manager.push("b", make_message(b"2", "t", 1)).expect("push");
@@ -597,12 +600,7 @@ mod tests {
 
     #[test]
     fn test_lru_repeated_access_no_eviction() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 2,
-            hot_buffer_size: 100_000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(2, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         manager.push("a", make_message(b"1", "t", 0)).expect("push");
         manager.push("b", make_message(b"2", "t", 1)).expect("push");
@@ -619,12 +617,7 @@ mod tests {
 
     #[test]
     fn test_direct_append_ndjson_format() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 100_000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         manager
             .push("dest", make_message(b"line1", "t", 0))
@@ -643,12 +636,7 @@ mod tests {
 
     #[test]
     fn test_direct_append_preserves_offsets() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 100_000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         for i in 0..5 {
             manager
@@ -668,12 +656,7 @@ mod tests {
 
     #[test]
     fn test_size_flush_triggers_at_buffer_limit() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 20,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 20);
         let manager = TieredBufferManager::new(config).expect("create");
         let batches = manager
             .push("dest", make_message(b"fifteen_bytes!!", "t", 0))
@@ -688,12 +671,7 @@ mod tests {
 
     #[test]
     fn test_empty_payload_handling() {
-        let config = TieredBufferConfig {
-            max_hot_buffers: 10,
-            hot_buffer_size: 100_000,
-            hot_buffer_age_secs: 3600,
-            ..Default::default()
-        };
+        let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         manager
             .push("dest", make_message(b"", "t", 0))

@@ -212,6 +212,7 @@ mod tests {
             flush_records: 100,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -236,6 +237,7 @@ mod tests {
             flush_records: 1000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -254,6 +256,7 @@ mod tests {
             flush_records: 3,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -274,6 +277,7 @@ mod tests {
             flush_records: 1_000_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -292,6 +296,7 @@ mod tests {
             flush_records: 1_000_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -316,6 +321,7 @@ mod tests {
             flush_records: 1_000_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -331,6 +337,7 @@ mod tests {
             flush_records: 1_000_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
@@ -348,6 +355,7 @@ mod tests {
             flush_records: 1_000_000,
             writer_parallelism: 4,
             backpressure_pause_secs: 5,
+            ..Default::default()
         };
 
         let manager = BufferManager::new(config);
