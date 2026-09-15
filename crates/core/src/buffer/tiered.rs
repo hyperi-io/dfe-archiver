@@ -30,7 +30,7 @@ struct LogSpamGuards {
 }
 
 /// Default tier 2 spool directory, and the path the image pre-creates for
-/// `appuser`; a relative default resolves under the root-owned WORKDIR.
+/// `appuser`. A relative default resolves under the root-owned WORKDIR.
 pub const DEFAULT_SPOOL_DIR: &str = "/var/spool/dfe/archiver";
 
 /// Configuration for tiered buffer manager
