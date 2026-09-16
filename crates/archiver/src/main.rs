@@ -18,13 +18,14 @@ use dfe_archiver::config::{
     ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
 };
 use dfe_archiver::contract::deployment_contract;
-use dfe_archiver::{Archiver, metrics::init_metrics};
+use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
+use dfe_archiver::{Archiver, restart_required_changes};
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
 use scalo::deployment::generate_chart;
 use scalo::logger::security;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// DFE Archiver - High-volume Kafka-to-storage archiver
 #[derive(Parser, Debug)]
@@ -162,17 +163,38 @@ impl ServiceApp for App {
         );
         let _reloader_handle = reloader.start();
 
-        // Spawn config change security event watcher
+        // Spawn config change security event watcher. A section bound at
+        // construction is reported as needing a restart, never as a reload.
         let security_config = shared_config.clone();
         tokio::spawn(async move {
             let mut rx = security_config.subscribe();
+            let mut applied = security_config.get();
             while rx.changed().await.is_ok() {
                 let version = *rx.borrow();
-                security::config_changed(
-                    "config_reload",
-                    "system",
-                    &format!("pipeline config reloaded (version {version})"),
-                );
+                let current = security_config.get();
+                let pending = restart_required_changes(&applied, &current);
+                if pending.is_empty() {
+                    security::config_changed(
+                        "config_reload",
+                        "system",
+                        &format!("pipeline config reloaded (version {version})"),
+                    );
+                } else {
+                    let sections = pending.join(",");
+                    warn!(
+                        version,
+                        sections = %sections,
+                        "Config changed in sections bound at startup -- the running archiver keeps its startup values until it restarts"
+                    );
+                    security::config_changed(
+                        "config_reload",
+                        "system",
+                        &format!(
+                            "config change needs a restart to take effect (version {version}): {sections}"
+                        ),
+                    );
+                }
+                applied = current;
             }
         });
 
@@ -265,6 +287,13 @@ impl ServiceApp for App {
         dfe_archiver::scaling_components()
     }
 
+    fn register_metrics(&self, manager: &scalo::metrics::MetricsManager) {
+        // `metrics-manifest` and `generate-artefacts` read the registry without
+        // starting the service, so the catalogue is empty until the archiver's
+        // own metrics are built against their manager.
+        let _ = ArchiverMetrics::register(manager, option_env!("GIT_COMMIT").unwrap_or("unknown"));
+    }
+
     fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(deployment_contract())
     }
@@ -276,8 +305,23 @@ impl ServiceApp for App {
     }
 }
 
+/// Live heap bytes from jemalloc, for scalo's memory guard.
+///
+/// jemalloc caches its statistics, so the epoch advance is what refreshes them.
+#[cfg(feature = "jemalloc")]
+fn heap_allocated_bytes() -> usize {
+    let _ = tikv_jemalloc_ctl::epoch::advance();
+    tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0)
+}
+
 #[tokio::main]
 async fn main() {
+    // Without a registered heap source the memory guard sees only the bytes the
+    // pipeline accounted, so `memory_used_bytes` and the inbound brake it feeds
+    // both read near zero.
+    #[cfg(feature = "jemalloc")]
+    let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+
     dotenvy::dotenv().ok();
 
     let app = App::parse();
@@ -319,5 +363,52 @@ async fn main() {
     if let Err(e) = run_app(app).await {
         eprintln!("fatal: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `metrics-manifest` builds a manager, calls `register_metrics` and prints
+    /// the registry, so an app that leaves the no-op default in place emits an
+    /// empty catalogue.
+    #[test]
+    fn register_metrics_fills_the_manifest() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("dfe-archiver"),
+        );
+        let app = App::parse_from(["dfe-archiver"]);
+
+        app.register_metrics(&manager);
+
+        let names: Vec<String> = manager
+            .registry()
+            .manifest()
+            .metrics
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n == "dfe-archiver_files_created_total"),
+            "metrics-manifest catalogue is missing the archiver's own metrics: {names:?}"
+        );
+    }
+
+    /// The registered heap source has to move with the process heap, not with
+    /// the bytes the pipeline accounted.
+    #[cfg(feature = "jemalloc")]
+    #[test]
+    fn the_heap_source_tracks_a_live_allocation() {
+        let before = heap_allocated_bytes();
+        let ballast: Vec<u8> = vec![7; 64 * 1024 * 1024];
+        let after = heap_allocated_bytes();
+        assert!(
+            after >= before + 32 * 1024 * 1024,
+            "heap source read {before} then {after} across a 64 MiB allocation"
+        );
+        drop(ballast);
     }
 }

@@ -76,6 +76,9 @@ pub struct ArchiveWriter {
     buffer: Vec<u8>,
     file_seq: u64,
     last_stem: Option<String>,
+    /// Files opened since the caller last drained the count. This crate owns no
+    /// metrics, so the writer counts and the archiver crate records.
+    files_opened: u64,
 }
 
 impl ArchiveWriter {
@@ -95,7 +98,16 @@ impl ArchiveWriter {
             buffer: Vec::with_capacity(1024 * 1024),
             file_seq: 0,
             last_stem: None,
+            files_opened: 0,
         }
+    }
+
+    /// Take the number of files opened since the last call, resetting the count.
+    ///
+    /// The archiver crate drains this into `files_created_total`, the success
+    /// denominator for the sink-failure alert.
+    pub fn take_files_opened(&mut self) -> u64 {
+        std::mem::take(&mut self.files_opened)
     }
 
     /// Write data to archive. Returns `CloseStats` if a roll occurred.
@@ -270,6 +282,7 @@ impl ArchiveWriter {
             records_written: AtomicU64::new(0),
             created_at: now,
         });
+        self.files_opened += 1;
 
         info!(path = %path, "Opened new archive file");
         Ok(())

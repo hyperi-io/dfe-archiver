@@ -33,7 +33,7 @@ pub mod config;
 pub mod contract;
 pub mod metrics;
 
-pub use archiver::Archiver;
+pub use archiver::{Archiver, restart_required_changes};
 
 // Re-export core types for convenience
 pub use dfe_archiver_core::error::{Error, Result};

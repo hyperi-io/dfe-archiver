@@ -32,9 +32,10 @@ pub use scalo::dlq::DlqConfig;
 ///
 /// **Requires pod restart** — everything else. `Archiver` snapshots the config
 /// at construction into `startup_config`, so a reload of `transport`,
-/// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*` or the
-/// `buffer.*` flush thresholds is accepted and validated but does not reach the
-/// running pipeline.
+/// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
+/// the `buffer.*` flush thresholds is accepted and validated but does not reach
+/// the running pipeline. `restart_required_changes` names those sections, and
+/// the reloader warns instead of reporting a reload.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
@@ -136,7 +137,7 @@ impl Config {
 /// Mirrors dfe-loader's `grpc` block key for key, because both stages receive
 /// the same scalo Push RPC and an operator reading one config should not have
 /// to learn a second set of names.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GrpcConfig {
     /// Listen address, e.g. `0.0.0.0:6000`. Required when `transport` is `grpc`.
@@ -172,7 +173,7 @@ impl Default for GrpcConfig {
 }
 
 /// Kafka consumer configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaConfig {
     /// Broker addresses
@@ -257,7 +258,7 @@ impl Default for KafkaConfig {
 }
 
 /// Archive output configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ArchiveConfig {
     /// Destination URL (file://, s3://, gs://, az://, minio://). Empty until an
@@ -343,7 +344,7 @@ impl Default for ArchiveConfig {
 }
 
 /// S3 configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct S3Config {
     pub region: Option<String>,
     pub endpoint: Option<String>,
@@ -356,7 +357,7 @@ pub struct S3Config {
 }
 
 /// GCS configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct GcsConfig {
     pub project_id: Option<String>,
     pub service_account_key: Option<SensitiveString>,
@@ -365,7 +366,7 @@ pub struct GcsConfig {
 }
 
 /// Azure Blob configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct AzureConfig {
     pub account_name: String,
     pub account_key: Option<SensitiveString>,
@@ -376,7 +377,7 @@ pub struct AzureConfig {
 }
 
 /// `MinIO` configuration (S3-compatible)
-#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct MinioConfig {
     pub endpoint: String,
     pub access_key: String,
@@ -386,7 +387,7 @@ pub struct MinioConfig {
 }
 
 /// Buffer management configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
     /// Flush when buffer exceeds this size (bytes)
@@ -425,7 +426,7 @@ impl Default for BufferConfig {
 }
 
 /// Routing configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// Routing mode: "expression" (default) or "topic"
@@ -450,7 +451,7 @@ impl Default for RoutingConfig {
 }
 
 /// Compression configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompressionConfig {
     /// Compression codec: none, zstd, lz4, snappy, gzip

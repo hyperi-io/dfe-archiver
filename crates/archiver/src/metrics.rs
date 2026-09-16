@@ -211,9 +211,12 @@ impl ArchiverMetrics {
 
     // ── Layer 3: Archiver-specific ───────────────────────────────────
 
-    /// Record file created
-    pub fn record_file_created(&self) {
-        counter!("files_created_total").increment(1);
+    /// Record archive files created.
+    ///
+    /// Takes a count because the writer reports the files it opened since the
+    /// last drain, which spans the roll inside a single write.
+    pub fn record_files_created(&self, count: u64) {
+        counter!("files_created_total").increment(count);
     }
 
     /// Record file closed (rolled) with final compressed size
@@ -460,7 +463,7 @@ mod tests {
         m.record_received(100);
         m.record_archived(50);
         m.record_dlq(1);
-        m.record_file_created();
+        m.record_files_created(1);
         m.record_file_closed(1024);
         m.record_archive_roll("size");
         m.record_bytes_written(4096);
