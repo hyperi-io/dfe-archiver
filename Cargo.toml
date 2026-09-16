@@ -117,7 +117,10 @@ dotenvy = ">=0.15, <0.16"
 serde_yaml_ng = ">=0.10.0, <0.11"
 
 # Allocators. The -ctl half reads jemalloc's own stats, which is the only
-# source of live heap bytes for scalo's memory guard.
+# source of live heap bytes for scalo's memory guard. It pulls `paste`, which
+# carries RUSTSEC-2024-0436 (unmaintained, no vulnerability) and is a
+# compile-time proc macro that reaches no running code; dfe-loader ships the
+# same pair.
 tikv-jemallocator = ">=0.7.0, <0.8"
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", features = ["stats"] }
 
