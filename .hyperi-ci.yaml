@@ -55,7 +55,7 @@ build:
     features:
       - "jemalloc"
     # Channel-tiered release optimisation (hyperi-ci v1.12.1+).
-    # spike/alpha:    Tier 1 — jemalloc + thin LTO        (~4 min/arch)
+    # alpha:          Tier 1 — jemalloc + thin LTO        (~4 min/arch)
     # beta:           Tier 1 — jemalloc + fat LTO         (~10 min/arch)
     # release:        Tier 2 — Tier 1 + PGO + BOLT        (~26 min/arch)
     optimize:
