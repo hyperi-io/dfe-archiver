@@ -249,6 +249,19 @@ stage fans a matched record out to the loader and to the archiver over the same
 Push RPC. A push stream keeps no backlog, so the KEDA composite drops its
 `kafka_lag` term there rather than reading a false zero.
 
+### Why only two
+
+scalo abstracts seven transports (memory, kafka, grpc, file, pipe, http, redis)
+and three DLQ backends (kafka, http, redis). The archiver compiles in
+`transport-kafka`, `transport-grpc` and `dlq-kafka`, and that bound is a
+decision rather than an oversight: a DFE deployment feeds the archiver from a
+broker or from the previous stage and from nothing else, the DLQ has to survive
+the charts' read-only rootfs (which rules the file backend out as an EROFS
+no-op), and `validate_config` refuses any other `transport` value at boot. The
+feature lists in the three member crates carry the same note, so adding
+`transport-all` grows the image without widening anything an operator can
+select.
+
 ### Idle until configured
 
 An archiver with no destination, or on the bus with no topics and no discovery

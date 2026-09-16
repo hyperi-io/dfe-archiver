@@ -314,14 +314,35 @@ fn heap_allocated_bytes() -> usize {
     tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0)
 }
 
-#[tokio::main]
-async fn main() {
+/// The fewest Tokio workers the service will start with.
+///
+/// `available_parallelism` floors a fractional CPU quota to one, and on a single
+/// worker the pipeline's synchronous Kafka poll owns the whole runtime, so
+/// `/livez` stops answering during backlog catch-up and the probe restarts a
+/// healthy pod (scalo-rs#10). A second worker keeps the probe surface answering
+/// whatever the pipeline is doing.
+const MIN_WORKER_THREADS: usize = 2;
+
+/// The worker count handed to the runtime builder: the operator's
+/// `TOKIO_WORKER_THREADS` when it parses, otherwise the available parallelism,
+/// never below [`MIN_WORKER_THREADS`].
+fn worker_threads(requested: Option<&str>, available: usize) -> usize {
+    requested
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|threads| *threads > 0)
+        .unwrap_or(available)
+        .max(MIN_WORKER_THREADS)
+}
+
+fn main() {
     // Without a registered heap source the memory guard sees only the bytes the
     // pipeline accounted, so `memory_used_bytes` and the inbound brake it feeds
     // both read near zero.
     #[cfg(feature = "jemalloc")]
     let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
 
+    // Ahead of the runtime build so a TOKIO_WORKER_THREADS in the env file is
+    // the one the builder reads.
     dotenvy::dotenv().ok();
 
     let app = App::parse();
@@ -359,11 +380,29 @@ async fn main() {
         _ => {}
     }
 
+    let workers = worker_threads(
+        std::env::var("TOKIO_WORKER_THREADS").ok().as_deref(),
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+    );
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("fatal: could not build the tokio runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Standard ServiceApp lifecycle (run, version, config-check)
-    if let Err(e) = run_app(app).await {
-        eprintln!("fatal: {e}");
-        std::process::exit(1);
-    }
+    runtime.block_on(async {
+        if let Err(e) = run_app(app).await {
+            eprintln!("fatal: {e}");
+            std::process::exit(1);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -395,6 +434,32 @@ mod tests {
                 .any(|n| n == "dfe-archiver_files_created_total"),
             "metrics-manifest catalogue is missing the archiver's own metrics: {names:?}"
         );
+    }
+
+    /// A fractional CPU quota reads back as one core, and one Tokio worker is
+    /// the configuration where the synchronous Kafka poll takes the runtime and
+    /// `/livez` stops answering.
+    #[test]
+    fn a_single_core_quota_still_gets_a_probe_thread() {
+        assert_eq!(worker_threads(None, 1), 2);
+        assert_eq!(worker_threads(Some("1"), 8), 2);
+    }
+
+    /// The floor is a floor, not a cap: a host with cores to spare keeps them,
+    /// and an operator asking for more still gets more.
+    #[test]
+    fn the_worker_floor_never_takes_threads_away() {
+        assert_eq!(worker_threads(None, 8), 8);
+        assert_eq!(worker_threads(Some("4"), 1), 4);
+    }
+
+    /// An unparsable or zero setting falls back to the host rather than
+    /// silently starting a one-worker runtime.
+    #[test]
+    fn an_unusable_worker_setting_falls_back_to_the_host() {
+        assert_eq!(worker_threads(Some("nonsense"), 6), 6);
+        assert_eq!(worker_threads(Some("0"), 6), 6);
+        assert_eq!(worker_threads(Some(""), 1), 2);
     }
 
     /// The registered heap source has to move with the process heap, not with
