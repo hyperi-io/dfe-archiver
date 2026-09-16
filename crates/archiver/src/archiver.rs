@@ -103,6 +103,77 @@ pub struct Archiver {
     log_guards: LogSpamGuards,
 }
 
+/// The config sections a reload cannot reach, listed for the operator.
+///
+/// `Archiver::new` snapshots the config into `startup_config` and builds the
+/// transport, router, buffer, DLQ and writers from it, so only
+/// `kafka.batch_size` and `buffer.backpressure_pause_secs` are re-read while
+/// the process runs. Everything else keeps its startup value until a restart,
+/// and the reloader must say so rather than report a reload that was applied to
+/// nothing.
+#[must_use]
+pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+
+    if old.transport != new.transport {
+        changed.push("transport");
+    }
+
+    // The recv loop re-reads kafka.batch_size, so hold it equal and compare the
+    // rest of the section.
+    let mut kafka = new.kafka.clone();
+    kafka.batch_size = old.kafka.batch_size;
+    if old.kafka != kafka {
+        changed.push("kafka");
+    }
+
+    if old.grpc != new.grpc {
+        changed.push("grpc");
+    }
+    if old.archive != new.archive {
+        changed.push("archive");
+    }
+
+    // Same treatment for the one buffer field the backpressure pause re-reads.
+    let mut buffer = new.buffer.clone();
+    buffer.backpressure_pause_secs = old.buffer.backpressure_pause_secs;
+    if old.buffer != buffer {
+        changed.push("buffer");
+    }
+
+    if old.routing != new.routing {
+        changed.push("routing");
+    }
+    if old.compression != new.compression {
+        changed.push("compression");
+    }
+
+    // scalo's DlqConfig has no PartialEq, so the section is compared as JSON --
+    // exact here because it carries no redacted field. A serialisation failure
+    // reports the change rather than swallowing it.
+    match (
+        serde_json::to_value(&old.dlq),
+        serde_json::to_value(&new.dlq),
+    ) {
+        (Ok(before), Ok(after)) if before == after => {}
+        _ => changed.push("dlq"),
+    }
+
+    changed
+}
+
+/// Drain the files a writer has opened into `files_created_total`.
+///
+/// Every production write path goes through here, so the success counter has
+/// the same coverage as `files_closed_total` -- it is the denominator the
+/// sink-failure alert divides the error rate by.
+fn record_files_opened(metrics: &ArchiverMetrics, writer: &mut ArchiveWriter) {
+    let opened = writer.take_files_opened();
+    if opened > 0 {
+        metrics.record_files_created(opened);
+    }
+}
+
 /// Map the operator's `buffer` section onto the tiered buffer's own config.
 fn buffer_config(config: &Config) -> dfe_archiver_core::buffer::TieredBufferConfig {
     dfe_archiver_core::buffer::TieredBufferConfig {
@@ -698,7 +769,9 @@ impl Archiver {
         let mut writer = writer_arc.lock().await;
 
         // Write data (may trigger a roll)
-        if let Some(close_stats) = writer.write(&batch.data).await? {
+        let roll_stats = writer.write(&batch.data).await?;
+        record_files_opened(&self.metrics, &mut writer);
+        if let Some(close_stats) = roll_stats {
             if let Some(trigger) = close_stats.trigger {
                 debug!(
                     destination = %batch.destination,
@@ -974,10 +1047,14 @@ impl Archiver {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::buffer_config;
+    use super::{buffer_config, record_files_opened, restart_required_changes};
     use crate::config::validate_config;
+    use crate::metrics::ArchiverMetrics;
+    use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
-    use dfe_archiver_core::config::Config;
+    use dfe_archiver_core::compression::compressor_for;
+    use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config};
+    use dfe_archiver_io::storage::create_backend;
     use std::path::Path;
 
     #[test]
@@ -1013,6 +1090,109 @@ mod tests {
         assert_eq!(
             buffer_config(&config).spool_dir,
             Path::new("/var/spool/dfe/archiver"),
+        );
+    }
+
+    /// The success counter is the denominator the sink-failure alert divides
+    /// the error rate by, so it has to move when the pipeline opens a file.
+    #[tokio::test]
+    async fn test_opening_a_file_moves_files_created_total() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = ArchiverMetrics::register(&manager, "test");
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let archive = ArchiveConfig {
+            destination: format!("file://{}", dir.path().display()),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            ..ArchiveConfig::default()
+        };
+        let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
+        let storage = create_backend(&archive).expect("backend");
+        let mut writer = ArchiveWriter::new(archive, RollingPolicy::default(), compressor, storage);
+
+        writer.write(b"one\n").await.expect("write");
+        record_files_opened(&metrics, &mut writer);
+
+        let rendered = manager.render();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == "archiver_files_created_total 1"),
+            "files_created_total did not move after a write:\n{rendered}"
+        );
+    }
+
+    /// A second write to the same open file must not count another creation.
+    #[tokio::test]
+    async fn test_writing_to_an_open_file_creates_nothing() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let archive = ArchiveConfig {
+            destination: format!("file://{}", dir.path().display()),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            ..ArchiveConfig::default()
+        };
+        let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
+        let storage = create_backend(&archive).expect("backend");
+        let mut writer = ArchiveWriter::new(archive, RollingPolicy::default(), compressor, storage);
+
+        writer.write(b"one\n").await.expect("write");
+        assert_eq!(writer.take_files_opened(), 1);
+
+        writer.write(b"two\n").await.expect("write");
+        assert_eq!(writer.take_files_opened(), 0);
+    }
+
+    /// A new destination is bound at construction, so the reloader reports it
+    /// rather than claiming the running archiver picked it up.
+    #[test]
+    fn test_changed_destination_is_restart_required() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.archive.destination = "file:///srv/dfe/archive".to_string();
+
+        assert_eq!(restart_required_changes(&old, &new), vec!["archive"]);
+    }
+
+    /// The two fields the running pipeline re-reads are reported as applied.
+    #[test]
+    fn test_hot_reloaded_fields_are_not_restart_required() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.kafka.batch_size = old.kafka.batch_size + 1;
+        new.buffer.backpressure_pause_secs = old.buffer.backpressure_pause_secs + 1;
+
+        assert!(restart_required_changes(&old, &new).is_empty());
+    }
+
+    /// Every section the archiver snapshots has to be named, including the DLQ
+    /// that is compared as JSON.
+    #[test]
+    fn test_every_startup_bound_section_is_reported() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.transport = "grpc".to_string();
+        new.kafka.topics = vec!["other".to_string()];
+        new.grpc.listen = Some("0.0.0.0:6000".to_string());
+        new.archive.destination = "file:///srv/dfe/archive".to_string();
+        new.buffer.flush_bytes += 1;
+        new.routing.mode = "topic".to_string();
+        new.compression.codec = "gzip".to_string();
+        new.dlq.enabled = !old.dlq.enabled;
+
+        assert_eq!(
+            restart_required_changes(&old, &new),
+            vec![
+                "transport",
+                "kafka",
+                "grpc",
+                "archive",
+                "buffer",
+                "routing",
+                "compression",
+                "dlq"
+            ]
         );
     }
 }

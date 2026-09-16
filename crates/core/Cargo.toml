@@ -8,8 +8,10 @@
 
 [package]
 name = "dfe-archiver-core"
-version = "1.7.3"
+version.workspace = true
 description = "Core library for dfe-archiver: types, compression, buffering, routing"
+# An internal BUSL-1.1 crate with a registry-shaped name: never publishable.
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

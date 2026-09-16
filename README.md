@@ -43,6 +43,9 @@ The project is a Rust workspace with three crates:
 - **`crates/io`** - Kafka transport adapter, storage backends (File, S3, GCS, Azure, MinIO)
 - **`crates/archiver`** - Binary entry point, pipeline orchestrator, metrics, CLI, deployment contract
 
+[ARCHITECTURE.md](ARCHITECTURE.md) carries the codemap, the one-way rules
+between those crates, and the build graph.
+
 ### Tiered Buffer Design
 
 Handles high destination cardinality (e.g., 10,000+ orgs) without exhausting memory:
@@ -175,10 +178,10 @@ or file polling (5-second interval).
 
 **Requires pod restart** - everything else. The pipeline snapshots the config at
 startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `routing.*`,
-`compression.*` and the rest of `buffer.*` (the flush thresholds included) keep
-their startup values until the process restarts. A reload updates the shared
-config and passes validation, so a change to one of those is accepted and then
-has no effect until the roll.
+`compression.*`, `dlq.*` and the rest of `buffer.*` (the flush thresholds
+included) keep their startup values until the process restarts. A reload of one
+of those logs a warning naming the sections that changed, and the security event
+says a restart is needed rather than reporting a reload that reached nothing.
 
 ## Storage Backends
 

@@ -19,9 +19,10 @@ description: |-
 
   **Requires pod restart** — everything else. `Archiver` snapshots the config
   at construction into `startup_config`, so a reload of `transport`,
-  `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*` or the
-  `buffer.*` flush thresholds is accepted and validated but does not reach the
-  running pipeline.
+  `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
+  the `buffer.*` flush thresholds is accepted and validated but does not reach
+  the running pipeline. `restart_required_changes` names those sections, and
+  the reloader warns instead of reporting a reload.
 type: object
 properties:
   transport:

@@ -15,6 +15,9 @@ members = [
 ]
 
 [workspace.package]
+# hyperi-ci stamps the release version onto this key at build time and the
+# member crates inherit it, so the committed value is never a release number.
+version = "0.0.0"
 description = "Archives event streams to S3, GCS or Azure object storage, spooling to local disk when the sink is unreachable. Runs standalone or as part of the HyperI Data Fusion Engine."
 edition = "2024"
 rust-version = "1.94"
@@ -113,8 +116,10 @@ futures = ">=0.3.32, <0.4"
 dotenvy = ">=0.15, <0.16"
 serde_yaml_ng = ">=0.10.0, <0.11"
 
-# Allocators
+# Allocators. The -ctl half reads jemalloc's own stats, which is the only
+# source of live heap bytes for scalo's memory guard.
 tikv-jemallocator = ">=0.7.0, <0.8"
+tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", features = ["stats"] }
 
 # Dev dependencies
 tempfile = ">=3.27, <4"
