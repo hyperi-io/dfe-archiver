@@ -23,6 +23,10 @@ workspace = true
 
 [dependencies]
 dfe-archiver-core = { workspace = true }
+# The inbound menu is deliberately kafka + grpc and no more: `SourceTransport`
+# has exactly those two arms and `validate_config` rejects every other name, so
+# compiling scalo's file/pipe/http/redis/memory backends in would add image
+# weight for a `transport:` value the archiver refuses to boot on.
 scalo = { workspace = true, features = ["transport-kafka", "transport-grpc", "metrics", "governor"] }
 rdkafka = { workspace = true }
 
