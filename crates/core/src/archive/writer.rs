@@ -17,6 +17,51 @@ use tracing::{debug, info, trace};
 
 const MAX_OPEN_RETRIES: u32 = 10_000;
 
+/// The placeholders `path_stem` and `generate_path` substitute, and the whole
+/// set an operator may write in `archive.path_template`.
+///
+/// Keep this beside the substitutions below: an unlisted placeholder is not
+/// rejected by the writer, it survives into the object key as literal braces,
+/// and it is then baked into every object already written.
+pub const PATH_TEMPLATE_PLACEHOLDERS: [&str; 7] = [
+    "{year}",
+    "{month}",
+    "{day}",
+    "{hour}",
+    "{minute}",
+    "{timestamp}",
+    "{seq}",
+];
+
+/// The `{...}` tokens in `template` that no substitution handles.
+///
+/// A token runs from the last `{` before a `}`, so an unclosed brace shadows
+/// nothing: `{stray/{year}` reports no unknown placeholder.
+#[must_use]
+pub fn unknown_placeholders(template: &str) -> Vec<String> {
+    let mut unknown: Vec<String> = Vec::new();
+    let mut open: Option<usize> = None;
+
+    for (index, c) in template.char_indices() {
+        match c {
+            '{' => open = Some(index),
+            '}' => {
+                if let Some(start) = open.take() {
+                    let token = &template[start..=index];
+                    if !PATH_TEMPLATE_PLACEHOLDERS.contains(&token)
+                        && !unknown.iter().any(|seen| seen.as_str() == token)
+                    {
+                        unknown.push(token.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    unknown
+}
+
 /// Stats returned from a flush operation (for metrics wiring)
 #[derive(Debug, Clone)]
 pub struct FlushStats {
@@ -79,6 +124,10 @@ pub struct ArchiveWriter {
     /// Files opened since the caller last drained the count. This crate owns no
     /// metrics, so the writer counts and the archiver crate records.
     files_opened: u64,
+    /// Rolls completed since the caller last drained them, same reason as
+    /// `files_opened`. A single `write_record` can roll on either half, so one
+    /// returned `CloseStats` would drop the other and undercount the closes.
+    rolls: Vec<CloseStats>,
 }
 
 impl ArchiveWriter {
@@ -99,6 +148,7 @@ impl ArchiveWriter {
             file_seq: 0,
             last_stem: None,
             files_opened: 0,
+            rolls: Vec::new(),
         }
     }
 
@@ -110,13 +160,19 @@ impl ArchiveWriter {
         std::mem::take(&mut self.files_opened)
     }
 
-    /// Write data to archive. Returns `CloseStats` if a roll occurred.
-    pub async fn write(&mut self, data: &[u8]) -> Result<Option<CloseStats>> {
-        let roll_stats = if let Some(trigger) = self.should_roll() {
-            self.roll(trigger).await?
-        } else {
-            None
-        };
+    /// Take the rolls completed since the last call, resetting the list.
+    ///
+    /// The archiver crate drains this into `archive_roll_total` and
+    /// `files_closed_total`.
+    pub fn take_rolls(&mut self) -> Vec<CloseStats> {
+        std::mem::take(&mut self.rolls)
+    }
+
+    /// Write data to archive, rolling first if the policy says so.
+    pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(trigger) = self.should_roll() {
+            self.roll(trigger).await?;
+        }
 
         if self.state.is_none() {
             self.open_new_file().await?;
@@ -138,19 +194,19 @@ impl ArchiveWriter {
             );
         }
 
-        Ok(roll_stats)
+        Ok(())
     }
 
-    /// Write a single record (adds newline). Returns `CloseStats` if a roll occurred.
-    pub async fn write_record(&mut self, record: &[u8]) -> Result<Option<CloseStats>> {
-        let roll1 = self.write(record).await?;
-        let roll2 = self.write(b"\n").await?;
+    /// Write a single record (adds newline).
+    pub async fn write_record(&mut self, record: &[u8]) -> Result<()> {
+        self.write(record).await?;
+        self.write(b"\n").await?;
 
         if let Some(ref state) = self.state {
             state.records_written.fetch_add(1, Ordering::Relaxed);
         }
 
-        Ok(roll1.or(roll2))
+        Ok(())
     }
 
     /// Flush buffer to storage. Returns compression stats if data was written.
@@ -223,11 +279,11 @@ impl ArchiveWriter {
         None
     }
 
-    /// Roll to a new file. Returns stats for the closed file.
-    async fn roll(&mut self, trigger: &'static str) -> Result<Option<CloseStats>> {
+    /// Roll to a new file, recording the closed file in `rolls`.
+    async fn roll(&mut self, trigger: &'static str) -> Result<()> {
         self.flush().await?;
 
-        let close_stats = if let Some(state) = self.state.take() {
+        if let Some(state) = self.state.take() {
             let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
             self.storage.close(&state.path).await?;
             info!(
@@ -238,16 +294,14 @@ impl ArchiveWriter {
                 trigger,
                 "Closed archive file"
             );
-            Some(CloseStats {
+            self.rolls.push(CloseStats {
                 compressed_bytes,
                 trigger: Some(trigger),
-            })
-        } else {
-            None
-        };
+            });
+        }
 
         self.open_new_file().await?;
-        Ok(close_stats)
+        Ok(())
     }
 
     /// Open a new archive file - iterates through existing sequence numbers
@@ -339,6 +393,28 @@ impl ArchiveWriter {
         };
 
         Ok(close_stats)
+    }
+
+    /// Close the open file if the rolling policy has expired, leaving no new
+    /// file behind. Returns stats for the closed file.
+    ///
+    /// The caller drives this from its own timer, because `write` is otherwise
+    /// the only thing that consults the policy: a destination that stops
+    /// receiving data holds its file open until shutdown, and an active one
+    /// overruns the interval by however long it waits for the next batch.
+    ///
+    /// Closing rather than rolling is the difference that matters for an idle
+    /// destination -- `roll` would open a replacement, manufacturing an empty
+    /// file every interval, while `write` opens on demand when data returns.
+    pub async fn close_if_aged(&mut self) -> Result<Option<CloseStats>> {
+        let Some(trigger) = self.should_roll() else {
+            return Ok(None);
+        };
+
+        Ok(self.close().await?.map(|stats| CloseStats {
+            trigger: Some(trigger),
+            ..stats
+        }))
     }
 
     /// Expose `generate_path` for testing
@@ -752,5 +828,135 @@ mod tests {
         let (mut writer, _) = test_writer(RollingPolicy::default(), "zstd");
         let result = writer.flush().await.expect("flush empty");
         assert!(result.is_none(), "flushing empty buffer should return None");
+    }
+
+    /// `write_record` writes the record and the newline separately, so both
+    /// halves can roll. Reporting one `CloseStats` per call dropped the second
+    /// close, and `files_closed_total` undercounted by that much.
+    #[tokio::test]
+    async fn test_every_roll_in_a_write_record_is_reported() {
+        // A zero-second interval makes each half roll, which is otherwise only
+        // reachable when a batch straddles the boundary.
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 0,
+            },
+            "none",
+        );
+
+        writer.write_record(b"first").await.expect("write");
+        writer.write_record(b"second").await.expect("write");
+
+        let rolls = writer.take_rolls();
+        assert_eq!(
+            rolls.len(),
+            3,
+            "one roll on the first newline, two more across the second record"
+        );
+        assert!(rolls.iter().all(|r| r.trigger == Some("age")));
+        assert!(
+            writer.take_rolls().is_empty(),
+            "draining twice must not double-count"
+        );
+        assert_eq!(backend.file_count(), rolls.len() + 1);
+    }
+
+    /// The rolling policy has to be enforceable from the caller's timer: an
+    /// idle destination otherwise holds its file open until shutdown.
+    #[tokio::test]
+    async fn test_close_if_aged_closes_without_opening_a_replacement() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 0,
+            },
+            "none",
+        );
+
+        writer.write_record(b"idle").await.expect("write");
+        let before = backend.file_count();
+
+        let stats = writer
+            .close_if_aged()
+            .await
+            .expect("close if aged")
+            .expect("a file was open");
+        assert_eq!(stats.trigger, Some("age"));
+        assert_eq!(
+            backend.file_count(),
+            before,
+            "an idle destination must not be handed an empty replacement file"
+        );
+        assert!(
+            writer.close_if_aged().await.expect("second call").is_none(),
+            "nothing is left open to close"
+        );
+    }
+
+    /// A file still inside its interval is left alone, so the timer does not
+    /// shred an active destination into one file per tick.
+    #[tokio::test]
+    async fn test_close_if_aged_leaves_a_live_file_open() {
+        let (mut writer, backend) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 3600,
+            },
+            "none",
+        );
+
+        writer.write_record(b"live").await.expect("write");
+
+        assert!(
+            writer
+                .close_if_aged()
+                .await
+                .expect("close if aged")
+                .is_none()
+        );
+        assert!(writer.test_current_path().is_some());
+        assert_eq!(backend.file_count(), 1);
+    }
+
+    #[test]
+    fn test_unknown_placeholders_names_every_unsupported_token() {
+        assert!(unknown_placeholders("{year}/{month}/{day}/{hour}/archive").is_empty());
+        assert!(unknown_placeholders("data/{timestamp}-{seq}").is_empty());
+        assert!(unknown_placeholders("archive/plain/path").is_empty());
+
+        assert_eq!(
+            unknown_placeholders("{topic}/{year}/{date}"),
+            vec!["{topic}".to_string(), "{date}".to_string()],
+        );
+        assert_eq!(
+            unknown_placeholders("{topic}/{year}/{topic}"),
+            vec!["{topic}".to_string()],
+            "a repeated token is reported once"
+        );
+        assert!(
+            unknown_placeholders("{stray/{year}").is_empty(),
+            "an unclosed brace shadows nothing"
+        );
+    }
+
+    /// The list and the substitutions live beside each other precisely so they
+    /// cannot drift: every advertised placeholder must actually be replaced.
+    #[test]
+    fn test_every_advertised_placeholder_is_substituted() {
+        let config = ArchiveConfig {
+            path_template: PATH_TEMPLATE_PLACEHOLDERS.join("/"),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor("none", 0).expect("compressor");
+        let backend = Box::new(MemoryBackend::new());
+        let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
+
+        let path = writer.test_generate_path(&Utc::now());
+        assert!(
+            !path.contains('{') && !path.contains('}'),
+            "an advertised placeholder survived into the key: {path}"
+        );
     }
 }

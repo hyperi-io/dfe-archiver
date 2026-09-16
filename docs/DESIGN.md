@@ -409,18 +409,21 @@ archive:
 
 ### Path Templates
 
-Archive paths support template variables:
+The template sits under the routed destination, which is already the topic (or
+the expression-routed segments), so it carries no topic placeholder of its own:
 
 ```yaml
 archive:
-  path_template: "{topic}/{year}/{month}/{day}/{hour}"
+  path_template: "{year}/{month}/{day}/{hour}"
 ```
 
-Available variables:
+The supported variables, and the whole set -- config validation refuses any
+other `{...}` token rather than letting it reach the object key as literal
+braces:
 
-- `{topic}` - Kafka topic name
 - `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}` - Timestamp components
 - `{timestamp}` - Unix timestamp
+- `{seq}` - Rolled-file sequence number
 
 ---
 
@@ -740,7 +743,7 @@ kafka:
 
 archive:
   destination: s3://my-bucket/archives
-  path_template: "{topic}/{year}/{month}/{day}/{hour}"
+  path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824
   roll_interval_secs: 3600
 

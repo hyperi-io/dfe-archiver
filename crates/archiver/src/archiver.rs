@@ -101,6 +101,10 @@ pub struct Archiver {
     dlq: Arc<scalo::dlq::Dlq>,
     /// Log-spam guards (per-instance — see `LogSpamGuards` doc)
     log_guards: LogSpamGuards,
+    /// One debounce cell per configured expression field, indexed as
+    /// `routing.expression_fields`. A field no source carries falls through on
+    /// every record, so the warn is debounced per field rather than per record.
+    routing_fallback_guards: Vec<AtomicU64>,
 }
 
 /// The config sections a reload cannot reach, listed for the operator.
@@ -171,6 +175,56 @@ fn record_files_opened(metrics: &ArchiverMetrics, writer: &mut ArchiveWriter) {
     let opened = writer.take_files_opened();
     if opened > 0 {
         metrics.record_files_created(opened);
+    }
+}
+
+/// Drain the rolls a writer completed into `archive_roll_total` and
+/// `files_closed_total`.
+///
+/// Drained rather than returned because one `write_record` rolls on either
+/// half, so a single returned `CloseStats` would report one of two closes.
+fn record_rolls(metrics: &ArchiverMetrics, writer: &mut ArchiveWriter, destination: &str) {
+    for stats in writer.take_rolls() {
+        if let Some(trigger) = stats.trigger {
+            debug!(
+                destination,
+                trigger,
+                compressed_bytes = stats.compressed_bytes,
+                "Archive file rolled"
+            );
+            metrics.record_archive_roll(trigger);
+        }
+        metrics.record_file_closed(stats.compressed_bytes);
+    }
+}
+
+/// Count the expression-routing fields a record did not carry, and warn once
+/// per field per minute.
+///
+/// `crates/core` owns no metrics, so the router reports the fallback and this
+/// records it: read against `messages_received_total`, a sustained ratio of 1
+/// is a field name no source in the deployment sets, which otherwise looks
+/// exactly like a tenant called `unknown`.
+fn record_routing_fallbacks(
+    metrics: &ArchiverMetrics,
+    fields: &[String],
+    guards: &[AtomicU64],
+    fallbacks: &[usize],
+) {
+    for &index in fallbacks {
+        let Some(field) = fields.get(index) else {
+            continue;
+        };
+        metrics.record_routing_fallback(field);
+        if guards
+            .get(index)
+            .is_some_and(|guard| log_debounced(guard, 60_000))
+        {
+            warn!(
+                field = %field,
+                "Expression-routing field missing from the record -- archiving under the default segment (debounced, max 1/60s)"
+            );
+        }
     }
 }
 
@@ -290,6 +344,13 @@ impl Archiver {
         // Writer LRU cache — clamp to at least 1 to satisfy NonZeroUsize.
         let writer_cap = NonZeroUsize::new(config.archive.max_writers).unwrap_or(NonZeroUsize::MIN);
 
+        let routing_fallback_guards = config
+            .routing
+            .expression_fields
+            .iter()
+            .map(|_| AtomicU64::new(0))
+            .collect();
+
         Ok(Self {
             startup_config: config,
             shared_config,
@@ -305,6 +366,7 @@ impl Archiver {
             _stats_emitter: stats_emitter,
             dlq: Arc::new(dlq),
             log_guards: LogSpamGuards::default(),
+            routing_fallback_guards,
         })
     }
 
@@ -417,6 +479,9 @@ impl Archiver {
                             self.metrics.record_commit(commit_count);
                         }
                     }
+                    // Runs after the aged batches so an active destination rolls
+                    // through the write path, leaving only idle files here.
+                    self.close_aged_writers().await;
                 }
 
                 result = async {
@@ -508,7 +573,7 @@ impl Archiver {
         // Phase 1a: Parallel route computation. `Router::route` is pure
         // (`&self, &KafkaMessage`) so par_iter is sound. Expression-routed
         // configs do a sonic-rs JSON parse per message here.
-        let route_results: Vec<compact_str::CompactString> = messages
+        let route_results: Vec<dfe_archiver_core::routing::Routed> = messages
             .par_iter()
             .map(|msg| {
                 self.router.route(msg).unwrap_or_else(|e| {
@@ -528,7 +593,10 @@ impl Archiver {
                         &e.to_string(),
                         None,
                     );
-                    msg.topic.clone()
+                    dfe_archiver_core::routing::Routed {
+                        destination: msg.topic.clone(),
+                        fallback_fields: Vec::new(),
+                    }
                 })
             })
             .collect();
@@ -536,7 +604,17 @@ impl Archiver {
         // Phase 1b: Sequential buffer push (mutable buffer state).
         let mut all_staged: Vec<dfe_archiver_core::buffer::StagedBatch> = Vec::new();
         let mut backpressure = false;
-        for (message, destination) in messages.into_iter().zip(route_results) {
+        for (message, routed) in messages.into_iter().zip(route_results) {
+            let dfe_archiver_core::routing::Routed {
+                destination,
+                fallback_fields,
+            } = routed;
+            record_routing_fallbacks(
+                &self.metrics,
+                self.router.expression_fields(),
+                &self.routing_fallback_guards,
+                &fallback_fields,
+            );
             trace!(
                 topic = %message.topic,
                 partition = message.partition,
@@ -769,21 +847,9 @@ impl Archiver {
         let mut writer = writer_arc.lock().await;
 
         // Write data (may trigger a roll)
-        let roll_stats = writer.write(&batch.data).await?;
+        writer.write(&batch.data).await?;
         record_files_opened(&self.metrics, &mut writer);
-        if let Some(close_stats) = roll_stats {
-            if let Some(trigger) = close_stats.trigger {
-                debug!(
-                    destination = %batch.destination,
-                    trigger,
-                    compressed_bytes = close_stats.compressed_bytes,
-                    "Archive file rolled"
-                );
-                self.metrics.record_archive_roll(trigger);
-            }
-            self.metrics
-                .record_file_closed(close_stats.compressed_bytes);
-        }
+        record_rolls(&self.metrics, &mut writer, batch.destination.as_str());
 
         // Flush buffer to storage (returns compression stats)
         if let Some(flush_stats) = writer.flush().await? {
@@ -832,6 +898,48 @@ impl Archiver {
         Ok(())
     }
 
+    /// Close every writer whose open file has outlived the rolling policy.
+    ///
+    /// `write` is the only other thing that consults the policy, so without
+    /// this a destination that stops receiving data holds its file open until
+    /// shutdown, and an active one overruns the interval by however long it
+    /// waits for the next batch.
+    async fn close_aged_writers(&self) {
+        // The parking_lot lock guards the map only, so the writers are
+        // snapshotted and it is released before awaiting any writer's mutex.
+        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
+            let cache = self.writers.lock();
+            cache
+                .iter()
+                .map(|(dest, writer)| (dest.clone(), Arc::clone(writer)))
+                .collect()
+        };
+
+        for (dest, writer_arc) in writers {
+            let mut writer = writer_arc.lock().await;
+            match writer.close_if_aged().await {
+                Ok(Some(close_stats)) => {
+                    debug!(
+                        destination = %dest,
+                        trigger = close_stats.trigger.unwrap_or("age"),
+                        compressed_bytes = close_stats.compressed_bytes,
+                        "Closed aged archive file (timer)"
+                    );
+                    if let Some(trigger) = close_stats.trigger {
+                        self.metrics.record_archive_roll(trigger);
+                    }
+                    self.metrics
+                        .record_file_closed(close_stats.compressed_bytes);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!(error = %e, destination = %dest, "Failed to close aged writer");
+                    self.metrics.record_error();
+                }
+            }
+        }
+    }
+
     /// Close an LRU-evicted writer asynchronously so it never blocks the
     /// hot path. The writer's own Mutex is held during close, so any
     /// concurrent writes targeting the same destination (which would have
@@ -846,6 +954,8 @@ impl Archiver {
         metrics.record_writer_eviction();
         tokio::spawn(async move {
             let mut writer = writer_arc.lock().await;
+            // A write that errored after rolling left its stats undrained.
+            record_rolls(&metrics, &mut writer, &destination);
             match writer.close().await {
                 Ok(Some(close_stats)) => {
                     debug!(
@@ -929,6 +1039,8 @@ impl Archiver {
         debug!(writer_count = writers.len(), "Closing archive writers");
         for (dest, writer_arc) in writers {
             let mut writer = writer_arc.lock().await;
+            // A write that errored after rolling left its stats undrained.
+            record_rolls(&self.metrics, &mut writer, &dest);
             match writer.close().await {
                 Ok(Some(close_stats)) => {
                     debug!(
@@ -1047,15 +1159,21 @@ impl Archiver {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{buffer_config, record_files_opened, restart_required_changes};
+    use super::{
+        buffer_config, record_files_opened, record_rolls, record_routing_fallbacks,
+        restart_required_changes,
+    };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
     use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
     use dfe_archiver_core::compression::compressor_for;
-    use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config};
+    use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config, RoutingConfig};
+    use dfe_archiver_core::routing::Router;
+    use dfe_archiver_core::types::KafkaMessage;
     use dfe_archiver_io::storage::create_backend;
     use std::path::Path;
+    use std::sync::atomic::AtomicU64;
 
     #[test]
     fn test_cleared_brokers_fails_validation() {
@@ -1142,6 +1260,86 @@ mod tests {
 
         writer.write(b"two\n").await.expect("write");
         assert_eq!(writer.take_files_opened(), 0);
+    }
+
+    /// A field no source carries is otherwise indistinguishable from a tenant
+    /// named `unknown`, so the counter has to move on the router's own output
+    /// rather than on a hand-built index list.
+    #[test]
+    fn test_a_missing_routing_field_moves_routing_fallback_total() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = ArchiverMetrics::register(&manager, "test");
+
+        let fields = vec!["org_id".to_string()];
+        let router = Router::new(RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: fields.clone(),
+            default_segment: "unknown".to_string(),
+        });
+        let guards: Vec<AtomicU64> = fields.iter().map(|_| AtomicU64::new(0)).collect();
+
+        let carried =
+            KafkaMessage::for_test(br#"{"org_id":"acme"}"#.to_vec(), "default_land", 0, 0);
+        let missing =
+            KafkaMessage::for_test(br#"{"customer":"acme"}"#.to_vec(), "default_land", 0, 1);
+
+        for message in [&carried, &missing] {
+            let outcome = router.route(message).expect("route");
+            record_routing_fallbacks(&metrics, &fields, &guards, &outcome.fallback_fields);
+        }
+
+        let rendered = manager.render();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == r#"archiver_routing_fallback_total{field="org_id"} 1"#),
+            "the record carrying org_id must not count as a fallback:\n{rendered}"
+        );
+    }
+
+    /// Both halves of a `write_record` can roll, so the close counter is
+    /// drained rather than returned -- returning one dropped the other.
+    #[tokio::test]
+    async fn test_every_roll_reaches_files_closed_total() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = ArchiverMetrics::register(&manager, "test");
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let archive = ArchiveConfig {
+            destination: format!("file://{}", dir.path().display()),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            ..ArchiveConfig::default()
+        };
+        let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
+        let storage = create_backend(&archive).expect("backend");
+        // A zero-second interval rolls on each half of a write_record.
+        let policy = RollingPolicy {
+            max_size_bytes: 1024 * 1024,
+            max_age_secs: 0,
+        };
+        let mut writer = ArchiveWriter::new(archive, policy, compressor, storage);
+
+        writer.write_record(b"first").await.expect("write");
+        writer.write_record(b"second").await.expect("write");
+        record_rolls(&metrics, &mut writer, "default_land");
+
+        let rendered = manager.render();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == "archiver_files_closed_total 3"),
+            "files_closed_total dropped a roll:\n{rendered}"
+        );
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == r#"archiver_archive_roll_total{trigger="age"} 3"#),
+            "archive_roll_total dropped a roll:\n{rendered}"
+        );
     }
 
     /// A new destination is bound at construction, so the reloader reports it

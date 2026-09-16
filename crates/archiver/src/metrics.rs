@@ -141,6 +141,10 @@ impl ArchiverMetrics {
         // Labelled metrics (described manually for label dimensions)
         metrics::describe_counter!("archive_roll_total", "Archive file roll events by trigger");
         metrics::describe_counter!("kafka_commit_errors_total", "Failed Kafka offset commits");
+        metrics::describe_counter!(
+            "routing_fallback_total",
+            "Expression-routing fields absent from a record, by field path"
+        );
 
         let dfe = ServiceMetrics::register(manager);
 
@@ -366,6 +370,14 @@ impl ArchiverMetrics {
         counter!("routing_errors_total").increment(1);
     }
 
+    /// Record an expression-routing field a record did not carry.
+    ///
+    /// Read as a ratio against `messages_received_total`: a sustained 1 is a
+    /// field name no source sets, not a tenant named after `default_segment`.
+    pub fn record_routing_fallback(&self, field: &str) {
+        counter!("routing_fallback_total", "field" => field.to_string()).increment(1);
+    }
+
     /// Record hot buffer eviction
     pub fn record_eviction(&self) {
         counter!("hot_buffer_evictions_total").increment(1);
@@ -483,6 +495,7 @@ mod tests {
         m.record_commit(1);
         m.record_commit_error();
         m.record_routing_error();
+        m.record_routing_fallback("org_id");
         m.record_eviction();
         m.set_unique_destinations(5);
         m.set_last_batch_timestamp();
