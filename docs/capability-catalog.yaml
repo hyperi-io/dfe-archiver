@@ -10,7 +10,7 @@
   - name: path_template
     type: string
     required: false
-    description: Path template with {year}/{month}/{day}/{hour} placeholders.
+    description: Path template under the routed destination; supported placeholders are {year}, {month}, {day}, {hour}, {minute}, {timestamp} and {seq}.
   - name: compression
     type: enum
     required: false

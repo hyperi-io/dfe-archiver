@@ -147,7 +147,9 @@ kafka:
 
 archive:
   destination: s3://my-bucket/archives
-  path_template: "{topic}/{year}/{month}/{day}/{hour}"
+  # Under the routed destination; {year} {month} {day} {hour} {minute}
+  # {timestamp} {seq} are the only placeholders, anything else is refused
+  path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824  # 1GB (final compressed size)
   roll_interval_secs: 3600     # 1 hour
 
@@ -270,14 +272,18 @@ Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers
 
 ### Testing
 
+The object-store e2e tests are deliberately not `#[ignore]`d, so the default
+run starts Azurite, fake-gcs-server and LocalStack through testcontainers and
+needs a Docker daemon.
+
 ```bash
-# Unit + integration tests (no external services)
+# Unit, integration and object-store e2e tests
 cargo nextest run
 
-# E2E tests against Docker-local Kafka
+# Adds the Kafka, MinIO and GCS-credential tests, which need a live stack
 TEST_MODE=docker cargo nextest run -- --ignored
 
-# E2E tests against remote devex Kafka
+# The same ignored tests against the remote dev stack
 TEST_MODE=remote cargo nextest run -- --ignored
 
 # Pre-push validation
@@ -289,8 +295,8 @@ hyperi-ci check
 ```bash
 cargo build --release
 
-# With specific allocator
-cargo build --release --features mimalloc
+# Features: jemalloc (in `full`), transport-memory, pgo-driver
+cargo build --release --features jemalloc
 ```
 
 ### CLI Commands

@@ -24,7 +24,8 @@ kafka:
 archive:
   # Local file destination for dev
   destination: "file://./data/archive"
-  path_template: "{topic}/{year}/{month}/{day}/{hour}"
+  # The routed destination is already the leading directory.
+  path_template: "{year}/{month}/{day}/{hour}"
   file_extension: "jsonl"
   # Rolling triggers (on FINAL compressed file size)
   roll_size_bytes: 1073741824    # 1GB final file size

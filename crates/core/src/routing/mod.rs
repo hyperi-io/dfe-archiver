@@ -13,6 +13,23 @@ use compact_str::CompactString;
 use sonic_rs::JsonValueTrait;
 use tracing::trace;
 
+/// Where a message is archived, and which configured expression fields the
+/// payload did not carry.
+///
+/// This crate owns no metrics, so the router reports the fallback and the
+/// archiver crate counts it -- otherwise a misconfigured field name is
+/// indistinguishable from a tenant genuinely called `unknown`.
+#[derive(Debug, Clone)]
+pub struct Routed {
+    /// Destination path segment the writer archives under.
+    pub destination: CompactString,
+
+    /// Indices into `RoutingConfig::expression_fields` that fell through to
+    /// `default_segment`. Empty on the healthy path, so a correctly configured
+    /// deployment allocates nothing here.
+    pub fallback_fields: Vec<usize>,
+}
+
 /// Router for determining archive destination
 pub struct Router {
     config: RoutingConfig,
@@ -25,11 +42,21 @@ impl Router {
         Self { config }
     }
 
+    /// The expression fields this router resolves, in the order
+    /// `Routed::fallback_fields` indexes them.
+    #[must_use]
+    pub fn expression_fields(&self) -> &[String] {
+        &self.config.expression_fields
+    }
+
     /// Route message to destination path
-    pub fn route(&self, message: &KafkaMessage) -> Result<CompactString> {
+    pub fn route(&self, message: &KafkaMessage) -> Result<Routed> {
         match self.config.mode.as_str() {
             "expression" => self.route_by_expression(message),
-            _ => Ok(Self::route_by_topic(message)),
+            _ => Ok(Routed {
+                destination: Self::route_by_topic(message),
+                fallback_fields: Vec::new(),
+            }),
         }
     }
 
@@ -39,21 +66,29 @@ impl Router {
     }
 
     /// Route by JSON field expressions
-    fn route_by_expression(&self, message: &KafkaMessage) -> Result<CompactString> {
+    fn route_by_expression(&self, message: &KafkaMessage) -> Result<Routed> {
         let json: sonic_rs::Value = sonic_rs::from_slice(&message.payload)
             .map_err(|e| Error::Routing(format!("invalid JSON: {e}")))?;
 
         let mut segments = Vec::with_capacity(self.config.expression_fields.len() + 1);
         segments.push(message.topic.to_string());
+        let mut fallback_fields = Vec::new();
 
-        for field_path in &self.config.expression_fields {
-            let value = extract_field(&json, field_path);
-            let resolved = value.unwrap_or_else(|| self.config.default_segment.clone());
+        for (index, field_path) in self.config.expression_fields.iter().enumerate() {
+            let resolved = if let Some(value) = extract_field(&json, field_path) {
+                value
+            } else {
+                fallback_fields.push(index);
+                self.config.default_segment.clone()
+            };
             trace!(field = %field_path, value = %resolved, "Expression routing field");
             segments.push(resolved);
         }
 
-        Ok(CompactString::from(segments.join("/")))
+        Ok(Routed {
+            destination: CompactString::from(segments.join("/")),
+            fallback_fields,
+        })
     }
 }
 
@@ -100,8 +135,9 @@ mod tests {
         let router = Router::new(config);
         let message = make_message("events", r#"{"foo": "bar"}"#);
 
-        let dest = router.route(&message).expect("route");
-        assert_eq!(dest.as_str(), "events");
+        let outcome = router.route(&message).expect("route");
+        assert_eq!(outcome.destination.as_str(), "events");
+        assert!(outcome.fallback_fields.is_empty());
     }
 
     #[test]
@@ -118,8 +154,12 @@ mod tests {
             r#"{"org_id": "acme", "event_type": "login", "data": {}}"#,
         );
 
-        let dest = router.route(&message).expect("route");
-        assert_eq!(dest.as_str(), "events/acme/login");
+        let outcome = router.route(&message).expect("route");
+        assert_eq!(outcome.destination.as_str(), "events/acme/login");
+        assert!(
+            outcome.fallback_fields.is_empty(),
+            "a payload carrying every field took no fallback"
+        );
     }
 
     #[test]
@@ -133,8 +173,13 @@ mod tests {
         let router = Router::new(config);
         let message = make_message("events", r#"{"org_id": "acme"}"#);
 
-        let dest = router.route(&message).expect("route");
-        assert_eq!(dest.as_str(), "events/acme/unknown");
+        let outcome = router.route(&message).expect("route");
+        assert_eq!(outcome.destination.as_str(), "events/acme/unknown");
+        assert_eq!(
+            outcome.fallback_fields,
+            vec![1],
+            "only the missing field reports a fallback"
+        );
     }
 
     #[test]
@@ -148,8 +193,8 @@ mod tests {
         let router = Router::new(config);
         let message = make_message("events", r#"{"tags": {"category": "security"}}"#);
 
-        let dest = router.route(&message).expect("route");
-        assert_eq!(dest.as_str(), "events/security");
+        let outcome = router.route(&message).expect("route");
+        assert_eq!(outcome.destination.as_str(), "events/security");
     }
 
     #[test]
@@ -160,8 +205,8 @@ mod tests {
         };
         let router = Router::new(config);
         let msg = KafkaMessage::for_test(vec![], "events", 0, 0);
-        let dest = router.route(&msg).expect("route empty payload");
-        assert_eq!(dest.as_str(), "events");
+        let outcome = router.route(&msg).expect("route empty payload");
+        assert_eq!(outcome.destination.as_str(), "events");
     }
 
     #[test]
@@ -186,8 +231,8 @@ mod tests {
         };
         let router = Router::new(config);
         let msg = make_message("events", r#"{"a":{"b":{"c":{"d":"deep"}}}}"#);
-        let dest = router.route(&msg).expect("route deep");
-        assert_eq!(dest.as_str(), "events/deep");
+        let outcome = router.route(&msg).expect("route deep");
+        assert_eq!(outcome.destination.as_str(), "events/deep");
     }
 
     #[test]
@@ -199,7 +244,41 @@ mod tests {
         };
         let router = Router::new(config);
         let msg = make_message("events", r#"{"a":{"b":"leaf"}}"#);
-        let dest = router.route(&msg).expect("route deep missing");
-        assert_eq!(dest.as_str(), "events/nope");
+        let outcome = router.route(&msg).expect("route deep missing");
+        assert_eq!(outcome.destination.as_str(), "events/nope");
+        assert_eq!(outcome.fallback_fields, vec![0]);
+    }
+
+    /// Topic routing resolves no fields, so it can never report a fallback --
+    /// the counter must stay specific to a misconfigured expression field.
+    #[test]
+    fn test_topic_routing_reports_no_fallback() {
+        let config = RoutingConfig {
+            mode: "topic".to_string(),
+            expression_fields: vec!["org_id".to_string()],
+            default_segment: "unknown".to_string(),
+        };
+        let router = Router::new(config);
+        let msg = make_message("events", r#"{"nothing": "here"}"#);
+
+        let outcome = router.route(&msg).expect("route by topic");
+        assert!(outcome.fallback_fields.is_empty());
+    }
+
+    /// Every configured field missing is the misconfiguration this reports:
+    /// a field name that no source in the deployment carries.
+    #[test]
+    fn test_every_missing_field_reports_a_fallback() {
+        let config = RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: vec!["org_id".to_string(), "tenant_id".to_string()],
+            default_segment: "unknown".to_string(),
+        };
+        let router = Router::new(config);
+        let msg = make_message("events", r#"{"customer": "acme"}"#);
+
+        let outcome = router.route(&msg).expect("route");
+        assert_eq!(outcome.destination.as_str(), "events/unknown/unknown");
+        assert_eq!(outcome.fallback_fields, vec![0, 1]);
     }
 }

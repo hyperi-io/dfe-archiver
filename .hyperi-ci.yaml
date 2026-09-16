@@ -63,8 +63,8 @@ build:
         enabled: true
         # Workload script must drive the actual hot path (consume → batch
         # → compress → write) for ≥60s. Single-request curls or port-poll
-        # scripts produce NEGATIVE PGO gains. See dfe-loader Canary 2 +
-        # dfe-receiver Canary 1 lessons in TODO.md.
+        # scripts produce NEGATIVE PGO gains, measured on dfe-loader and
+        # dfe-receiver.
         workload_cmd: "bash scripts/pgo-workload.sh"
         duration_secs: 300
       bolt:

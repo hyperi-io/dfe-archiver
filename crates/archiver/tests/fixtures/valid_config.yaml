@@ -10,7 +10,7 @@ kafka:
 
 archive:
   destination: file:///var/data/archive
-  path_template: "{topic}/{year}/{month}/{day}/{hour}/archive"
+  path_template: "{year}/{month}/{day}/{hour}/archive"
   file_extension: jsonl
   roll_size_bytes: 1073741824
   roll_interval_secs: 3600

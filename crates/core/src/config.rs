@@ -267,7 +267,10 @@ pub struct ArchiveConfig {
     /// archiving and loses every file when the pod is replaced.
     pub destination: String,
 
-    /// Path template with placeholders: {topic}, {date}, {hour}, etc.
+    /// Path template under the routed destination. The supported placeholders
+    /// are exactly {year}, {month}, {day}, {hour}, {minute}, {timestamp} and
+    /// {seq}; any other is refused at config validation, because the writer
+    /// would pass it through into the object key as literal braces.
     pub path_template: String,
 
     /// File extension (without compression suffix)
@@ -327,8 +330,8 @@ impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {
             destination: String::new(),
-            // Topic is already prepended as a directory by the archiver (per-topic writers).
-            // Do not include {topic} here — it would result in double topic paths.
+            // The router's destination is already prepended as a directory, so
+            // the topic needs no placeholder of its own here.
             path_template: "{year}/{month}/{day}/{hour}".to_string(),
             file_extension: "jsonl".to_string(),
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size

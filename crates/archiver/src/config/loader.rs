@@ -6,6 +6,7 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use dfe_archiver_core::archive::{PATH_TEMPLATE_PLACEHOLDERS, unknown_placeholders};
 use dfe_archiver_core::config::{Config, TRANSPORT_GRPC, TRANSPORT_KAFKA};
 use dfe_archiver_core::{Error, Result};
 use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
@@ -166,6 +167,18 @@ pub fn validate_config(config: &Config) -> Result<()> {
         return Err(Error::Config(
             "buffer.spool_dir cannot be empty".to_string(),
         ));
+    }
+
+    // An unsupported placeholder is not substituted and not dropped: it reaches
+    // the object store as literal braces in the key, baked into every object
+    // already written, so it is refused at startup instead.
+    let unknown = unknown_placeholders(&config.archive.path_template);
+    if !unknown.is_empty() {
+        return Err(Error::Config(format!(
+            "archive.path_template has unsupported placeholders: {} (supported: {})",
+            unknown.join(", "),
+            PATH_TEMPLATE_PLACEHOLDERS.join(", ")
+        )));
     }
 
     if config.archive.multipart_chunk_size > 0
@@ -466,6 +479,39 @@ mod tests {
         config.routing.mode = "expression".to_string();
         config.routing.expression_fields = vec!["org_id".to_string()];
         assert!(validate_config(&config).is_ok(), "expression mode is valid");
+    }
+
+    /// `{topic}` and `{date}` were advertised by the field's own doc comment
+    /// and neither exists, so a template carrying one wrote literal braces into
+    /// every object key.
+    #[test]
+    fn test_unsupported_path_template_placeholder_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.path_template = "{topic}/{year}/{month}/{day}/{hour}".to_string();
+
+        let err = validate_config(&config).expect_err("{topic} is not substituted");
+        assert!(
+            err.to_string().contains("{topic}"),
+            "error must name the placeholder: {err}"
+        );
+
+        config.archive.path_template = "{date}/{hour}".to_string();
+        let err = validate_config(&config).expect_err("{date} is not substituted");
+        assert!(
+            err.to_string().contains("{date}"),
+            "error must name the placeholder: {err}"
+        );
+    }
+
+    #[test]
+    fn test_supported_path_template_placeholders_pass() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.archive.path_template =
+            "{year}/{month}/{day}/{hour}/{minute}/{timestamp}/{seq}".to_string();
+
+        validate_config(&config).expect("every supported placeholder is valid");
     }
 
     #[test]

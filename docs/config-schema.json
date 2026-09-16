@@ -298,7 +298,7 @@
           "default": ""
         },
         "path_template": {
-          "description": "Path template with placeholders: {topic}, {date}, {hour}, etc.",
+          "description": "Path template under the routed destination. The supported placeholders\nare exactly {year}, {month}, {day}, {hour}, {minute}, {timestamp} and\n{seq}; any other is refused at config validation, because the writer\nwould pass it through into the object key as literal braces.",
           "type": "string",
           "default": "{year}/{month}/{day}/{hour}"
         },

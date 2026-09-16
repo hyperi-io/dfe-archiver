@@ -21,7 +21,7 @@ async fn test_file_archive_roundtrip() {
 
     let config = ArchiveConfig {
         destination: format!("file://{base_path}"),
-        path_template: "{topic}/{year}/{month}/{day}/{hour}/archive".to_string(),
+        path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
         file_extension: "jsonl".to_string(),
         ..Default::default()
     };
@@ -54,8 +54,37 @@ async fn test_file_archive_roundtrip() {
 
     assert!(!entries.is_empty(), "should have created archive files");
 
-    for entry in entries {
-        println!("Created: {}", entry.path().display());
+    // The key layout is what anything reading the archive back by prefix
+    // depends on, and an unsubstituted placeholder is baked into every object
+    // already written -- so assert the shape, not just that a file exists.
+    for entry in &entries {
+        let path = entry.path().display().to_string();
+        assert!(
+            !path.contains('{') && !path.contains('}'),
+            "an unsubstituted placeholder reached the key: {path}"
+        );
+
+        let key = path
+            .strip_prefix(&base_path)
+            .and_then(|k| k.strip_prefix('/'))
+            .expect("the key sits under the destination directory");
+        let segments: Vec<&str> = key.split('/').collect();
+        assert_eq!(
+            segments.len(),
+            5,
+            "expected <year>/<month>/<day>/<hour>/<file>, got {key}"
+        );
+        for (segment, width) in segments[..4].iter().zip([4, 2, 2, 2]) {
+            assert_eq!(segment.len(), width, "wrong width in {key}");
+            assert!(
+                segment.chars().all(|c| c.is_ascii_digit()),
+                "expected a substituted date segment in {key}"
+            );
+        }
+        assert!(
+            segments[4].starts_with("archive-") && segments[4].ends_with(".jsonl.zst"),
+            "expected the literal stem, sequence, extension and codec suffix: {key}"
+        );
     }
 }
 

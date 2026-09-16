@@ -37,7 +37,7 @@ pub fn deployment_contract() -> DeploymentContract {
         extra_ports: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe/archiver.yaml".into()],
         secrets: vec![],
-        default_config: None,
+        default_config: default_config(),
         depends_on: vec!["kafka".into()],
         keda: Some(KedaContract::default()),
         native_deps: NativeDepsContract::for_scalo_features(
@@ -64,6 +64,25 @@ pub fn deployment_contract() -> DeploymentContract {
     }
 }
 
+/// The default configuration the contract publishes, serialised from
+/// `Config::default()`.
+///
+/// Derived rather than hand-authored so the published default cannot drift
+/// from the one the binary boots with, which is what makes
+/// `generate-artefacts` output pass this app's own `config-check`.
+fn default_config() -> Option<serde_json::Value> {
+    match serde_json::to_value(dfe_archiver_core::config::Config::default()) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "Config::default() did not serialise -- the contract publishes no default config"
+            );
+            None
+        }
+    }
+}
+
 /// Capability catalog for dfe-archiver: the object-store backends it writes
 /// archives to, grounded in `dfe_archiver_core::config::ArchiveConfig`. The
 /// typed per-backend knobs live in the derived schema; this lists the backends
@@ -75,7 +94,7 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
             .description("Rolling object-store archiver: consumes Kafka, writes compressed rolled files to a storage backend selected by the destination URL scheme.")
             .maturity("stable")
             .field(FieldSpec::string("destination").required().description("Destination URL; the scheme selects the backend (file:// | s3:// | gs:// | az:// | minio://)."))
-            .field(FieldSpec::string("path_template").description("Path template with {year}/{month}/{day}/{hour} placeholders."))
+            .field(FieldSpec::string("path_template").description("Path template under the routed destination; supported placeholders are {year}, {month}, {day}, {hour}, {minute}, {timestamp} and {seq}."))
             .field(FieldSpec::enumeration("compression", ["none", "zstd", "lz4", "snappy", "gzip"]).description("Rolled-file compression codec."))
             .children(vec![
                 Capability::service("file").description("Local filesystem (file://)."),
@@ -139,6 +158,26 @@ mod tests {
         // CARGO_MANIFEST_DIR is crates/archiver; the repo docs/ is two up.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
         scalo::deployment::assert_no_config_artifact_drift(&deployment_contract(), dir);
+    }
+
+    /// dfe-docker generates `defaults_v<version>.yaml` from this field, so it
+    /// has to be the real `Config::default()` and it has to pass the same
+    /// validator the service boots through.
+    #[test]
+    fn test_published_default_config_round_trips_through_the_validator() {
+        let published = deployment_contract()
+            .default_config
+            .expect("the contract must publish a default config");
+
+        let config: dfe_archiver_core::config::Config =
+            serde_json::from_value(published.clone()).expect("published default must deserialise");
+        crate::config::validate_config(&config).expect("published default must validate");
+
+        assert_eq!(
+            serde_json::to_value(&config).expect("re-serialise"),
+            published,
+            "the published default is not Config::default()"
+        );
     }
 
     #[test]

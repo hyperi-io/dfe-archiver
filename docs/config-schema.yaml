@@ -290,7 +290,11 @@ $defs:
         type: string
         default: ''
       path_template:
-        description: 'Path template with placeholders: {topic}, {date}, {hour}, etc.'
+        description: |-
+          Path template under the routed destination. The supported placeholders
+          are exactly {year}, {month}, {day}, {hour}, {minute}, {timestamp} and
+          {seq}; any other is refused at config validation, because the writer
+          would pass it through into the object key as literal braces.
         type: string
         default: '{year}/{month}/{day}/{hour}'
       file_extension:
