@@ -35,6 +35,7 @@ use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use scalo::memory::MemoryGuard;
 use scalo::metrics::FlushTrigger;
 use scalo::scaling::ScalingPressure;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -226,6 +227,46 @@ fn record_routing_fallbacks(
             );
         }
     }
+}
+
+/// Drop every offset at or above the lowest one still withheld on its
+/// partition, so a commit can never cover a record that is only in memory.
+///
+/// A Kafka commit is a per-partition watermark and the transport commits the
+/// highest offset it is handed, while expression routing spreads one
+/// partition across per-destination buffers that flush independently -- so a
+/// flush for one destination would otherwise commit past another's records.
+///
+/// `withheld` may name partitions absent from `committable` and vice versa;
+/// both are handled.
+fn committable_offsets(
+    committable: Vec<KafkaOffset>,
+    withheld: &[KafkaOffset],
+) -> Vec<KafkaOffset> {
+    if withheld.is_empty() {
+        return committable;
+    }
+
+    let mut floor: HashMap<(&str, i32), i64> = HashMap::new();
+    for offset in withheld {
+        floor
+            .entry((offset.topic(), offset.partition()))
+            .and_modify(|lowest| {
+                if offset.offset() < *lowest {
+                    *lowest = offset.offset();
+                }
+            })
+            .or_insert_with(|| offset.offset());
+    }
+
+    committable
+        .into_iter()
+        .filter(|offset| {
+            floor
+                .get(&(offset.topic(), offset.partition()))
+                .is_none_or(|lowest| offset.offset() < *lowest)
+        })
+        .collect()
 }
 
 /// Map the operator's `buffer` section onto the tiered buffer's own config.
@@ -457,6 +498,7 @@ impl Archiver {
                     if !aged_batches.is_empty() {
                         debug!(count = aged_batches.len(), "Flushing aged batches (timer)");
                         let mut offsets_to_commit = Vec::new();
+                        let mut withheld = Vec::new();
                         for batch in aged_batches {
                             if let Err(e) = self.write_batch(&batch).await {
                                 error!(
@@ -465,19 +507,14 @@ impl Archiver {
                                     "Failed to write aged batch (timer)"
                                 );
                                 self.metrics.record_error();
-                                self.send_to_dlq(&batch.destination, &batch.data, &e).await;
+                                if !self.send_to_dlq(&batch.destination, &batch.data, &e).await {
+                                    withheld.extend(batch.offsets);
+                                }
                             } else {
                                 offsets_to_commit.extend(batch.offsets);
                             }
                         }
-                        if !offsets_to_commit.is_empty() {
-                            let commit_count = offsets_to_commit.len() as u64;
-                            if let Err(e) = self.transport.commit(offsets_to_commit).await {
-                                self.metrics.record_commit_error();
-                                error!(error = %e, "Failed to commit offsets (timer flush)");
-                            }
-                            self.metrics.record_commit(commit_count);
-                        }
+                        self.commit_offsets(offsets_to_commit, &withheld).await;
                     }
                     // Runs after the aged batches so an active destination rolls
                     // through the write path, leaving only idle files here.
@@ -543,10 +580,10 @@ impl Archiver {
         let (staged, backpressure) = self.route_batch(messages);
 
         // Phase 2: concurrent per-destination writes; collect commit offsets.
-        let offsets_to_commit = self.write_staged(staged).await;
+        let (offsets_to_commit, withheld) = self.write_staged(staged).await;
 
         // Phase 3: commit Kafka offsets (release point for at-least-once).
-        self.commit_offsets(offsets_to_commit).await;
+        self.commit_offsets(offsets_to_commit, &withheld).await;
 
         if backpressure {
             let pause_secs = self
@@ -672,7 +709,7 @@ impl Archiver {
     async fn write_staged(
         &self,
         staged: Vec<dfe_archiver_core::buffer::StagedBatch>,
-    ) -> Vec<KafkaOffset> {
+    ) -> (Vec<KafkaOffset>, Vec<KafkaOffset>) {
         // futures::future::join_all runs writes concurrently on this task —
         // maximises I/O overlap without spawning new tasks.
         let write_results: Vec<std::result::Result<(), Error>> = futures::future::join_all(
@@ -683,6 +720,7 @@ impl Archiver {
         .await;
 
         let mut offsets_to_commit: Vec<KafkaOffset> = Vec::new();
+        let mut withheld: Vec<KafkaOffset> = Vec::new();
         let (mut cycle_ok, mut cycle_err) = (0usize, 0usize);
         for (batch, result) in staged.into_iter().zip(write_results) {
             match result {
@@ -703,21 +741,37 @@ impl Archiver {
                     // per-backend error counter is non-empty (metrics-gap audit).
                     self.metrics
                         .record_sink_error(self.startup_config.archive.backend_name());
-                    self.send_to_dlq(&batch.destination, &batch.data, &e).await;
+                    // A batch the DLQ would not take exists nowhere but this
+                    // pod's memory, so its offsets hold the watermark down.
+                    if !self.send_to_dlq(&batch.destination, &batch.data, &e).await {
+                        withheld.extend(batch.offsets);
+                    }
                 }
             }
         }
         // Drive the sink circuit gate from this cycle's outcome. Skipped when the
         // cycle had no staged batches at all (both counters 0 -> latch unchanged).
         self.update_sink_circuit(cycle_ok, cycle_err);
-        offsets_to_commit
+        (offsets_to_commit, withheld)
     }
 
     /// Phase 3: commit Kafka offsets — the at-least-once release point.
     /// Errors are logged but not propagated; rebalance retries will
     /// re-deliver the messages and writes are idempotent at the file level
     /// (rolling on size + content hash makes duplicates harmless).
-    async fn commit_offsets(&self, offsets_to_commit: Vec<KafkaOffset>) {
+    ///
+    /// Every caller commits through here so the floor is applied once per
+    /// cycle: the transport commits the highest offset per partition it is
+    /// handed, and a second commit in the same cycle can only rewind it.
+    ///
+    /// `withheld` carries the offsets of records this cycle could not place --
+    /// a write that failed and whose DLQ would not take it. Records still held
+    /// in another destination's buffer bound the watermark the same way, and
+    /// come from the buffer itself.
+    async fn commit_offsets(&self, offsets_to_commit: Vec<KafkaOffset>, withheld: &[KafkaOffset]) {
+        let mut floor = self.buffer.lowest_pending_offsets();
+        floor.extend_from_slice(withheld);
+        let offsets_to_commit = committable_offsets(offsets_to_commit, &floor);
         if offsets_to_commit.is_empty() {
             return;
         }
@@ -1070,10 +1124,12 @@ impl Archiver {
     ///
     /// Non-fatal: logs and records metrics on DLQ failure but does not
     /// propagate the error (the original write error is the primary concern).
-    async fn send_to_dlq(&self, destination: &str, data: &[u8], error: &Error) {
+    /// Returns whether the batch reached the DLQ, so a caller can tell a
+    /// record that still exists somewhere from one that does not.
+    async fn send_to_dlq(&self, destination: &str, data: &[u8], error: &Error) -> bool {
         if !self.dlq.is_enabled() {
             trace!(destination, "DLQ disabled, skipping failed batch");
-            return;
+            return false;
         }
         debug!(
             destination,
@@ -1091,14 +1147,15 @@ impl Archiver {
 
         if let Err(dlq_err) = self.dlq.send(entry).await {
             error!(error = %dlq_err, destination, "DLQ send also failed");
-        } else {
-            self.metrics.record_dlq(1);
-            scalo::logger::security::record_dlq(
-                "storage_write_failed",
-                &error.to_string(),
-                Some(destination),
-            );
+            return false;
         }
+        self.metrics.record_dlq(1);
+        scalo::logger::security::record_dlq(
+            "storage_write_failed",
+            &error.to_string(),
+            Some(destination),
+        );
+        true
     }
 
     /// Route inbound-filter DLQ entries surfaced by the transport.
@@ -1160,8 +1217,8 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        buffer_config, record_files_opened, record_rolls, record_routing_fallbacks,
-        restart_required_changes,
+        buffer_config, committable_offsets, record_files_opened, record_rolls,
+        record_routing_fallbacks, restart_required_changes,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -1171,9 +1228,63 @@ mod tests {
     use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config, RoutingConfig};
     use dfe_archiver_core::routing::Router;
     use dfe_archiver_core::types::KafkaMessage;
+    use dfe_archiver_core::types::KafkaOffset;
     use dfe_archiver_io::storage::create_backend;
     use std::path::Path;
     use std::sync::atomic::AtomicU64;
+
+    fn offset(topic: &str, partition: i32, offset: i64) -> KafkaOffset {
+        KafkaOffset::from(&KafkaMessage::for_test(
+            b"x".to_vec(),
+            topic,
+            partition,
+            offset,
+        ))
+    }
+
+    /// One partition's records sit in a buffer per destination under
+    /// expression routing, so a flush for one destination must not commit
+    /// past a record another still holds.
+    #[test]
+    fn a_flush_cannot_commit_past_another_destinations_held_record() {
+        let flushed = vec![
+            offset("events", 3, 1001),
+            offset("events", 3, 1002),
+            offset("events", 3, 1400),
+        ];
+        let held = vec![offset("events", 3, 1000)];
+
+        let committable = committable_offsets(flushed, &held);
+
+        assert!(
+            committable.is_empty(),
+            "every flushed offset is above the held 1000, so none may commit"
+        );
+    }
+
+    /// Offsets below the floor still commit -- the floor bounds the
+    /// watermark, it does not stop every commit on the partition.
+    #[test]
+    fn offsets_below_the_floor_still_commit() {
+        let flushed = vec![offset("events", 3, 998), offset("events", 3, 1200)];
+        let held = vec![offset("events", 3, 1000)];
+
+        let committable = committable_offsets(flushed, &held);
+
+        assert_eq!(committable.len(), 1);
+        assert_eq!(committable[0].offset(), 998);
+    }
+
+    /// A partition nothing holds is unaffected by another partition's floor.
+    #[test]
+    fn a_floor_binds_only_its_own_partition() {
+        let flushed = vec![offset("events", 4, 50), offset("other", 3, 60)];
+        let held = vec![offset("events", 3, 10)];
+
+        let committable = committable_offsets(flushed, &held);
+
+        assert_eq!(committable.len(), 2, "neither shares the held partition");
+    }
 
     #[test]
     fn test_cleared_brokers_fails_validation() {

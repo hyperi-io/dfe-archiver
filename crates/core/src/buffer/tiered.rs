@@ -13,6 +13,7 @@ use dashmap::DashMap;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use scalo::logger::helpers::log_state_change;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -392,6 +393,35 @@ impl TieredBufferManager {
         Ok(batches_to_write)
     }
 
+    /// The lowest offset still held per `(topic, partition)`, across every
+    /// destination buffer.
+    ///
+    /// A Kafka commit is a per-partition watermark while a buffer is per
+    /// destination, so expression routing spreads one partition's offsets
+    /// across buffers that fill and age independently, and a watermark
+    /// committed past a record still only in memory loses it to a crash.
+    ///
+    /// Scans the residual buffers once per flush cycle rather than tracking a
+    /// minimum on `push`, keeping the per-message path free of the bookkeeping.
+    #[must_use]
+    pub fn lowest_pending_offsets(&self) -> Vec<KafkaOffset> {
+        let mut lowest: HashMap<(String, i32), KafkaOffset> = HashMap::new();
+        for entry in &self.hot_buffers {
+            for offset in &entry.offsets {
+                let key = (offset.topic().to_string(), offset.partition());
+                lowest
+                    .entry(key)
+                    .and_modify(|held| {
+                        if offset.offset() < held.offset() {
+                            *held = offset.clone();
+                        }
+                    })
+                    .or_insert_with(|| offset.clone());
+            }
+        }
+        lowest.into_values().collect()
+    }
+
     /// Flush all hot buffers (for shutdown or time-based flush)
     pub fn flush_all(&self) -> Vec<StagedBatch> {
         let mut batches = Vec::new();
@@ -652,6 +682,48 @@ mod tests {
             }
             assert_eq!(offset.topic(), "topic");
         }
+    }
+
+    /// Expression routing puts one partition's records into a buffer per
+    /// destination, so the floor has to be the lowest offset held anywhere --
+    /// not the lowest in whichever buffer happens to flush.
+    #[test]
+    fn lowest_pending_offsets_spans_destinations_that_buffer_independently() {
+        let (_spool, config) = spooled(10, 100_000);
+        let manager = TieredBufferManager::new(config).expect("create");
+
+        manager
+            .push("org-a", make_message(b"a", "events", 1000))
+            .expect("push");
+        for offset in 1001..1005 {
+            manager
+                .push("org-b", make_message(b"b", "events", offset))
+                .expect("push");
+        }
+
+        let pending = manager.lowest_pending_offsets();
+        assert_eq!(pending.len(), 1, "one topic-partition is buffered");
+        assert_eq!(pending[0].offset(), 1000, "org-a's record is the floor");
+        assert_eq!(pending[0].topic(), "events");
+        assert_eq!(pending[0].partition(), 0);
+    }
+
+    /// A partition nothing holds must not appear in the floor, or every
+    /// commit for it would be filtered away.
+    #[test]
+    fn lowest_pending_offsets_is_empty_with_nothing_buffered() {
+        let (_spool, config) = spooled(10, 100_000);
+        let manager = TieredBufferManager::new(config).expect("create");
+        assert!(manager.lowest_pending_offsets().is_empty());
+
+        manager
+            .push("org-a", make_message(b"a", "events", 7))
+            .expect("push");
+        let _ = manager.flush_all();
+        assert!(
+            manager.lowest_pending_offsets().is_empty(),
+            "a flushed buffer holds nothing"
+        );
     }
 
     #[test]
