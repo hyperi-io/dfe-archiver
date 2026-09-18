@@ -335,11 +335,13 @@ fn worker_threads(requested: Option<&str>, available: usize) -> usize {
 }
 
 fn main() {
-    // Without a registered heap source the memory guard sees only the bytes the
-    // pipeline accounted, so `memory_used_bytes` and the inbound brake it feeds
-    // both read near zero.
+    // A heap source outranks the guard's cgroup read, and prefixed jemalloc
+    // cannot see librdkafka's queues, thread stacks or retained pages -- so it
+    // is registered only where the guard would otherwise count reservations.
     #[cfg(feature = "jemalloc")]
-    let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+    if scalo::memory::UsageSource::detect() == scalo::memory::UsageSource::Reservations {
+        let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+    }
 
     // Ahead of the runtime build so a TOKIO_WORKER_THREADS in the env file is
     // the one the builder reads.
