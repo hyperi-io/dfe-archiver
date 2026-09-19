@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-archiver
-  File:         ARCHITECTURE.md
+  File:         docs/architecture.md
   Purpose:      Crate map, the one-way rules between them, and the build graph
   Language:     Markdown
 
@@ -12,7 +12,7 @@
 
 Where things live and which way the dependencies point. The design itself --
 the pipeline, the rolling model, the storage backends -- is
-[docs/DESIGN.md](docs/DESIGN.md).
+[DESIGN.md](DESIGN.md).
 
 ## Codemap
 

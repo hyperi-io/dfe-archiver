@@ -35,16 +35,10 @@ flowchart LR
     ST -. write ok .-> C["Kafka offset commit<br/>at-least-once"]
 ```
 
-### Workspace Structure
-
-The project is a Rust workspace with three crates:
-
-- **`crates/core`** - Types, configuration, compression codecs, buffer manager, routing, archive writer
-- **`crates/io`** - Kafka transport adapter, storage backends (File, S3, GCS, Azure, MinIO)
-- **`crates/archiver`** - Binary entry point, pipeline orchestrator, metrics, CLI, deployment contract
-
-[ARCHITECTURE.md](ARCHITECTURE.md) carries the codemap, the one-way rules
-between those crates, and the build graph.
+The workspace is three crates -- `core`, `io` and `archiver` -- described under
+[Where things live](#where-things-live).
+[docs/architecture.md](docs/architecture.md) carries the codemap, the one-way
+rules between them, and the build graph.
 
 ### Tiered Buffer Design
 
@@ -315,3 +309,62 @@ dfe-archiver version              # Version info
 This software is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE) for details.
 
 Copyright (c) 2026 HyperI Pty Ltd
+
+## Context
+
+### What this is
+
+dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kafka or the scalo Push gRPC listener, are buffered per destination, compressed, and written as rolling files to `file`, `s3`, `gs`, `az` or MinIO. It parses nothing, enriches nothing, routes between no topics and answers no queries. Not a library either -- all three crates set `publish = false` and the artefact is a container image on ghcr. With nothing configured it starts and idles rather than crash-looping -- see [idling until configured](#which-transport-and-idling-until-configured).
+
+### Where things live
+
+| Path | What it holds |
+|------|---------------|
+| `crates/core/` | Config types, the rolling writer, the tiered buffer, routing, codecs, the storage trait. No I/O, no metrics. |
+| `crates/io/` | Kafka and gRPC transports, and the object-store backends behind `create_backend`. The cold-build bottleneck, none of it ours. |
+| `crates/archiver/` | The binary. `archiver.rs` the pipeline loop, `main.rs` the scalo `ServiceApp` wiring, `metrics.rs` the Prometheus surface, `contract.rs` the deployment contract. |
+| `crates/archiver/src/config/loader.rs` | `init_cascade` -- the call that makes `ARCHIVER_*__*` reach anything. |
+| `crates/archiver/src/bin/pgo_driver.rs` | The second `[[bin]]`, gated on `required-features = ["pgo-driver"]`. The gate keeps it out of the release payload: hyperi-ci skips feature-gated binaries when packaging, and verifies BOLT on the first packaged binary only. |
+| `Dockerfile` | Generated from `contract.rs`. Its header names the generator and schema version. |
+| `docs/architecture.md` | Crate map and the one-way rules. `docs/DESIGN.md` is the pipeline design. |
+| `.hyperi-ci.yaml` | PGO and BOLT settings, and which gates block versus warn. `.config/nextest.toml` and `scripts/pgo-workload.sh` are what it drives. |
+
+### Commands that prove a change
+
+| Command | What it covers |
+|---------|----------------|
+| `hyperi-ci check` | The pre-push gate. `make check` is the same. |
+| `cargo nextest run` | Unit, integration and object-store e2e. Those are not `#[ignore]`d, so it starts Azurite, fake-gcs-server and LocalStack via testcontainers and needs a Docker daemon. |
+| `TEST_MODE=docker cargo nextest run -- --ignored` | Adds the Kafka, MinIO and GCS-credential tests, which need a live stack. `TEST_MODE=remote` runs them against the remote dev stack. |
+| `cargo deny check advisories` | Advisories and yanked crates. Run it by hand and read it. |
+
+Green says less than it looks, three ways:
+
+- `quality.rust.audit` and `quality.rust.deny` are `warn`, so red advisories leave the run green (#85).
+- the `default` nextest profile sets `retries = 0` deliberately, because hyperi-ci never selects `--profile ci`. A retry there hides a real intermittent. A test pins it.
+- the `push` trigger ignores `docs/**` and `**.md`, so a docs-only push runs nothing. `pull_request` has no such filter.
+
+### What tends to bite
+
+| Don't | Do | Why |
+|-------|----|-----|
+| Commit the Kafka offsets of the batch that just flushed. | Commit a partition only up to the lowest offset still buffered in ANY destination, plus one. | Default routing is expression on `org_id`, so one partition fans out to several buffers. Org B's flush commits past Org A's unflushed records, and an ungraceful exit loses them (#82). |
+| Build a second `MetricsManager` in a test and assert on `render()`. | Share one manager, assert on the delta. | `set_global_recorder` succeeds once per process. Later managers keep the existing recorder and render an empty string. nextest forks per test and hides it, `cargo-llvm-cov` runs one process and does not (#84). |
+| Trust `cargo update -p rustls` to clear the advisory. | `cargo update -p rustls --precise 0.23.45`, then build both arches. | Plain `-p` stops at 0.23.43, still vulnerable, because 0.23.45 needs aws-lc-rs to move too. `--precise` drags `aws-lc-sys` 0.41 to 0.45, which compiles C (#85). |
+| Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |
+| Point `scalo` at a local path to try an unreleased change. | Keep the crates.io range. Read the local clone instead. | A path override builds against uncommitted work, so the release does not reproduce. |
+| Hand-edit `Dockerfile`. | `dfe-archiver emit-dockerfile > Dockerfile`. | It is generated from the deployment contract, and a scalo release can move the generator or its schema version. |
+| Give PGO a port check or a startup probe as its workload. | Drive consume, route, compress and write for 60s or more. | Shallow workloads bias the profile toward startup paths and give NEGATIVE gains. Measured on dfe-loader and dfe-receiver. |
+
+### Where this sits
+
+Inbound:
+
+- **hyperi-io/scalo-rs**, cargo dependency. The workspace declares `scalo = { version = ">=2.12.1, <3" }` and all three crates inherit it, so a scalo release is a range check, a bump and a rebuild.
+- **hyperi-io/scalo-rs** again, generator, lockstep. `Dockerfile` comes from `scalo::deployment::generate_dockerfile()` over this repo's contract, so a generator or schema-version change means regenerate and commit the diff.
+
+Outbound -- the repo a change here breaks:
+
+- **hyperi-io/dfe-infra**, image pin, lockstep. `helm/charts/dfe-archiver/Chart.yaml` carries the `appVersion`, drift-checked against dfe-infra's `versions.yaml`. A release here is not deployed until that pin moves. The chart lives there -- `dfe-archiver emit-helm` can write one, this repo commits none.
+
+Regenerate both from dfe-infra: `python3 scripts/dfe-stack suite --consumer dfe-archiver`, and again with `--producer`.
