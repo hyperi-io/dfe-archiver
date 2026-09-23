@@ -22,8 +22,8 @@ quality:
   rust:
     fmt: blocking           # Formatting check (cargo fmt --check)
     clippy: blocking        # Linting (cargo clippy)
-    audit: warn             # Security audit (cargo audit) - warn only
-    deny: warn              # License/advisory check (cargo deny)
+    audit: blocking         # Security audit (cargo audit)
+    deny: blocking          # License/advisory check (cargo deny)
     # Feature sets to test with clippy (jemalloc-only per 2026-04-17 DFE policy)
     features:
       - "default"
