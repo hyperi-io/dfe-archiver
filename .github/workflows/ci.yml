@@ -41,14 +41,8 @@ permissions:
 
 jobs:
   ci:
-    # Tier 2 (PGO + BOLT) contract: `@main` must be at hyperi-ci ≥ v1.12.1
-    # (commit ba03ff0+) so HYPERCI_CHANNEL resolves correctly on tagged
-    # dispatches; `publish-target: both` resolves to release channel
-    # (Tier 2 unlocked). Loader Canary 2 confirmed both are required.
-    # Pin to a specific commit if reproducibility outweighs tracking tip.
     uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@main
     with:
-      publish-target: both
       tag: ${{ inputs.tag || '' }}
       from-head: ${{ inputs.from-head || '' }}
       bump: ${{ inputs.bump || 'auto' }}
