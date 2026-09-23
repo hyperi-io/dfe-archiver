@@ -54,21 +54,6 @@ build:
     # Feature sets to build (production builds use jemalloc)
     features:
       - "jemalloc"
-    # Channel-tiered release optimisation (hyperi-ci v1.12.1+).
-    # alpha:          Tier 1 — jemalloc + thin LTO        (~4 min/arch)
-    # beta:           Tier 1 — jemalloc + fat LTO         (~10 min/arch)
-    # release:        Tier 2 — Tier 1 + PGO + BOLT        (~26 min/arch)
-    optimize:
-      pgo:
-        enabled: true
-        # Workload script must drive the actual hot path (consume → batch
-        # → compress → write) for ≥60s. Single-request curls or port-poll
-        # scripts produce NEGATIVE PGO gains, measured on dfe-loader and
-        # dfe-receiver.
-        workload_cmd: "bash scripts/pgo-workload.sh"
-        duration_secs: 300
-      bolt:
-        enabled: true       # Linux-only, +5-15% on top of PGO. Requires pgo.
 
 # Publishing (on release)
 publish:
