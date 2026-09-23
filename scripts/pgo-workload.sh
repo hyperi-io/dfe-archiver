@@ -243,7 +243,7 @@ metrics:
   address: "127.0.0.1:9091"
   path: "/metrics"
 
-# DLQ: rustlib eagerly creates the file backend regardless of dlq.enabled.
+# DLQ: scalo eagerly creates the file backend regardless of dlq.enabled.
 # Default path /var/spool/dfe/dlq is unwriteable in CI runners. Disabling
 # the file backend (file.enabled: false) skips writer init entirely.
 dlq:
