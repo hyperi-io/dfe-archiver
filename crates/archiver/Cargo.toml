@@ -42,7 +42,7 @@ scalo = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "service-metrics",
     # transport-kafka + transport-grpc are the WHOLE inbound menu: they are the
     # two arms of `SourceTransport` and the only two names `validate_config`
-    # accepts, so scalo's file/pipe/http/redis/memory backends stay out.
+    # accepts, so scalo's file/pipe/http/memory backends stay out.
     "transport-kafka", "transport-grpc", "http-server", "tiered-sink", "spool",
     # `scaling` exposes the unified ScalingPressure engine served at
     # /scaling/pressure; `governor` exposes the self-regulation inbound brake.
