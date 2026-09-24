@@ -6,9 +6,10 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use dfe_archiver_core::config::TRANSPORT_GRPC;
 use scalo::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract, OciLabels,
-    base_image_from_cascade,
+    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaContract,
+    NativeDepsContract, OciLabels, PortContract, base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-archiver.
@@ -34,12 +35,19 @@ pub fn deployment_contract() -> DeploymentContract {
         metric_prefix: "archiver".into(),
         config_mount_path: "/etc/dfe/archiver.yaml".into(),
         image_registry: "ghcr.io/hyperi-io".into(),
-        extra_ports: vec![],
+        // Gated so the push port is published only where the Push listener binds it.
+        extra_ports: vec![
+            PortContract::tcp("push", 6000)
+                .when_equals("config.transport", TRANSPORT_GRPC)
+                .bound_from("grpc.listen"),
+        ],
+        unbound_listen_paths: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe/archiver.yaml".into()],
         secrets: vec![],
         default_config: default_config(),
         depends_on: vec!["kafka".into()],
-        keda: Some(KedaContract::default()),
+        // No raw-lag trigger: DFE scales on the pressure composite, which this generator cannot express.
+        keda: Some(KedaContract::default().with_kafka_trigger(KafkaLagTrigger::disabled())),
         native_deps: NativeDepsContract::for_scalo_features(
             &["transport-kafka", "spool", "tiered-sink"],
             &base_image,
@@ -133,6 +141,63 @@ mod tests {
         assert_eq!(contract.health.liveness_path, "/livez");
         assert_eq!(contract.health.readiness_path, "/readyz");
         assert!(contract.keda.is_some());
+    }
+
+    /// `generate-artefacts` and `generate_chart` refuse a contract that fails
+    /// these checks, and write nothing.
+    #[test]
+    fn test_contract_passes_the_generator_checks() {
+        deployment_contract()
+            .validate()
+            .expect("contract must pass DeploymentContract::validate");
+    }
+
+    #[test]
+    fn test_every_listener_has_a_port() {
+        scalo::deployment::assert_listeners_declared(&deployment_contract());
+    }
+
+    /// The push port follows `transport`: off on the published kafka default,
+    /// on for grpc, and the address the charts bind agrees with its number.
+    #[test]
+    fn test_push_port_exists_on_the_grpc_transport_only() {
+        let mut contract = deployment_contract();
+        let push = contract
+            .extra_ports
+            .iter()
+            .find(|p| p.name == "push")
+            .expect("push port")
+            .clone();
+        assert_eq!(push.port, 6000);
+        let gate = push.when.as_ref().expect("push port must be gated");
+
+        let mut config = contract.default_config.clone().expect("default config");
+        assert_eq!(gate.holds_in(&config), Some(false));
+
+        config["transport"] = serde_json::json!(TRANSPORT_GRPC);
+        config["grpc"]["listen"] = serde_json::json!("0.0.0.0:6000");
+        assert_eq!(gate.holds_in(&config), Some(true));
+
+        contract.default_config = Some(config);
+        assert!(
+            contract.undeclared_listeners().is_empty(),
+            "{:?}",
+            contract.undeclared_listeners()
+        );
+    }
+
+    /// KEDA stays on with CPU as its only trigger: raw consumer lag rises when
+    /// a downstream stage breaks, and scaling out then does nothing.
+    #[test]
+    fn test_keda_has_no_kafka_lag_trigger() {
+        let contract = deployment_contract();
+        let keda = contract.keda.as_ref().expect("keda contract");
+        assert!(keda.enabled);
+        assert!(keda.cpu_enabled);
+        assert!(!keda.kafka_trigger.enabled, "a raw-lag trigger is declared");
+        assert!(keda.min_replicas >= 1, "CPU alone cannot scale from zero");
+        let unresolved = contract.unresolved_values_paths();
+        assert!(unresolved.is_empty(), "{unresolved:?}");
     }
 
     #[test]
