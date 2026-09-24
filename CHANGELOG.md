@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.25](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.24...v1.7.25) (2026-09-24)
+
+### Bug Fixes
+
+* **archiver:** hold the offset floor across per-org buffers ([#95](https://github.com/hyperi-io/dfe-archiver/issues/95)) ([799cf8a](https://github.com/hyperi-io/dfe-archiver/commit/799cf8acbbc4fc940dc1795b4e381146293b2ec2)), closes [#82](https://github.com/hyperi-io/dfe-archiver/issues/82) [#83](https://github.com/hyperi-io/dfe-archiver/issues/83)
+* rebuild on scalo 2.12.9 ([e5190b0](https://github.com/hyperi-io/dfe-archiver/commit/e5190b0c0c43a88d705d95dfc1a42f71f8a9114c))
+
 ## [1.7.24](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.23...v1.7.24) (2026-09-24)
 
 ### Bug Fixes
