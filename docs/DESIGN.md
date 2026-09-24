@@ -251,8 +251,7 @@ Push RPC. A push stream keeps no backlog, so the KEDA composite drops its
 
 ### Why only two
 
-scalo abstracts seven transports (memory, kafka, grpc, file, pipe, http, redis)
-and three DLQ backends (kafka, http, redis). The archiver compiles in
+scalo offers more transports and DLQ backends than the archiver uses. It compiles in
 `transport-kafka`, `transport-grpc` and `dlq-kafka`, and that bound is a
 decision rather than an oversight: a DFE deployment feeds the archiver from a
 broker or from the previous stage and from nothing else, the DLQ has to survive

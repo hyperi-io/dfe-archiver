@@ -380,12 +380,12 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 
-    /// The archiver compiles in two of scalo's seven transports, so the other
-    /// five have to be refused at boot rather than accepted into a binary that
-    /// cannot build them.
+    /// The archiver compiles in two of scalo's transports, so every other one
+    /// has to be refused at boot rather than accepted into a binary that cannot
+    /// build it.
     #[test]
     fn test_the_uncompiled_scalo_transports_are_refused() {
-        for name in ["memory", "file", "pipe", "http", "redis"] {
+        for name in ["memory", "file", "pipe", "http"] {
             let mut config = Config::default();
             config.kafka.brokers = vec!["localhost:9092".to_string()];
             config.transport = name.to_string();
