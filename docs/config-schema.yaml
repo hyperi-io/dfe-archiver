@@ -682,7 +682,7 @@ $defs:
     oneOf:
     - description: |-
         Route to topic matching destination with suffix.
-        e.g. "acme.auth" → "acme.auth.dlq"
+        e.g. "acme.auth" -> "acme.auth.dlq"
       type: string
       const: per_table
     - description: Route all failures to a single common topic.

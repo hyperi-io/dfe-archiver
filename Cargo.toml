@@ -44,9 +44,9 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime. Floored at 2.12.1 for scalo::lifecycle, the
-# idle-until-configured gate this app's work_state hook plugs into.
-scalo = { version = ">=2.12.1, <3" }
+# scalo data-plane runtime. Floored at 2.12.6 for the deployment contract's
+# port listener declarations and KafkaLagTrigger, which contract.rs builds on.
+scalo = { version = ">=2.12.6, <3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
