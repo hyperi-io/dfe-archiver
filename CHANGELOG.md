@@ -3,6 +3,21 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.23](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.22...v1.7.23) (2026-09-24)
+
+### Bug Fixes
+
+* **ci:** skip PGO and BOLT for the rc.14 workstream ([#92](https://github.com/hyperi-io/dfe-archiver/issues/92)) ([b4bfa15](https://github.com/hyperi-io/dfe-archiver/commit/b4bfa159e3ff4abfed4d22baa81ee61ebaf8a980))
+* **deps:** move rustls off RUSTSEC-2026-0285 and chacha20 off a yank ([#91](https://github.com/hyperi-io/dfe-archiver/issues/91)) ([72648db](https://github.com/hyperi-io/dfe-archiver/commit/72648db1c5aae744eabdf127e89a883d30d9665b))
+* **deps:** move to scalo 2.12.3 for the KEDA Kafka trigger ([#80](https://github.com/hyperi-io/dfe-archiver/issues/80)) ([185f12e](https://github.com/hyperi-io/dfe-archiver/commit/185f12e8983c388886517605f5596e2483a41b1c))
+* **docs:** move the architecture doc under docs/ and add the README Context section ([#86](https://github.com/hyperi-io/dfe-archiver/issues/86)) ([804d6d4](https://github.com/hyperi-io/dfe-archiver/commit/804d6d4172b27ce187d68c1e843689c3cc6cbf18))
+* **docs:** name scalo, not rustlib ([#90](https://github.com/hyperi-io/dfe-archiver/issues/90)) ([459d942](https://github.com/hyperi-io/dfe-archiver/commit/459d942b74679a76396e1fbe5068925f690bf79f))
+* give the archiver spool a config key with an absolute default ([9f8fbb8](https://github.com/hyperi-io/dfe-archiver/commit/9f8fbb817f43317e850aee096cbe3f013f20c556)), closes [hyperi-io/scalo-rs#107](https://github.com/hyperi-io/scalo-rs/issues/107) [#29](https://github.com/hyperi-io/dfe-archiver/issues/29) [scalo-rs#59](https://github.com/hyperi-io/scalo-rs/issues/59) [#93](https://github.com/hyperi-io/dfe-archiver/issues/93) [hyperi-ci#134](https://github.com/hyperi-io/hyperi-ci/issues/134)
+* keep a tokio worker for the probe surface and record the transport menu ([44e660e](https://github.com/hyperi-io/dfe-archiver/commit/44e660e000f82f405eae4456e29e87e5646c1e15)), closes [scalo-rs#10](https://github.com/hyperi-io/scalo-rs/issues/10) [#56](https://github.com/hyperi-io/dfe-archiver/issues/56)
+* rebuild on scalo 2.12.6 with release consent ([d9cb3a2](https://github.com/hyperi-io/dfe-archiver/commit/d9cb3a246a62adce4046d8357c4202f52dbd5a07))
+* reject unknown path placeholders, count routing fallbacks and roll on the timer ([d2f27a6](https://github.com/hyperi-io/dfe-archiver/commit/d2f27a65e8a007c5b67a7c6ab1db879a13a8e83a)), closes [#48](https://github.com/hyperi-io/dfe-archiver/issues/48) [#59](https://github.com/hyperi-io/dfe-archiver/issues/59) [#53](https://github.com/hyperi-io/dfe-archiver/issues/53) [#25](https://github.com/hyperi-io/dfe-archiver/issues/25)
+* report the release version, the files created and the reloads that need a restart ([e22abf5](https://github.com/hyperi-io/dfe-archiver/commit/e22abf5cd770937d78dc028958ddcfce8e48f1bd)), closes [#65](https://github.com/hyperi-io/dfe-archiver/issues/65) [#49](https://github.com/hyperi-io/dfe-archiver/issues/49) [#64](https://github.com/hyperi-io/dfe-archiver/issues/64) [#68](https://github.com/hyperi-io/dfe-archiver/issues/68) [#69](https://github.com/hyperi-io/dfe-archiver/issues/69) [#70](https://github.com/hyperi-io/dfe-archiver/issues/70)
+
 ## [1.7.22](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.21...v1.7.22) (2026-09-12)
 
 ### Bug Fixes
