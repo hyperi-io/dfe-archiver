@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.24](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.23...v1.7.24) (2026-09-24)
+
+### Bug Fixes
+
+* rebuild on scalo 2.12.7 ([5a9617c](https://github.com/hyperi-io/dfe-archiver/commit/5a9617c66160acbd1329ea255a2e97fc48c81ca8))
+
 ## [1.7.23](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.22...v1.7.23) (2026-09-24)
 
 ### Bug Fixes
