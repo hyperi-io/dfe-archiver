@@ -88,7 +88,7 @@ properties:
     description: Buffer management configuration
     $ref: '#/$defs/BufferConfig'
     default:
-      flush_bytes: 67108864
+      flush_bytes: 1048576
       flush_age_secs: 60
       flush_records: 100000
       writer_parallelism: 4
@@ -520,11 +520,14 @@ $defs:
     type: object
     properties:
       flush_bytes:
-        description: Flush when buffer exceeds this size (bytes)
+        description: |-
+          Flush a destination's in-memory buffer into its archive file once it
+          holds this many bytes. Each of up to 64 destinations holds up to this
+          much, plus one record, in memory.
         type: integer
         format: uint
         minimum: 0
-        default: 67108864
+        default: 1048576
       flush_age_secs:
         description: Flush when buffer exceeds this age (seconds)
         type: integer

@@ -39,7 +39,7 @@ pub struct TieredBufferConfig {
     /// Maximum hot buffers in Tier 1 (default: 64)
     pub max_hot_buffers: usize,
 
-    /// Per-buffer size limit in Tier 1 (default: 1MB)
+    /// Bytes at which a destination's hot buffer flushes (default 1 MiB).
     pub hot_buffer_size: usize,
 
     /// Flush age for hot buffers (seconds)
@@ -50,9 +50,6 @@ pub struct TieredBufferConfig {
 
     /// Maximum concurrent archive writers (default: 8)
     pub max_writers: usize,
-
-    /// Staging batch size before archive write (bytes)
-    pub staging_batch_size: usize,
 
     /// Maximum spool size in bytes (disk protection)
     pub max_spool_bytes: u64,
@@ -72,7 +69,6 @@ impl Default for TieredBufferConfig {
             hot_buffer_age_secs: 30,
             spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
             max_writers: 8,
-            staging_batch_size: 64 * 1024 * 1024,
             max_spool_bytes: 10 * 1024 * 1024 * 1024,
             min_free_disk_bytes: 1024 * 1024 * 1024,
             spool_compression: true,

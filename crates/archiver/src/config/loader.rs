@@ -157,7 +157,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     if config.buffer.flush_bytes == 0 {
         return Err(Error::Config(
-            "buffer.flush_bytes must be greater than 0".to_string(),
+            "buffer.flush_bytes must be greater than 0: it is the size at which a destination's buffer flushes into its archive file".to_string(),
         ));
     }
 

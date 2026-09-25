@@ -16,7 +16,7 @@ archive:
   roll_interval_secs: 3600
 
 buffer:
-  flush_bytes: 67108864
+  flush_bytes: 1048576
   flush_age_secs: 60
   flush_records: 100000
   writer_parallelism: 4

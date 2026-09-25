@@ -340,11 +340,10 @@ Archive Writers (8 concurrent, semaphore-controlled)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `max_hot_buffers` | 64 | Maximum Tier 1 buffers |
-| `hot_buffer_size` | 1MB | Per-buffer size limit |
-| `hot_buffer_age_secs` | 30 | Age-based flush trigger |
+| `hot_buffer_size` | 1 MiB | Size at which a destination's buffer flushes into its file (`buffer.flush_bytes` / `ARCHIVER_FLUSH_BYTES`); each buffer holds up to this plus one record in memory |
+| `hot_buffer_age_secs` | 60 | Age at which a buffer flushes whatever its size (`buffer.flush_age_secs`) |
 | `spool_dir` | `/var/spool/dfe/archiver` | Tier 2 spool directory (`buffer.spool_dir` / `ARCHIVER_SPOOL_DIR`) |
 | `max_writers` | 8 | Concurrent archive writers |
-| `staging_batch_size` | 64MB | Batch size for archive write |
 | `max_spool_bytes` | 10GB | Spool size limit (disk protection) |
 | `min_free_disk_bytes` | 1GB | Reserved disk space |
 
@@ -779,7 +778,7 @@ archive:
   roll_interval_secs: 300
 
 buffer:
-  flush_bytes: 67108864
+  flush_bytes: 1048576
   flush_age_secs: 60
   writer_parallelism: 4
 

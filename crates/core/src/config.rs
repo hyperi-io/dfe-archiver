@@ -458,7 +458,9 @@ pub struct MinioConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
-    /// Flush when buffer exceeds this size (bytes)
+    /// Flush a destination's in-memory buffer into its archive file once it
+    /// holds this many bytes. Each of up to 64 destinations holds up to this
+    /// much, plus one record, in memory.
     pub flush_bytes: usize,
 
     /// Flush when buffer exceeds this age (seconds)
@@ -483,7 +485,7 @@ pub struct BufferConfig {
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            flush_bytes: 64 * 1024 * 1024, // 64MB
+            flush_bytes: 1024 * 1024, // 1 MiB
             flush_age_secs: 60,
             flush_records: 100_000,
             writer_parallelism: 4,

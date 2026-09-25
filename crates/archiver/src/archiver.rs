@@ -513,11 +513,10 @@ fn sink_confirmation(archive: &ArchiveConfig) -> SinkConfirmation {
 fn buffer_config(config: &Config) -> dfe_archiver_core::buffer::TieredBufferConfig {
     dfe_archiver_core::buffer::TieredBufferConfig {
         max_hot_buffers: 64,
-        hot_buffer_size: 1024 * 1024, // 1MB
+        hot_buffer_size: config.buffer.flush_bytes,
         hot_buffer_age_secs: config.buffer.flush_age_secs,
         spool_dir: config.buffer.spool_dir.clone().into(),
         max_writers: config.buffer.writer_parallelism,
-        staging_batch_size: config.buffer.flush_bytes,
         max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
         min_free_disk_bytes: 1024 * 1024 * 1024,  // 1GB
         spool_compression: true,
@@ -1938,6 +1937,44 @@ mod tests {
         assert_eq!(
             buffer_config(&config).spool_dir,
             Path::new("/srv/dfe/spool"),
+        );
+    }
+
+    /// `buffer.flush_bytes` is the size a destination's buffer flushes at: 1 MiB
+    /// by default, and a configured value moves it.
+    #[test]
+    fn flush_bytes_sets_the_size_a_buffer_flushes_at() {
+        // Records push this many bytes each: 1000 of payload and a newline.
+        const RECORD: usize = 1001;
+        let first_flush = |flush_bytes: Option<usize>| {
+            let spool = tempfile::TempDir::new().expect("spool");
+            let mut config = Config::default();
+            config.buffer.spool_dir = spool.path().display().to_string();
+            if let Some(flush_bytes) = flush_bytes {
+                config.buffer.flush_bytes = flush_bytes;
+            }
+            let buffer =
+                dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config))
+                    .expect("buffer");
+            for offset in 0.. {
+                let message = KafkaMessage::for_test(vec![b'x'; RECORD - 1], "events", 0, offset);
+                if let Some(batch) = buffer.push("dest", message).expect("push").pop() {
+                    return batch.data.len();
+                }
+            }
+            unreachable!("the offsets never run out")
+        };
+
+        assert_eq!(Config::default().buffer.flush_bytes, 1024 * 1024);
+        assert_eq!(
+            first_flush(None),
+            (1024 * 1024usize).div_ceil(RECORD) * RECORD,
+            "the default flushes at the first record past 1 MiB"
+        );
+        assert_eq!(
+            first_flush(Some(4096)),
+            4096usize.div_ceil(RECORD) * RECORD,
+            "a configured flush_bytes moves the flush"
         );
     }
 

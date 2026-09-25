@@ -151,7 +151,7 @@ archive:
   roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
 
 buffer:
-  flush_bytes: 67108864        # 64MB
+  flush_bytes: 1048576         # 1 MiB: a destination's buffer flushes into its file at this size
   flush_age_secs: 60
   writer_parallelism: 4
 
