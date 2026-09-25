@@ -152,8 +152,9 @@ impl Compressor for SnappyCompressor {
         Ok(decompressed)
     }
 
+    /// The snappy framing format's own extension.
     fn extension(&self) -> &'static str {
-        "snappy"
+        "sz"
     }
 
     fn name(&self) -> &'static str {
@@ -432,7 +433,7 @@ mod tests {
         assert_eq!(create_compressor("lz4", 0).expect("lz4").extension(), "lz4");
         assert_eq!(
             create_compressor("snappy", 0).expect("snappy").extension(),
-            "snappy"
+            "sz"
         );
         assert_eq!(
             create_compressor("gzip", 0).expect("gzip").extension(),

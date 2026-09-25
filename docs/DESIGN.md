@@ -562,7 +562,7 @@ routing:
 |-------|-----------|--------|----------|
 | zstd | `.zst` | zstd frames | Default - best ratio with good speed |
 | lz4 | `.lz4` | LZ4 frame format, as the `lz4` tool reads | Speed-critical, lower ratio |
-| snappy | `.snappy` | Snappy framing format (`application/x-snappy-framed`) | Speed-critical, lower ratio |
+| snappy | `.sz` | Snappy framing format (`application/x-snappy-framed`) | Speed-critical, lower ratio |
 | gzip | `.gz` | gzip members | Universal compatibility |
 
 Each flush into a file appends one complete frame, framed stream or gzip member, so a file of many flushes is one standard concatenated stream that the codec's own tools read whole. The archiver reads a staged file back the same way, a flush at a time, when it has to dead-letter the file's records.

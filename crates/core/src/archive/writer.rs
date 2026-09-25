@@ -857,6 +857,27 @@ mod tests {
         assert!(path.ends_with(".jsonl.zst"), "should have .zst ext: {path}");
     }
 
+    /// A snappy archive is in the snappy framing format, whose extension is `.sz`.
+    #[test]
+    fn a_snappy_archive_key_ends_in_the_framed_format_extension() {
+        let config = ArchiveConfig {
+            path_template: "data/{timestamp}".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor("snappy", 0).expect("compressor");
+        let writer = ArchiveWriter::new(
+            config,
+            RollingPolicy::default(),
+            compressor,
+            Box::new(MemoryBackend::new()),
+        );
+
+        let path = writer.test_generate_path(&Utc::now());
+
+        assert!(path.ends_with(".jsonl.sz"), "{path}");
+    }
+
     #[tokio::test]
     async fn test_new_writer_does_not_truncate_existing_file() {
         let policy = RollingPolicy {
