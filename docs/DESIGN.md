@@ -368,7 +368,9 @@ On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a ki
    its lowest offset not yet released
 ```
 
-A record is durable only when its file completes: until then the multipart upload is in progress, and a crash abandons it. So step 5 waits for step 4, which comes at the roll -- `roll_size_bytes` or `roll_interval_secs`. The writer stores held offsets per partition, eight bytes each, because a file can hold a roll interval of intake.
+A record is durable only when its file completes: until then the multipart upload is in progress, and a crash abandons it. On a local path completion syncs the file, and every directory above it up to the destination, to disk. So step 5 waits for step 4, which comes at the roll -- `roll_size_bytes` or `roll_interval_secs`.
+
+Holding costs memory for as long as a file is open: about 32 bytes a record, scalo's offset tracking plus the writer's own eight. At 10k records/s that is 96 MB over a 300 s roll and 1.15 GB over an hour. So while offsets are held an unset `roll_interval_secs` defaults to 300 rather than 3600. A configured value always wins, and one above 900 logs a startup warning with the cost.
 
 A batch no file takes goes to the DLQ through scalo's confirming write. Only a write the DLQ confirms releases the batch's offsets. One the DLQ refuses, or any with the DLQ off, is released `Errored`: its offsets stay held, and no later commit passes them until a restart reads the records again. Offsets of a file whose completion fails are released `Errored` too.
 
@@ -401,7 +403,7 @@ Every file name ends `-<seq>-<writer id>`. The object-store create only checks f
 Archives are rolled (closed and new file opened) when either condition is met:
 
 1. **Size-based**: Final compressed file size exceeds threshold (default 1GB)
-2. **Time-based**: File age exceeds threshold (default 1 hour)
+2. **Time-based**: File age exceeds threshold (default 300 s while offsets are held, otherwise 1 hour)
 
 ### Important: Compressed File Size
 
@@ -418,7 +420,7 @@ This ensures predictable archive file sizes on storage (optimal for cloud storag
 ```yaml
 archive:
   roll_size_bytes: 1073741824  # 1GB final compressed size
-  roll_interval_secs: 3600     # 1 hour
+  roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
 ```
 
 ### Path Templates
@@ -577,6 +579,8 @@ compression:
 archive:
   destination: file:///var/data/archive   # a mounted volume, never the rootfs
 ```
+
+A file is synced to disk, with the directories above it, before its offsets are released, so a node crash after the commit cannot lose it.
 
 ### AWS S3
 
@@ -761,7 +765,7 @@ archive:
   destination: s3://my-bucket/archives
   path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824
-  roll_interval_secs: 3600
+  roll_interval_secs: 300
 
 buffer:
   flush_bytes: 67108864

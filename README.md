@@ -148,7 +148,7 @@ archive:
   # Each file name ends -<seq>-<writer id>.
   path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824  # 1GB (final compressed size)
-  roll_interval_secs: 3600     # 1 hour
+  roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
 
 buffer:
   flush_bytes: 67108864        # 64MB
@@ -225,7 +225,9 @@ archive:
 
 ## At-Least-Once Delivery
 
-On `kafka`, a record's offset is committed only once the archive file holding it is complete: the multipart upload finished, or the local file closed. Until then the file is an upload in progress that a crash abandons, so the commit waits for the roll -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
+On `kafka`, a record's offset is committed only once the archive file holding it is complete: the multipart upload finished, or the local file and its directories synced to disk. Until then the file is an upload in progress that a crash abandons, so the commit waits for the roll -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
+
+Each held record costs about 32 bytes of memory until its file completes. So while offsets are held an unset `roll_interval_secs` is 300 rather than 3600: at 10k records/s that is 96 MB instead of 1.15 GB. A configured value always wins, and one above 900 logs a startup warning.
 
 If the archiver is killed, every record not yet in a completed file is read again after the restart: up to one roll interval of intake, as duplicates, never as loss. A batch no file takes goes to the DLQ, and only a write the DLQ confirms releases its offsets. One the DLQ refuses, or any with the DLQ off, keeps its offsets held until a restart reads the records again, and no commit passes them meanwhile.
 

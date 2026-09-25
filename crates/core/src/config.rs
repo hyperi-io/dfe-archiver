@@ -28,10 +28,10 @@ pub use scalo::dlq::DlqConfig;
 /// ## Hot-reload behavior
 ///
 /// **Hot-reloaded**, because the pipeline re-reads them from the shared config:
-/// - `kafka.batch_size` — once per receive
-/// - `buffer.backpressure_pause_secs` — on each backpressure pause
+/// - `kafka.batch_size` -- once per receive
+/// - `buffer.backpressure_pause_secs` -- on each backpressure pause
 ///
-/// **Requires pod restart** — everything else. `Archiver` snapshots the config
+/// **Requires pod restart** -- everything else. `Archiver` snapshots the config
 /// at construction into `startup_config`, so a reload of `transport`,
 /// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
 /// the `buffer.*` flush thresholds is accepted and validated but does not reach
@@ -103,11 +103,53 @@ fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
 }
 
+/// Roll interval when none is configured and offsets are held: at 10k
+/// records/s that keeps about 96 MB of held offsets per pod.
+pub const HELD_OFFSETS_ROLL_INTERVAL_SECS: u64 = 300;
+
+/// Roll interval when none is configured and no offset waits on a file.
+pub const DEFAULT_ROLL_INTERVAL_SECS: u64 = 3600;
+
+/// A roll interval above this, with offsets held, is warned about at startup.
+pub const HELD_OFFSETS_ROLL_WARN_SECS: u64 = 900;
+
+/// Approximate memory each held record costs: scalo's offset tracking plus the
+/// archive writer's own copy.
+pub const HELD_OFFSET_BYTES: u64 = 32;
+
 impl Config {
     /// Whether records arrive on the Push listener rather than a broker.
     #[must_use]
     pub fn is_direct(&self) -> bool {
         self.transport == TRANSPORT_GRPC
+    }
+
+    /// Whether the Kafka consumer holds each offset until the archive file
+    /// holding its record completes.
+    #[must_use]
+    pub fn holds_offsets(&self) -> bool {
+        !self.is_direct() && self.kafka.acknowledgements.enabled
+    }
+
+    /// The roll interval in force: `archive.roll_interval_secs` when set,
+    /// otherwise a default short enough to bound held-offset memory.
+    #[must_use]
+    pub fn roll_interval_secs(&self) -> u64 {
+        self.archive
+            .roll_interval_secs
+            .unwrap_or(if self.holds_offsets() {
+                HELD_OFFSETS_ROLL_INTERVAL_SECS
+            } else {
+                DEFAULT_ROLL_INTERVAL_SECS
+            })
+    }
+
+    /// The roll interval when offsets are held for longer than
+    /// [`HELD_OFFSETS_ROLL_WARN_SECS`], or `None` when it needs no warning.
+    #[must_use]
+    pub fn long_held_roll_interval(&self) -> Option<u64> {
+        let secs = self.roll_interval_secs();
+        (self.holds_offsets() && secs > HELD_OFFSETS_ROLL_WARN_SECS).then_some(secs)
     }
 
     /// Why this configuration gives the archiver nothing to do, or `None` when
@@ -297,8 +339,13 @@ pub struct ArchiveConfig {
     /// Rolling trigger: final compressed file size in bytes (not inbound data)
     pub roll_size_bytes: u64,
 
-    /// Rolling trigger: interval in seconds
-    pub roll_interval_secs: u64,
+    /// Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
+    /// consumer holds offsets (`transport: kafka` with
+    /// `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
+    /// because every record in an open file keeps about 32 bytes of held
+    /// offset in memory until the file completes. A configured value always
+    /// wins, and one above 900 with offsets held logs a warning at startup.
+    pub roll_interval_secs: Option<u64>,
 
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
     pub multipart_chunk_size: usize,
@@ -353,7 +400,7 @@ impl Default for ArchiveConfig {
             path_template: "{year}/{month}/{day}/{hour}".to_string(),
             file_extension: "jsonl".to_string(),
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size
-            roll_interval_secs: 3600,            // 1 hour
+            roll_interval_secs: None,
             multipart_chunk_size: 8 * 1024 * 1024, // 8MB
             max_writers: 1024,
             s3: None,
@@ -658,7 +705,7 @@ impl Config {
 /// Normalisation: infer implied settings after all config sources merge.
 impl Normalize for Config {
     fn normalize(&mut self) {
-        // SASL credentials present → ensure mechanism is set
+        // SASL credentials present -> ensure mechanism is set
         if self.kafka.sasl_username.is_some()
             && self.kafka.sasl_password.is_some()
             && self.kafka.sasl_mechanism.is_none()

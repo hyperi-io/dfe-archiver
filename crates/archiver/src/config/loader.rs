@@ -45,7 +45,7 @@ fn init_cascade() {
     }
 }
 
-/// Load configuration with cascade: CLI → ENV → .env → file → defaults
+/// Load configuration with cascade: CLI -> ENV -> .env -> file -> defaults
 ///
 /// Priority (highest to lowest):
 /// 1. CLI arguments (handled by caller, merged after)
@@ -547,6 +547,50 @@ mod tests {
         assert!(!parsed.kafka.acknowledgements.enabled);
         assert!(parsed.grpc.acknowledgements.enabled);
         validate_config(&parsed).expect("acknowledgements off is a valid config");
+    }
+
+    /// Held offsets stay in memory for as long as a file is open, so an unset
+    /// roll interval shortens to 300 s while offsets are held.
+    #[test]
+    fn test_unset_roll_interval_is_300_while_offsets_are_held() {
+        let held = Config::default();
+        assert!(held.holds_offsets());
+        assert_eq!(held.archive.roll_interval_secs, None);
+        assert_eq!(held.roll_interval_secs(), 300);
+        assert_eq!(held.long_held_roll_interval(), None);
+
+        let acks_off: Config =
+            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
+                .expect("parse");
+        assert!(!acks_off.holds_offsets());
+        assert_eq!(acks_off.roll_interval_secs(), 3600);
+
+        let direct = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        assert!(!direct.holds_offsets());
+        assert_eq!(direct.roll_interval_secs(), 3600);
+    }
+
+    /// An operator's roll interval is respected even with offsets held, and a
+    /// long one is flagged for the startup warning.
+    #[test]
+    fn test_a_configured_roll_interval_wins_over_the_held_offsets_default() {
+        let long: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 3600\n").expect("parse");
+        assert!(long.holds_offsets());
+        assert_eq!(long.roll_interval_secs(), 3600);
+        assert_eq!(long.long_held_roll_interval(), Some(3600));
+
+        let short: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 60\n").expect("parse");
+        assert_eq!(short.roll_interval_secs(), 60);
+        assert_eq!(short.long_held_roll_interval(), None);
+
+        let at_the_line: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 900\n").expect("parse");
+        assert_eq!(at_the_line.long_held_roll_interval(), None);
     }
 
     #[test]

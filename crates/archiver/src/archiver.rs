@@ -1121,7 +1121,7 @@ impl Archiver {
     fn create_writer(&self, destination: &str) -> Result<ArchiveWriter> {
         let policy = RollingPolicy {
             max_size_bytes: self.startup_config.archive.roll_size_bytes,
-            max_age_secs: self.startup_config.archive.roll_interval_secs,
+            max_age_secs: self.startup_config.roll_interval_secs(),
         };
 
         let compressor = compressor_for(&self.startup_config.compression)?;

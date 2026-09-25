@@ -12,7 +12,7 @@ use std::env;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
-// ── Reachability ─────────────────────────────────────────────────────
+// -- Reachability -----------------------------------------------------
 
 /// Is `host_port` accepting TCP connections?
 ///
@@ -108,8 +108,8 @@ pub fn require_container_in_ci(service: &str, reason: &str) {
 /// Test backend mode.
 ///
 /// Controlled by `TEST_MODE` in `.env`:
-/// - `"remote"` (default) — use devex cluster endpoints from env vars
-/// - `"docker"` — use dfe-docker infra profile (localhost, no auth, no TLS)
+/// - `"remote"` (default) -- use devex cluster endpoints from env vars
+/// - `"docker"` -- use dfe-docker infra profile (localhost, no auth, no TLS)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
     Remote,
@@ -130,7 +130,7 @@ pub fn load_dotenv() {
     let _ = dotenvy::dotenv();
 }
 
-// ── Kafka ────────────────────────────────────────────────────────────
+// -- Kafka ------------------------------------------------------------
 
 /// Kafka connection config for the active test mode.
 ///
@@ -193,7 +193,7 @@ macro_rules! skip_if_no_kafka {
     };
 }
 
-// ── Docker lifecycle ─────────────────────────────────────────────────
+// -- Docker lifecycle -------------------------------------------------
 
 /// Start dfe-docker infra profile if `TEST_MODE=docker` and containers aren't running.
 ///
@@ -239,7 +239,7 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     }
 
     // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
-    // up to a 30s ceiling. Avoids blind 1s sleeps between probes — fast
+    // up to a 30s ceiling. Avoids blind 1s sleeps between probes -- fast
     // services no longer pay the worst-case wait.
     let kf = kafka_test_config();
     for _ in 0..120 {
@@ -252,7 +252,7 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     Err("Kafka did not become healthy within 30s".into())
 }
 
-// ── MinIO: the shared dev stack, a precondition rather than a fixture ─
+// -- MinIO: the shared dev stack, a precondition rather than a fixture -
 
 /// Host:port the `MinIO` tests talk to, from `MINIO_ENDPOINT` or the dev default.
 fn minio_host_port() -> String {
@@ -311,7 +311,7 @@ pub fn ensure_minio() -> bool {
     false
 }
 
-// ── Container naming and cleanup ──────────────────────────────────────
+// -- Container naming and cleanup --------------------------------------
 //
 // Every container this suite starts carries a name saying which repo, which
 // suite and which service it is, so an operator reading `docker ps` can tell
@@ -435,7 +435,7 @@ pub fn reap_stale(name: &str) {
         .status();
 }
 
-// ── Azurite (Azure Blob emulator) ─────────────────────────────────────
+// -- Azurite (Azure Blob emulator) -------------------------------------
 
 /// Azurite, the Microsoft-published Azure Blob emulator. Pinned rather than
 /// `latest`: a floating tag retargets the suite on every image refresh, so a
@@ -720,7 +720,7 @@ pub async fn azurite_blob_len(
         .ok_or_else(|| format!("HEAD {resource} returned no usable Content-Length"))
 }
 
-// ── LocalStack (AWS S3 emulator) ──────────────────────────────────────
+// -- LocalStack (AWS S3 emulator) --------------------------------------
 
 /// `LocalStack`, on the SEMVER line only -- do NOT move this to the `CalVer` tags
 /// (`2026.07.0` etc). Those require a licence: they exit 55 with "License
@@ -950,7 +950,7 @@ pub async fn localstack_object_len(
         .ok_or_else(|| format!("HEAD {url} returned no usable Content-Length"))
 }
 
-// ── fake-gcs-server (Google Cloud Storage emulator) ───────────────────
+// -- fake-gcs-server (Google Cloud Storage emulator) -------------------
 
 /// `fsouza/fake-gcs-server`, the maintained GCS emulator (1.55.1 published
 /// 2026-07-19). Pinned, not `latest`, for the same reason as Azurite.
@@ -1274,10 +1274,13 @@ pub fn free_low_port(taken: &[u16]) -> u16 {
 /// How long a container these tests start may take to report it is up.
 const CONTAINER_STARTUP: Duration = Duration::from_secs(40);
 
-/// Whether a container start failed only because its fixed host port was
-/// taken between the probe and the bind, the one failure worth a retry.
-fn port_taken(error: &str) -> bool {
-    error.contains("port is already allocated") || error.contains("address already in use")
+/// Whether a fresh container can clear a failed start: the fixed host port was
+/// taken between the probe and the bind, or the process exited before it
+/// reported ready, as the Kafka native image does when it segfaults on start.
+fn worth_a_retry(error: &str) -> bool {
+    error.contains("port is already allocated")
+        || error.contains("address already in use")
+        || error.contains("End of stream reached before finding message")
 }
 
 // -- MinIO, owned per test --
@@ -1449,7 +1452,7 @@ pub async fn acquire_minio(test: &str) -> Option<MinioFixture> {
             }
             Err(e) => {
                 last_error = format!("container start on port {port} failed: {e}");
-                if !port_taken(&last_error) {
+                if !worth_a_retry(&last_error) {
                     break;
                 }
                 taken.push(port);
@@ -1645,7 +1648,7 @@ pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
             }
             Err(e) => {
                 last_error = format!("container start on port {port} failed: {e}");
-                if !port_taken(&last_error) {
+                if !worth_a_retry(&last_error) {
                     break;
                 }
                 taken.push(port);
@@ -1656,7 +1659,7 @@ pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
     None
 }
 
-// ── Test data helpers ────────────────────────────────────────────────
+// -- Test data helpers ------------------------------------------------
 
 /// Generate unique topic name for tests
 pub fn test_topic_name(prefix: &str) -> String {

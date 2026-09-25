@@ -74,7 +74,7 @@ flate2 = ">=1.1.9, <2"
 
 # Cloud storage backends
 object_store = { version = ">=0.14.0, <0.15", features = ["aws", "gcp", "azure"] }
-aws-config = ">=1.8, <2"
+# The e2e MinIO fixture's client only: every backend goes through object_store.
 # default-features off to drop the `rustls` feature, which is the legacy
 # hyper-0.14 TLS backend and the only thing pulling rustls 0.21 -> the
 # unmaintained rustls-webpki 0.101. Everything else in the default set is

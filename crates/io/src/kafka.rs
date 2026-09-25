@@ -234,10 +234,11 @@ impl TransportAdapter {
 /// and emits them as Prometheus metrics.
 ///
 /// Creates a lightweight `BaseConsumer` with `statistics.interval.ms=5000`
-/// in a separate consumer group (`{group_id}-stats`). A background tokio
-/// task polls the consumer every 5s (triggering stats callbacks) and calls
-/// `emit_prometheus_metrics()` to push rdkafka internal stats to the global
-/// Prometheus recorder.
+/// in a separate consumer group (`{group_id}-stats`). While the emitter lives,
+/// a background tokio task polls the consumer every 5s (triggering stats
+/// callbacks) and calls `emit_prometheus_metrics()` to push rdkafka internal
+/// stats to the global Prometheus recorder. Dropping the emitter closes the
+/// consumer and ends the task.
 ///
 /// Emitted metrics (per DFE metrics standard, `rdkafka_` prefix):
 /// - `rdkafka_global_msg_cnt` / `rdkafka_global_msg_size_bytes`
@@ -248,7 +249,14 @@ impl TransportAdapter {
 pub struct KafkaStatsEmitter {
     consumer:
         std::sync::Arc<rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext>>,
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// A dropped `JoinHandle` detaches its task, so the poll task is aborted here.
+impl Drop for KafkaStatsEmitter {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl KafkaStatsEmitter {
@@ -307,24 +315,25 @@ impl KafkaStatsEmitter {
 
         let consumer = std::sync::Arc::new(consumer);
 
-        // Background task: poll consumer (triggers stats callbacks) then emit metrics
-        let consumer_bg = std::sync::Arc::clone(&consumer);
+        // The task holds a weak reference, so the consumer leaves its group when
+        // the emitter drops, not at runtime teardown after the broker has gone.
+        let consumer_bg = std::sync::Arc::downgrade(&consumer);
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
+                let Some(consumer) = consumer_bg.upgrade() else {
+                    return;
+                };
                 // poll triggers internal librdkafka callbacks including stats
-                let _ = consumer_bg.poll(std::time::Duration::from_millis(0));
-                consumer_bg.context().emit_prometheus_metrics();
+                let _ = consumer.poll(std::time::Duration::from_millis(0));
+                consumer.context().emit_prometheus_metrics();
             }
         });
 
         info!("Kafka stats emitter started (statistics.interval.ms=5000)");
 
-        Ok(Self {
-            consumer,
-            _task: task,
-        })
+        Ok(Self { consumer, task })
     }
 
     /// Get the current metrics snapshot.

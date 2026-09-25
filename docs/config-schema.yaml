@@ -14,10 +14,10 @@ description: |-
   ## Hot-reload behavior
 
   **Hot-reloaded**, because the pipeline re-reads them from the shared config:
-  - `kafka.batch_size` — once per receive
-  - `buffer.backpressure_pause_secs` — on each backpressure pause
+  - `kafka.batch_size` -- once per receive
+  - `buffer.backpressure_pause_secs` -- on each backpressure pause
 
-  **Requires pod restart** — everything else. `Archiver` snapshots the config
+  **Requires pod restart** -- everything else. `Archiver` snapshots the config
   at construction into `startup_config`, so a reload of `transport`,
   `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
   the `buffer.*` flush thresholds is accepted and validated but does not reach
@@ -77,7 +77,7 @@ properties:
       path_template: '{year}/{month}/{day}/{hour}'
       file_extension: jsonl
       roll_size_bytes: 1073741824
-      roll_interval_secs: 3600
+      roll_interval_secs: null
       multipart_chunk_size: 8388608
       max_writers: 1024
       s3: null
@@ -357,11 +357,19 @@ $defs:
         minimum: 0
         default: 1073741824
       roll_interval_secs:
-        description: 'Rolling trigger: interval in seconds'
-        type: integer
+        description: |-
+          Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
+          consumer holds offsets (`transport: kafka` with
+          `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
+          because every record in an open file keeps about 32 bytes of held
+          offset in memory until the file completes. A configured value always
+          wins, and one above 900 with offsets held logs a warning at startup.
+        type:
+        - integer
+        - 'null'
         format: uint64
         minimum: 0
-        default: 3600
+        default: null
       multipart_chunk_size:
         description: Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
         type: integer

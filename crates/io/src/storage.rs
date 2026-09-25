@@ -17,7 +17,7 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -46,6 +46,17 @@ impl FileBackend {
     fn full_path(&self, path: &str) -> PathBuf {
         self.base_path.join(path)
     }
+}
+
+/// Flush a directory's entries to disk. An empty path is the working
+/// directory, which a bare relative destination writes under.
+async fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    tokio::fs::File::open(dir).await?.sync_all().await
 }
 
 #[async_trait]
@@ -90,8 +101,16 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
+    /// Syncs the file, then every directory from its parent up to the base
+    /// path, because `create` may have made any of them and a directory entry
+    /// is durable only once its parent is synced.
     async fn close(&self, path: &str) -> Result<()> {
-        debug!(path = %path, "File closed");
+        let full_path = self.full_path(path);
+        tokio::fs::File::open(&full_path).await?.sync_all().await?;
+        for dir in Path::new(path).ancestors().skip(1) {
+            sync_dir(&self.base_path.join(dir)).await?;
+        }
+        debug!(path = %full_path.display(), "File synced to disk");
         Ok(())
     }
 
@@ -151,7 +170,7 @@ impl StorageBackend for FileBackend {
 /// Cloud object store backend using multipart uploads
 ///
 /// Supports S3, `MinIO`, GCS, and Azure Blob via the `object_store` crate.
-/// Uses `WriteMultipart` for streaming uploads — data is uploaded in
+/// Uses `WriteMultipart` for streaming uploads -- data is uploaded in
 /// configurable chunk sizes (default 8MB), keeping memory usage bounded
 /// to ~`chunk_size` per active file rather than buffering the entire file.
 pub struct ObjectStoreBackend {
@@ -651,6 +670,42 @@ mod tests {
         assert!(!backend.exists("test/file.txt").await.expect("not exists"));
     }
 
+    /// A completed file releases its records' offsets, so a close that cannot
+    /// sync the file to disk fails instead of reporting it complete.
+    #[tokio::test]
+    async fn test_file_backend_close_fails_when_the_file_cannot_be_synced() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let backend = FileBackend::new(temp_dir.path());
+
+        backend.create("hour/lost.jsonl").await.expect("create");
+        std::fs::remove_file(temp_dir.path().join("hour/lost.jsonl")).expect("remove");
+
+        backend
+            .close("hour/lost.jsonl")
+            .await
+            .expect_err("a file that is gone cannot be synced");
+    }
+
+    /// A bare relative destination writes under the working directory, which
+    /// the directory sync has to reach rather than open an empty path.
+    #[tokio::test]
+    async fn test_file_backend_close_syncs_under_an_empty_base_path() {
+        let temp_dir = TempDir::new_in(".").expect("create temp dir under the working directory");
+        let dir_name = temp_dir
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("utf-8 temp dir name");
+        let backend = FileBackend::new("");
+        let path = format!("{dir_name}/file.jsonl");
+
+        backend.create(&path).await.expect("create");
+        backend
+            .close(&path)
+            .await
+            .expect("close syncs up to the working directory");
+    }
+
     #[tokio::test]
     async fn test_file_backend_create_refuses_to_clobber() {
         let temp_dir = TempDir::new().expect("create temp dir");
@@ -691,11 +746,11 @@ mod tests {
             backend.close(&path).await.expect("close");
         }
 
-        // Unbounded — gets all entries.
+        // Unbounded -- gets all entries.
         let all = backend.list_prefix("data/", None).await.expect("list all");
         assert_eq!(all.len(), 10, "expected all 10 entries with limit=None");
 
-        // Capped — stops walking as soon as cap is met.
+        // Capped -- stops walking as soon as cap is met.
         let capped = backend
             .list_prefix("data/", Some(3))
             .await

@@ -20,6 +20,7 @@ use dfe_archiver::config::{
 use dfe_archiver::contract::deployment_contract;
 use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
 use dfe_archiver::{Archiver, restart_required_changes};
+use dfe_archiver_core::config::HELD_OFFSET_BYTES;
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
 use scalo::deployment::generate_chart;
 use scalo::logger::security;
@@ -119,6 +120,14 @@ impl ServiceApp for App {
             compression_level = config.compression.level,
             "Configuration loaded"
         );
+        if let Some(roll_interval_secs) = config.long_held_roll_interval() {
+            warn!(
+                roll_interval_secs,
+                bytes_per_held_record = HELD_OFFSET_BYTES,
+                held_bytes_at_10k_records_per_sec = roll_interval_secs * 10_000 * HELD_OFFSET_BYTES,
+                "archive.roll_interval_secs holds every record's offset in memory until its file completes, about 32 bytes a record, so memory grows with intake times the interval"
+            );
+        }
         debug!(
             kafka_batch_size = config.kafka.batch_size,
             kafka_session_timeout_ms = config.kafka.session_timeout_ms,
@@ -127,7 +136,7 @@ impl ServiceApp for App {
             buffer_flush_age_secs = config.buffer.flush_age_secs,
             buffer_writer_parallelism = config.buffer.writer_parallelism,
             archive_roll_size_bytes = config.archive.roll_size_bytes,
-            archive_roll_interval_secs = config.archive.roll_interval_secs,
+            archive_roll_interval_secs = config.roll_interval_secs(),
             archive_path_template = %config.archive.path_template,
             routing_mode = %config.routing.mode,
             metrics_address = %self.common.effective_metrics_addr(),

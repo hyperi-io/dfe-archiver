@@ -11,7 +11,7 @@ use thiserror::Error;
 /// Result type alias for archiver operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Boxed dynamic error source — preserves the original error chain so
+/// Boxed dynamic error source -- preserves the original error chain so
 /// `tracing::error!(error = %e, ...)` plus `e.source()` walks reach the
 /// underlying scalo / `object_store` / rdkafka diagnostic.
 pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -34,8 +34,7 @@ pub enum Error {
     },
 
     /// Storage backend error. `source` carries the underlying
-    /// `object_store::Error`, `aws_sdk_s3` error, or filesystem error when
-    /// available.
+    /// `object_store::Error` or filesystem error when available.
     #[error("storage error: {message}")]
     Storage {
         message: String,

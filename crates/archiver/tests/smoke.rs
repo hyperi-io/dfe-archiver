@@ -26,7 +26,7 @@ use dfe_archiver_core::config::BufferConfig;
 
 /// Full startup smoke test: construct all pipeline components with default config.
 ///
-/// No Kafka, no storage credentials, no network — just verify nothing panics.
+/// No Kafka, no storage credentials, no network -- just verify nothing panics.
 #[test]
 fn smoke_startup_boots_with_default_config() {
     let mut config = Config::default();
@@ -57,7 +57,7 @@ fn smoke_startup_boots_with_default_config() {
     // RollingPolicy
     let _policy = RollingPolicy {
         max_size_bytes: config.archive.roll_size_bytes,
-        max_age_secs: config.archive.roll_interval_secs,
+        max_age_secs: config.roll_interval_secs(),
     };
 
     // File backend (default destination is file://)

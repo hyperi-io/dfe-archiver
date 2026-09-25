@@ -399,7 +399,7 @@ async fn a_batch_the_dlq_refuses_never_lets_the_commit_pass_it() {
 
     let spool = tempfile::TempDir::new().expect("spool");
     let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
-    config.archive.roll_interval_secs = 2;
+    config.archive.roll_interval_secs = Some(2);
     config.dlq.enabled = true;
     config.dlq.mode = scalo::dlq::DlqMode::KafkaOnly;
     config.dlq.file.enabled = false;

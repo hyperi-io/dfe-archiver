@@ -22,7 +22,9 @@ pub trait StorageBackend: Send + Sync {
     /// Append data to existing file/object
     async fn append(&self, path: &str, data: &[u8]) -> Result<()>;
 
-    /// Close file/object (finalise upload)
+    /// Complete the file/object so it survives a crash of the process or the
+    /// node: the offsets of the records it holds are released once this
+    /// returns `Ok`.
     async fn close(&self, path: &str) -> Result<()>;
 
     /// Check if path exists
@@ -36,7 +38,7 @@ pub trait StorageBackend: Send + Sync {
     /// `limit`: when `Some(n)`, return at most `n` entries; the
     /// implementation should stop walking / paginating as soon as the
     /// limit is met to avoid materialising large result sets in memory.
-    /// `None` returns every match (use only for small prefixes — high-
+    /// `None` returns every match (use only for small prefixes -- high-
     /// cardinality prefixes can OOM the process).
     async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>>;
 
