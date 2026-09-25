@@ -231,7 +231,9 @@ A failed upload keeps the staged file and its held offsets, and retries in the b
 
 Each held record costs about 32 bytes of memory until its file is durable. So while offsets are held an unset `roll_interval_secs` is 300 rather than 3600: at 10k records/s that is 96 MB instead of 1.15 GB. A configured value always wins, and one above 900 logs a startup warning.
 
-If the archiver is killed, every record not yet in a durable file is read again after the restart: up to one roll interval of intake plus whatever was still uploading, as duplicates, never as loss. The restart clears the staged files the killed process left, since their records are read again. A batch no file takes goes to the DLQ, and only a write the DLQ confirms releases its offsets. When the DLQ refuses it or is off, a batch the store refused for good is dropped with its reason. Any other, a local disk failure, holds the commit below it, and nothing reads it again while the process runs, so the archiver drains and exits non-zero and the restart reads it again.
+If the archiver is killed, every record not yet in a durable file is read again after the restart: up to one roll interval of intake plus whatever was still uploading, as duplicates, never as loss. The restart clears the staged files the killed process left, since their records are read again.
+
+A batch no file takes goes to the DLQ, and only a write the DLQ confirms releases its offsets. A batch too large for any DLQ backend once base64 grows it by a third is dropped before the write, counted in `messages_dropped_total` with the reason logged. A DLQ write that fails otherwise, or a local disk failure with the DLQ off, holds the commit below the batch, and nothing reads it again while the process runs, so the archiver drains and exits non-zero and the restart reads it again. With the DLQ off, a batch the store refused for good is dropped with its reason.
 
 `kafka.acknowledgements.enabled: false` commits at receipt instead, so a kill loses what the open files and buffers held.
 

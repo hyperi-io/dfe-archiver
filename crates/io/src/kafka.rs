@@ -471,3 +471,43 @@ impl Default for MemoryTransportAdapter {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rdkafka::ClientContext;
+    use rdkafka::statistics::{Partition, Statistics, Topic};
+    use scalo::transport::kafka::{StatsContext, total_consumer_lag};
+
+    /// The lag behind `position_lag` counts records past the read position, so
+    /// the records an open file holds uncommitted are never read as backlog.
+    #[test]
+    fn position_lag_counts_unread_records_never_held_ones() {
+        // Committed at 10, read to 60, 100 on the broker: 50 held, 40 unread.
+        let partition = Partition {
+            partition: 0,
+            committed_offset: 10,
+            app_offset: 60,
+            hi_offset: 100,
+            ls_offset: 100,
+            consumer_lag: 90,
+            ..Partition::default()
+        };
+        let mut topic = Topic {
+            topic: "events".to_string(),
+            ..Topic::default()
+        };
+        topic.partitions.insert(0, partition);
+        let mut stats = Statistics::default();
+        stats.topics.insert("events".to_string(), topic);
+
+        let context = StatsContext::new();
+        context.stats(stats);
+
+        assert_eq!(context.total_position_lag(), 40);
+        assert_eq!(
+            total_consumer_lag(&context.get_metrics()),
+            90,
+            "the committed lag counts the held records as backlog"
+        );
+    }
+}

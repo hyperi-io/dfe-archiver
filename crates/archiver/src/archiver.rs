@@ -39,12 +39,13 @@ use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::{KafkaStatsEmitter, ReceivedBatch, SourceTransport, Staging};
 use lru::LruCache;
 use rayon::prelude::*;
+use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use scalo::memory::MemoryGuard;
 use scalo::metrics::FlushTrigger;
 use scalo::scaling::ScalingPressure;
 use scalo::transport::filter::FilteredDlqEntry;
-use scalo::transport::{DeliveryStatus, KafkaToken, SinkConfirmation};
+use scalo::transport::{DeadLetterReason, DeliveryStatus, KafkaToken, SinkConfirmation};
 use scalo::{AckHeldSource, SelfRegulationGovernor};
 use std::hash::BuildHasher;
 use std::num::NonZeroUsize;
@@ -301,7 +302,7 @@ pub struct Archiver {
     /// rdkafka stats emitter (sidecar consumer for broker/partition metrics)
     _stats_emitter: Option<KafkaStatsEmitter>,
     /// Dead letter queue for failed messages
-    dlq: Arc<scalo::dlq::Dlq>,
+    dlq: Arc<Dlq>,
     /// Log-spam guards (per-instance -- see `LogSpamGuards` doc)
     log_guards: LogSpamGuards,
     /// One debounce cell per configured expression field, indexed as
@@ -436,6 +437,23 @@ fn tokens_of(offsets: Vec<KafkaOffset>) -> Vec<KafkaToken> {
     offsets.into_iter().map(KafkaOffset::into_token).collect()
 }
 
+/// Split `entries` into those a backend of `dlq` can hold, and the reasons no
+/// backend can ever hold the rest.
+fn screen_dead_letters(
+    dlq: &Dlq,
+    entries: Vec<DlqEntry>,
+) -> (Vec<DlqEntry>, Vec<DeadLetterReason>) {
+    let mut writable = Vec::with_capacity(entries.len());
+    let mut refused = Vec::new();
+    for entry in entries {
+        match dlq.refusal(&entry) {
+            Some(reason) => refused.push(reason),
+            None => writable.push(entry),
+        }
+    }
+    (writable, refused)
+}
+
 /// What a completed archive file proves: a completion the object store
 /// answered, or a file written on this node.
 ///
@@ -553,7 +571,7 @@ impl Archiver {
         };
         // Not tied to `cancel`: the shutdown drain still dead-letters after the
         // loop stops, and `drain` shuts the DLQ down last.
-        let dlq = scalo::dlq::Dlq::spawn(
+        let dlq = Dlq::spawn(
             &dlq_config,
             "dfe-archiver",
             dlq_kafka.as_ref(),
@@ -1570,9 +1588,11 @@ impl Archiver {
     }
 
     /// Dead-letter a batch no file took, and release its offsets: `Rejected`
-    /// once the DLQ confirms it holds the batch. Without that, a batch the
-    /// store refused for good is `Dropped` with its reason, and any other is
-    /// `Errored`, which ends the loop so a restart reads the records again.
+    /// once the DLQ confirms it holds the batch, and `Dropped` with the reason
+    /// when no DLQ backend can ever hold it. A DLQ write that can clear is
+    /// `Errored`, which ends the loop so a restart writes the batch again.
+    /// With the DLQ off, a batch the store refused for good is `Dropped` and
+    /// any other is `Errored`.
     async fn dead_letter(&self, batch: StagedBatch, error: &Error) {
         let StagedBatch {
             destination,
@@ -1580,20 +1600,7 @@ impl Archiver {
             offsets,
             record_count,
         } = batch;
-        let unplaced = || {
-            if error.is_refused() {
-                self.metrics.record_dropped(record_count as u64);
-                error!(
-                    records = record_count,
-                    destination = %destination,
-                    reason = %error,
-                    "Dropped records the store refused for good, with no DLQ to take them"
-                );
-                DeliveryStatus::Dropped
-            } else {
-                DeliveryStatus::Errored
-            }
-        };
+        let records = record_count as u64;
         let status = if self.dlq.is_enabled() {
             debug!(
                 destination = %destination,
@@ -1601,34 +1608,56 @@ impl Archiver {
                 error = %error,
                 "Sending failed batch to DLQ"
             );
-            let entry = scalo::dlq::DlqEntry::new(
+            let entry = DlqEntry::new(
                 "dfe-archiver",
                 format!("storage_write_failed: {error}"),
                 data,
             )
             .with_destination(destination.as_str());
-            match self.dlq.write_confirmed(vec![entry]).await {
-                Ok(()) => {
-                    self.metrics.record_dlq(record_count as u64);
-                    scalo::logger::security::record_dlq(
-                        "storage_write_failed",
-                        &error.to_string(),
-                        Some(destination.as_str()),
-                    );
-                    DeliveryStatus::Rejected
-                }
-                Err(dlq_err) => {
-                    error!(
-                        error = %dlq_err,
-                        destination = %destination,
-                        "The DLQ refused a batch no file took"
-                    );
-                    unplaced()
+            if let Some(reason) = self.dlq.refusal(&entry) {
+                self.metrics.record_dropped(records);
+                error!(
+                    records,
+                    destination = %destination,
+                    reason = %reason,
+                    error = %error,
+                    "Dropped records no file took and the DLQ can never hold"
+                );
+                DeliveryStatus::Dropped
+            } else {
+                match self.dlq.write_confirmed(vec![entry]).await {
+                    Ok(()) => {
+                        self.metrics.record_dlq(records);
+                        scalo::logger::security::record_dlq(
+                            "storage_write_failed",
+                            &error.to_string(),
+                            Some(destination.as_str()),
+                        );
+                        DeliveryStatus::Rejected
+                    }
+                    Err(dlq_err) => {
+                        error!(
+                            error = %dlq_err,
+                            destination = %destination,
+                            records,
+                            "The DLQ could not take a batch no file took; a restart writes it again"
+                        );
+                        DeliveryStatus::Errored
+                    }
                 }
             }
+        } else if error.is_refused() {
+            self.metrics.record_dropped(records);
+            error!(
+                records,
+                destination = %destination,
+                reason = %error,
+                "Dropped records the store refused for good, with no DLQ to take them"
+            );
+            DeliveryStatus::Dropped
         } else {
             trace!(destination = %destination, "DLQ disabled for a batch no file took");
-            unplaced()
+            DeliveryStatus::Errored
         };
         self.release(tokens_of(offsets), status).await;
     }
@@ -1641,6 +1670,10 @@ impl Archiver {
     /// normally empty -- but the no-silent-drop contract means we route any
     /// entries that do arrive, and a held source waits on every offset it
     /// handed out.
+    ///
+    /// An entry no DLQ backend can ever hold is dropped, counted and logged. A
+    /// DLQ write that can clear releases every filtered offset `Errored`, which
+    /// ends the loop so a restart routes the block again.
     async fn route_filter_dlq(&self, entries: Vec<FilteredDlqEntry>, filtered: Vec<KafkaOffset>) {
         if entries.is_empty() && filtered.is_empty() {
             return;
@@ -1649,28 +1682,42 @@ impl Archiver {
             // Only a drop filter matched: removed by policy, not lost.
             DeliveryStatus::Dropped
         } else {
-            let count = entries.len() as u64;
             let dead_letters = entries
                 .into_iter()
                 .map(|entry| {
                     let destination = entry.key.as_deref().unwrap_or("filter").to_string();
-                    scalo::dlq::DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
+                    DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
                         .with_destination(&destination)
                 })
                 .collect();
-            match self.dlq.write_confirmed(dead_letters).await {
-                Ok(()) if self.dlq.is_enabled() => {
-                    self.metrics.record_dlq(count);
-                    DeliveryStatus::Rejected
-                }
-                // A disabled DLQ counts what it drops in dlq_dropped_total.
-                Ok(()) => DeliveryStatus::Dropped,
-                Err(dlq_err) => {
+            let (writable, refused) = screen_dead_letters(&self.dlq, dead_letters);
+            let written = writable.len() as u64;
+            let outcome = if writable.is_empty() {
+                Ok(())
+            } else {
+                self.dlq.write_confirmed(writable).await
+            };
+            if let Err(dlq_err) = outcome {
+                error!(
+                    error = %dlq_err,
+                    "The DLQ could not take inbound-filter dead letters; a restart routes them again"
+                );
+                DeliveryStatus::Errored
+            } else {
+                if let Some(reason) = refused.first() {
+                    self.metrics.record_dropped(refused.len() as u64);
                     error!(
-                        error = %dlq_err,
-                        "The DLQ refused inbound-filter dead letters; their offsets stay held until a restart"
+                        records = refused.len(),
+                        reason = %reason,
+                        "Dropped inbound-filter dead letters the DLQ can never hold"
                     );
-                    DeliveryStatus::Errored
+                }
+                if written > 0 && self.dlq.is_enabled() {
+                    self.metrics.record_dlq(written);
+                    DeliveryStatus::Rejected
+                } else {
+                    // A disabled DLQ counts what it drops in dlq_dropped_total.
+                    DeliveryStatus::Dropped
                 }
             }
         };
@@ -1712,8 +1759,8 @@ impl Archiver {
 mod tests {
     use super::{
         UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config, held_record_cap, record_files_opened,
-        record_rolls, record_routing_fallbacks, restart_required_changes, sink_confirmation,
-        upload_retry_delay,
+        record_rolls, record_routing_fallbacks, restart_required_changes, screen_dead_letters,
+        sink_confirmation, upload_retry_delay,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -1725,9 +1772,11 @@ mod tests {
     use dfe_archiver_core::types::KafkaMessage;
     use dfe_archiver_io::Staging;
     use dfe_archiver_io::storage::create_backend;
-    use scalo::transport::SinkConfirmation;
+    use scalo::dlq::{Dlq, DlqConfig, DlqEntry, DlqMode, FileDlqConfig, KafkaDlqConfig};
+    use scalo::transport::{DeadLetterReason, SinkConfirmation};
     use std::path::Path;
     use std::sync::atomic::AtomicU64;
+    use tokio_util::sync::CancellationToken;
 
     /// Held offsets may take a quarter of the memory limit, at 32 bytes each.
     #[test]
@@ -2014,5 +2063,60 @@ mod tests {
                 "dlq"
             ]
         );
+    }
+
+    /// An entry over the only backend's ceiling is screened out before any
+    /// write, with its reason, and the entries around it still go to the write.
+    #[tokio::test]
+    async fn a_dead_letter_no_backend_can_hold_is_screened_out_with_its_reason() {
+        let mut kafka = scalo::transport::KafkaConfig {
+            brokers: vec!["127.0.0.1:1".to_string()],
+            group: String::new(),
+            ..scalo::transport::KafkaConfig::default()
+        };
+        kafka.sizing.producer.message_max_bytes = Some(4096);
+        let config = DlqConfig {
+            mode: DlqMode::KafkaOnly,
+            file: FileDlqConfig {
+                enabled: false,
+                ..FileDlqConfig::default()
+            },
+            kafka: KafkaDlqConfig {
+                enabled: true,
+                ..KafkaDlqConfig::default()
+            },
+            ..DlqConfig::default()
+        };
+        let dlq = Dlq::spawn(
+            &config,
+            "dfe-archiver",
+            Some(&kafka),
+            CancellationToken::new(),
+        )
+        .expect("dlq");
+        let entry =
+            |bytes: usize| DlqEntry::new("dfe-archiver", "storage_write_failed", vec![b'x'; bytes]);
+
+        let (writable, refused) =
+            screen_dead_letters(&dlq, vec![entry(100), entry(8192), entry(200)]);
+
+        assert_eq!(
+            writable.len(),
+            2,
+            "the entries under the ceiling are written"
+        );
+        assert!(
+            matches!(
+                refused.as_slice(),
+                [DeadLetterReason::TooLarge { bytes, limit }] if *limit == 4096 - 128 && bytes > limit
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            screen_dead_letters(&Dlq::disabled(), vec![entry(8192)]).1,
+            vec![],
+            "a disabled DLQ refuses nothing"
+        );
+        dlq.shutdown().await.expect("dlq shutdown");
     }
 }

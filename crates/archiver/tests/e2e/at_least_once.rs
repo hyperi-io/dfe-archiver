@@ -22,6 +22,7 @@ use dfe_archiver::metrics::ArchiverMetrics;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 use scalo::metrics::{MetricsConfig, MetricsManager};
 use scalo::transport::{GrpcConfig, GrpcTransport, SendResult, TransportSender};
+use scalo::{AckHeldSource, SelfRegulationConfig};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -34,13 +35,12 @@ const GROUP: &str = "archivers";
 /// The bucket every test archives into.
 const BUCKET: &str = "archive";
 
-/// A record carrying `id`, padded past the refusing DLQ topic's 1 KiB ceiling
-/// on its own. The padding is pseudo-random so the DLQ producer's compression
-/// cannot bring a record back under the ceiling.
-fn record(id: u64) -> Vec<u8> {
+/// A record carrying `id`, padded with `pad` pseudo-random characters so a
+/// producer's compression cannot shrink it back under a ceiling.
+fn padded(id: u64, pad: usize) -> Vec<u8> {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut state = id.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    let pad: String = (0..3000)
+    let pad: String = (0..pad)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 7;
@@ -49,6 +49,11 @@ fn record(id: u64) -> Vec<u8> {
         })
         .collect();
     format!(r#"{{"id":{id},"pad":"{pad}"}}"#).into_bytes()
+}
+
+/// A record carrying `id`, past a 1 KiB topic ceiling on its own.
+fn record(id: u64) -> Vec<u8> {
+    padded(id, 3000)
 }
 
 fn records(ids: std::ops::Range<u64>) -> Vec<Vec<u8>> {
@@ -164,6 +169,24 @@ fn kafka_to(kafka: &KafkaFixture, minio: &MinioFixture, spool: &Path, topic: &st
     config.kafka.topics = vec![topic.to_string()];
     config.kafka.batch_size = 1000;
     config
+}
+
+/// Dead-letter to `topic` on the source broker, and nowhere else.
+fn dead_letter_to(config: &mut Config, topic: &str) {
+    config.dlq.enabled = true;
+    config.dlq.mode = scalo::dlq::DlqMode::KafkaOnly;
+    config.dlq.file.enabled = false;
+    config.dlq.kafka.enabled = true;
+    config.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
+    config.dlq.kafka.common_topic = topic.to_string();
+}
+
+/// Put a file where the archiver stages its object-store files, so every new
+/// file fails to open locally with an error the store never gave.
+fn block_staging(spool: &Path) {
+    let staging = spool.join("uploads");
+    std::fs::remove_dir_all(&staging).expect("remove staging");
+    std::fs::write(&staging, b"").expect("block staging");
 }
 
 /// Two replicas archiving the same destination in the same window each run a
@@ -492,5 +515,226 @@ async fn a_key_the_store_refuses_for_good_is_dropped_and_the_commit_moves_on() {
     assert!(
         minio.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
+    );
+}
+
+/// A batch no file took and the DLQ refused, with a refusal that can clear,
+/// ends the loop so the process exits, and nothing commits past the batch.
+/// The restart reads it again, and once the DLQ confirms it holds the batch
+/// the commit moves past it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("dlq_refuses").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("dlq_refuses").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+    // Below the DLQ producer's own ceiling, so the refusal reads as one that can clear.
+    kafka
+        .create_topic("refusing-dlq", &[("max.message.bytes", "1024")])
+        .await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    dead_letter_to(&mut config, "refusing-dlq");
+    let (manager, metrics) = metrics();
+
+    kafka.produce("events", &records(0..20)).await;
+    let first = archiver(&config, &metrics).await;
+    block_staging(spool.path());
+    let running = tokio::spawn({
+        let first = Arc::clone(&first);
+        async move { first.run().await }
+    });
+    let ended = tokio::time::timeout(Duration::from_secs(45), running)
+        .await
+        .expect("the loop ran on past a batch the DLQ refused")
+        .expect("loop task");
+    assert!(
+        matches!(ended, Err(dfe_archiver::Error::Withheld { records }) if records > 0),
+        "the loop must end with the withheld records, for main to exit non-zero: {ended:?}"
+    );
+    first.drain().await;
+    drop(first);
+    assert_eq!(
+        kafka.records_in("refusing-dlq"),
+        0,
+        "the DLQ topic took the batch, so this run tests nothing: its ceiling did not refuse"
+    );
+    assert_eq!(
+        kafka.committed(GROUP, "events"),
+        None,
+        "the commit passed a batch the DLQ refused"
+    );
+    assert_eq!(
+        counter(&manager, "messages_dropped_total"),
+        0,
+        "a refusal that can clear dropped records"
+    );
+
+    // The restart, with a DLQ that takes the batch and staging still failing.
+    std::fs::remove_file(spool.path().join("uploads")).expect("unblock staging");
+    dead_letter_to(&mut config, "dlq");
+    let second = archiver(&config, &metrics).await;
+    block_staging(spool.path());
+    let running = tokio::spawn({
+        let second = Arc::clone(&second);
+        async move { second.run().await }
+    });
+    wait_until(
+        "the commit moved past the dead-lettered records",
+        || async { kafka.committed(GROUP, "events") == Some(20) },
+    )
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a batch the DLQ confirmed ended the loop"
+    );
+    stop(&second, running).await;
+    assert_eq!(
+        counter(&manager, "messages_dlq_total"),
+        20,
+        "the restart dead-letters every record the first run read"
+    );
+    assert!(kafka.records_in("dlq") > 0, "the DLQ topic holds the batch");
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+    assert!(
+        minio.keys(BUCKET).await.is_empty(),
+        "nothing reached the store"
+    );
+}
+
+/// A dead letter over every DLQ backend's ceiling can never land, so its
+/// records are dropped with the reason and counted, the commit moves past
+/// them, and the loop runs on instead of restarting into the same refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_letter_the_dlq_can_never_hold_is_dropped_and_the_loop_runs_on() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("dlq_never_holds").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("dlq_never_holds").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    dead_letter_to(&mut config, "dlq");
+    let (manager, metrics) = metrics();
+
+    // Under the 16 MiB record ceiling as a record, over it as a dead letter
+    // once base64 grows the payload by a third.
+    kafka.produce("events", &[padded(0, 13_000_000)]).await;
+    let archiver = archiver(&config, &metrics).await;
+    block_staging(spool.path());
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the record was dropped", || async {
+        counter(&manager, "messages_dropped_total") >= 1
+    })
+    .await;
+    wait_until("the commit moved past the dropped record", || async {
+        kafka.committed(GROUP, "events") == Some(1)
+    })
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a dead letter no DLQ can hold ended the loop"
+    );
+    stop(&archiver, running).await;
+
+    assert_eq!(counter(&manager, "messages_dropped_total"), 1);
+    assert_eq!(counter(&manager, "messages_dlq_total"), 0);
+    assert_eq!(kafka.records_in("dlq"), 0, "nothing reached the DLQ topic");
+}
+
+/// While the governor holds intake the Push listener refuses every push as
+/// backpressure, so the sender keeps the record, and it takes pushes again
+/// once the pressure clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
+    init_logs();
+    let Some(minio) = common::acquire_minio("push_under_pressure").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let port = common::free_low_port(&[]);
+    let mut config = archive_to(&minio, spool.path());
+    config.transport = TRANSPORT_GRPC.to_string();
+    config.grpc.listen = Some(format!("127.0.0.1:{port}"));
+    let (manager, metrics) = metrics();
+
+    let governor = SelfRegulationConfig::default()
+        .build(Arc::new(MemoryGuard::new(MemoryGuardConfig::default())))
+        .expect("self-regulation is on by default");
+    // A hard source that holds intake while it reads its cap.
+    let brake = Arc::new(AtomicU64::new(0));
+    governor
+        .pressure()
+        .attach_source(Arc::new(AckHeldSource::new(Arc::clone(&brake), 1)));
+    let archiver = Arc::new(
+        Archiver::new(
+            SharedConfig::new(config),
+            Arc::clone(&metrics),
+            Arc::new(MemoryGuard::new(MemoryGuardConfig::default())),
+            Some(&governor),
+            None,
+        )
+        .await
+        .expect("archiver"),
+    );
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+
+    let sender = GrpcTransport::new(&GrpcConfig {
+        endpoint: Some(format!("http://127.0.0.1:{port}")),
+        ..GrpcConfig::default()
+    })
+    .await
+    .expect("sender");
+    let accepted = |id: u64| {
+        let sender = &sender;
+        async move {
+            matches!(
+                sender.send("traffic", record(id).into()).await,
+                SendResult::Ok
+            )
+        }
+    };
+    wait_until("the listener takes pushes", || accepted(0)).await;
+
+    brake.store(1, Ordering::Release);
+    let refused = sender.send("traffic", record(1).into()).await;
+    assert!(
+        refused.is_backpressured(),
+        "a push under pressure was answered: {refused:?}"
+    );
+
+    brake.store(0, Ordering::Release);
+    wait_until("the listener takes pushes again", || accepted(2)).await;
+    wait_until("both accepted pushes were written", || async {
+        counter(&manager, "messages_written_total") >= 2
+    })
+    .await;
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        ids(&minio.lines(BUCKET).await),
+        vec![0, 2],
+        "only the pushes the listener answered are archived"
     );
 }

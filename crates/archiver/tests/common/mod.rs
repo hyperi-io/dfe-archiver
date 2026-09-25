@@ -1558,6 +1558,10 @@ impl KafkaFixture {
         let producer: FutureProducer = self
             .client()
             .set("message.timeout.ms", "30000")
+            .set(
+                "message.max.bytes",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
             .create()
             .expect("kafka producer");
         for payload in payloads {
@@ -1657,6 +1661,11 @@ pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
             )
             .with_env_var("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR", "1")
             .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+            // The record ceiling broker, topic and producer agree on in a deployment.
+            .with_env_var(
+                "KAFKA_MESSAGE_MAX_BYTES",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
             .with_mapped_port(port, 9092u16.tcp())
             .with_container_name(&name)
             .with_labels(test_labels("kafka"))
