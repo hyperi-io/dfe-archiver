@@ -12,7 +12,11 @@ use async_trait::async_trait;
 /// Storage backend trait
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// Create a new file/object (does not overwrite existing)
+    /// Create a new file/object, refusing a path that already holds one.
+    ///
+    /// An object store only finds completed objects, so an upload another
+    /// writer has in progress on the same path is not refused: keeping two
+    /// writers' paths apart is the caller's job.
     async fn create(&self, path: &str) -> Result<()>;
 
     /// Append data to existing file/object

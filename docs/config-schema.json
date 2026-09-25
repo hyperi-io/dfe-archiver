@@ -32,7 +32,10 @@
         "allow_insecure_transport": false,
         "batch_size": 10000,
         "max_poll_interval_ms": 300000,
-        "session_timeout_ms": 30000
+        "session_timeout_ms": 30000,
+        "acknowledgements": {
+          "enabled": true
+        }
       }
     },
     "grpc": {
@@ -44,7 +47,10 @@
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
         "compression": false,
-        "default_topic": "default_land"
+        "default_topic": "default_land",
+        "acknowledgements": {
+          "enabled": true
+        }
       }
     },
     "archive": {
@@ -240,6 +246,24 @@
           "format": "uint32",
           "minimum": 0,
           "default": 30000
+        },
+        "acknowledgements": {
+          "description": "With `enabled: true` (the default) a record's offset is committed only\nonce the archive file holding it is complete in the store, so a kill\nre-reads what an open file held: duplicates are possible, loss is not.\nWith `enabled: false` offsets are committed as records are received,\nand a kill loses what the open files and buffers held.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    "AcknowledgementsConfig": {
+      "description": "The `acknowledgements` section of an ack-capable transport.\n\nWith `enabled: true` (the default) a source releases its acknowledgement --\na Kafka offset commit, a gRPC or HTTP response -- only once every piece of\nwork built from the record has been delivered, dead-lettered with the DLQ's\nconfirmation, or dropped by policy. A failed delivery withholds it, so the\nrecord is delivered again: duplicates are possible, loss is not.\n\nWith `enabled: false` the source acknowledges at receipt, before the record\nis processed: a crash or a failed delivery loses what was acknowledged.\n\n```yaml\nkafka:\n  acknowledgements:\n    enabled: true\n```",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Hold the source acknowledgement until every piece is delivered.",
+          "type": "boolean",
+          "default": true
         }
       }
     },
@@ -285,6 +309,13 @@
           "description": "Archive destination key for a record whose sender set no routing key.",
           "type": "string",
           "default": "default_land"
+        },
+        "acknowledgements": {
+          "description": "The listener answers each push once its records are queued, with this\non or off: a record is released only when its archive file completes, at\nthe roll interval, long after any sender's deadline. So the archive copy\non this transport is at-most-once, and `enabled: false` only changes the\nreason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`\nto `acks_disabled`.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
         }
       }
     },
@@ -694,7 +725,7 @@
           "const": "cascade"
         },
         {
-          "description": "Write to all enabled backends; report any failures.",
+          "description": "Write every batch to all enabled backends. The write succeeds when at\nleast one backend takes the whole batch, and fails only when none does.",
           "type": "string",
           "const": "fan_out"
         },
@@ -783,7 +814,7 @@
           "default": "dfe.dlq"
         },
         "send_timeout_ms": {
-          "description": "Send timeout in milliseconds.",
+          "description": "How long a `flush` or the shutdown waits for the broker to ack the\nentries queued to Kafka, in milliseconds. Entries still unacked then\nare purged and counted as dropped. The purge adds a wait of up to 5 s\nfor the purged entries' delivery reports, so `0` skips the ack wait\nbut not that one. Default 5000.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

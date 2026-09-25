@@ -55,6 +55,8 @@ properties:
       batch_size: 10000
       max_poll_interval_ms: 300000
       session_timeout_ms: 30000
+      acknowledgements:
+        enabled: true
   grpc:
     description: Push listener configuration, read when `transport` is `grpc`.
     $ref: '#/$defs/GrpcConfig'
@@ -65,6 +67,8 @@ properties:
       max_message_size: 16777216
       compression: false
       default_topic: default_land
+      acknowledgements:
+        enabled: true
   archive:
     description: Archive output configuration
     $ref: '#/$defs/ArchiveConfig'
@@ -236,6 +240,40 @@ $defs:
         format: uint32
         minimum: 0
         default: 30000
+      acknowledgements:
+        description: |-
+          With `enabled: true` (the default) a record's offset is committed only
+          once the archive file holding it is complete in the store, so a kill
+          re-reads what an open file held: duplicates are possible, loss is not.
+          With `enabled: false` offsets are committed as records are received,
+          and a kill loses what the open files and buffers held.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
+  AcknowledgementsConfig:
+    description: |-
+      The `acknowledgements` section of an ack-capable transport.
+
+      With `enabled: true` (the default) a source releases its acknowledgement --
+      a Kafka offset commit, a gRPC or HTTP response -- only once every piece of
+      work built from the record has been delivered, dead-lettered with the DLQ's
+      confirmation, or dropped by policy. A failed delivery withholds it, so the
+      record is delivered again: duplicates are possible, loss is not.
+
+      With `enabled: false` the source acknowledges at receipt, before the record
+      is processed: a crash or a failed delivery loses what was acknowledged.
+
+      ```yaml
+      kafka:
+        acknowledgements:
+          enabled: true
+      ```
+    type: object
+    properties:
+      enabled:
+        description: Hold the source acknowledgement until every piece is delivered.
+        type: boolean
+        default: true
   GrpcConfig:
     description: |-
       Push listener configuration for the direct transport.
@@ -277,6 +315,17 @@ $defs:
         description: Archive destination key for a record whose sender set no routing key.
         type: string
         default: default_land
+      acknowledgements:
+        description: |-
+          The listener answers each push once its records are queued, with this
+          on or off: a record is released only when its archive file completes, at
+          the roll interval, long after any sender's deadline. So the archive copy
+          on this transport is at-most-once, and `enabled: false` only changes the
+          reason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`
+          to `acks_disabled`.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   ArchiveConfig:
     description: Archive output configuration
     type: object
@@ -602,7 +651,9 @@ $defs:
         Default order: Kafka first, file fallback.
       type: string
       const: cascade
-    - description: Write to all enabled backends; report any failures.
+    - description: |-
+        Write every batch to all enabled backends. The write succeeds when at
+        least one backend takes the whole batch, and fails only when none does.
       type: string
       const: fan_out
     - description: File backend only (no Kafka dependency).
@@ -672,7 +723,12 @@ $defs:
         type: string
         default: dfe.dlq
       send_timeout_ms:
-        description: Send timeout in milliseconds.
+        description: |-
+          How long a `flush` or the shutdown waits for the broker to ack the
+          entries queued to Kafka, in milliseconds. Entries still unacked then
+          are purged and counted as dropped. The purge adds a wait of up to 5 s
+          for the purged entries' delivery reports, so `0` skips the ack wait
+          but not that one. Default 5000.
         type: integer
         format: uint64
         minimum: 0

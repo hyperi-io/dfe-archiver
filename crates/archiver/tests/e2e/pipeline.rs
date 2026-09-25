@@ -181,9 +181,12 @@ async fn test_e2e_kafka_to_file_archive() {
         }
         total_received += messages.len() as u64;
 
-        // Commit offsets
-        let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
-        transport.commit(offsets).await.expect("commit");
+        // Release the offsets, which commits them
+        let tokens: Vec<_> = messages.iter().map(|m| m.token().clone()).collect();
+        transport
+            .release(&tokens, scalo::transport::DeliveryStatus::Delivered)
+            .await
+            .expect("release");
 
         attempts = 0; // reset on successful recv
     }
@@ -279,8 +282,11 @@ async fn test_e2e_kafka_to_compressed_archive() {
         }
         total_received += messages.len() as u64;
 
-        let offsets: Vec<_> = messages.iter().map(std::convert::Into::into).collect();
-        transport.commit(offsets).await.expect("commit");
+        let tokens: Vec<_> = messages.iter().map(|m| m.token().clone()).collect();
+        transport
+            .release(&tokens, scalo::transport::DeliveryStatus::Delivered)
+            .await
+            .expect("release");
         attempts = 0;
     }
 

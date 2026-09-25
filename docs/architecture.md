@@ -35,8 +35,8 @@ chosen by `transport.rs`, and the object-store backends behind `create_backend`
 (`storage.rs`): file, S3, GCS, Azure Blob and MinIO.
 
 **`crates/archiver`** (`dfe-archiver`) -- the binary and the pipeline that joins
-the other two. `archiver.rs` is the loop (receive, route, buffer, write,
-commit), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader,
+the other two. `archiver.rs` is the loop (receive, route, buffer, write, and
+release once a file completes), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader,
 `metrics.rs` the Prometheus surface, and `contract.rs` the deployment contract
 the checked-in `Dockerfile` and the Helm chart are generated from.
 
@@ -45,6 +45,9 @@ the checked-in `Dockerfile` and the Helm chart are generated from.
 - `core` depends on no other workspace crate.
 - `core` has no metrics dependency: it counts what it did and the caller
   records it, which is why `ArchiveWriter::take_files_opened` exists.
+- `core` never releases an offset: the writer settles the offsets held on a
+  file as it completes, and the caller drains them with
+  `ArchiveWriter::take_settled` and releases them through the transport.
 - `io` depends on `core` only, never on `archiver`.
 - `archiver` is the only crate with a binary and the only reader of the
   deployment contract, so the Dockerfile and the chart have one source.

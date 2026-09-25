@@ -264,15 +264,13 @@ impl ServiceApp for App {
         shutdown_token.cancelled().await;
         info!("Shutdown signal received");
 
-        // Signal shutdown and wait for drain
+        // The loop must have stopped before the drain receives from the source.
         archiver.shutdown();
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        archiver
-            .drain()
-            .await
-            .map_err(|e| CliError::Service(e.to_string()))?;
+        if let Err(e) = run_handle.await {
+            tracing::error!(error = %e, "Archiver loop did not finish cleanly");
+        }
+        archiver.drain().await;
 
-        let _ = run_handle.await;
         info!("Shutdown complete");
 
         Ok(())
@@ -281,9 +279,10 @@ impl ServiceApp for App {
     fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
         // Register the archiver's weighted KEDA components on the runtime's
         // unified ScalingPressure. The
-        // pipeline drives these values (kafka_lag from assigned-partition lag,
-        // buffer_depth from hot-buffer count, memory from the cgroup guard) plus
-        // the object-store circuit gate, so KEDA scales on the single composite.
+        // pipeline drives these values (kafka_lag from the consumer's position
+        // lag, buffer_depth from hot-buffer count, memory from the cgroup guard)
+        // plus the object-store circuit gate, so KEDA scales on the single
+        // composite.
         dfe_archiver::scaling_components()
     }
 

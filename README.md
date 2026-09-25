@@ -21,7 +21,7 @@ contract).
 - **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none
 - **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
-- **At-least-once delivery**: Kafka offset commit only after successful archive write
+- **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete
 - **Memory-capped**: Tiered buffering with configurable limits
 - **Disk protection**: Backpressure when spool exceeds limits or disk space is low
 
@@ -32,7 +32,7 @@ flowchart LR
     K[("Kafka<br/>batch recv, 10K msgs")] --> BM["Buffer Manager<br/>per-destination buffering"]
     BM --> AW["Archive Writer<br/>compressed rolling files"]
     AW --> ST["Storage backend<br/>File / S3 / GCS / Azure / MinIO"]
-    ST -. write ok .-> C["Kafka offset commit<br/>at-least-once"]
+    ST -. file complete .-> C["Kafka offset commit<br/>at-least-once"]
 ```
 
 The workspace is three crates -- `core`, `io` and `archiver` -- described under
@@ -138,11 +138,14 @@ kafka:
   sasl_mechanism: SCRAM-SHA-256
   sasl_username: archiver
   sasl_password: ${KAFKA_PASSWORD}  # env var substitution
+  acknowledgements:
+    enabled: true              # false commits at receipt
 
 archive:
   destination: s3://my-bucket/archives
   # Under the routed destination; {year} {month} {day} {hour} {minute}
-  # {timestamp} {seq} are the only placeholders, anything else is refused
+  # {timestamp} {seq} are the only placeholders, anything else is refused.
+  # Each file name ends -<seq>-<writer id>.
   path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824  # 1GB (final compressed size)
   roll_interval_secs: 3600     # 1 hour
@@ -222,16 +225,17 @@ archive:
 
 ## At-Least-Once Delivery
 
-The archiver guarantees at-least-once delivery:
+On `kafka`, a record's offset is committed only once the archive file holding it is complete: the multipart upload finished, or the local file closed. Until then the file is an upload in progress that a crash abandons, so the commit waits for the roll -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
 
-1. Messages are consumed from Kafka in batches
-2. Messages are buffered per-destination
-3. Buffers are compressed and written to storage
-4. **Only after successful storage write**, Kafka offsets are committed
+If the archiver is killed, every record not yet in a completed file is read again after the restart: up to one roll interval of intake, as duplicates, never as loss. A batch no file takes goes to the DLQ, and only a write the DLQ confirms releases its offsets. One the DLQ refuses, or any with the DLQ off, keeps its offsets held until a restart reads the records again, and no commit passes them meanwhile.
 
-If the archiver crashes:
-- Before write: Messages are re-consumed from Kafka (no data loss)
-- After write, before commit: Duplicates on restart (at-least-once semantics)
+`kafka.acknowledgements.enabled: false` commits at receipt instead, so a kill loses what the open files and buffers held.
+
+On `grpc` the listener answers each push once its records are queued: a record is released only when its file completes, long after any sender's deadline. So the archive copy on the direct path is at-most-once -- a kill loses what the queue and the open files held. A graceful stop still writes every record it answered: the listener closes first, its queue is drained into the files, then the files complete.
+
+Every file name carries a component unique to the writer, so two replicas writing one destination in one window never complete an upload onto the same key.
+
+`pipeline_delivery_guarantee{guarantee, reason}` reads 1 for the guarantee in force: `at_least_once`/`confirmed` on `kafka` into an object store, `at_least_once_local`/`sink_confirms_locally` on `kafka` into a local path, and `best_effort` with `acks_disabled` or, on `grpc`, `sink_cannot_confirm`.
 
 ## Disk Protection
 
@@ -348,7 +352,7 @@ Green says less than it looks, three ways:
 
 | Don't | Do | Why |
 |-------|----|-----|
-| Commit the Kafka offsets of the batch that just flushed. | Commit a partition only up to the lowest offset still buffered in ANY destination, plus one. | Default routing is expression on `org_id`, so one partition fans out to several buffers. Org B's flush commits past Org A's unflushed records, and an ungraceful exit loses them (#82). |
+| Commit the Kafka offsets of a batch once it is written into a file. | Hold them on the file and release them when it completes. The armed consumer commits each partition up to its lowest offset not yet released. | A file is an upload in progress until it rolls, and a kill abandons it. Default routing is expression on `org_id`, so one partition fans out to several files that complete at different times (#82). |
 | Build a second `MetricsManager` in a test and assert on `render()`. | Share one manager, assert on the delta. | `set_global_recorder` succeeds once per process. Later managers keep the existing recorder and render an empty string. nextest forks per test and hides it, `cargo-llvm-cov` runs one process and does not (#84). |
 | Trust `cargo update -p rustls` to clear the advisory. | `cargo update -p rustls --precise 0.23.45`, then build both arches. | Plain `-p` stops at 0.23.43, still vulnerable, because 0.23.45 needs aws-lc-rs to move too. `--precise` drags `aws-lc-sys` 0.41 to 0.45, which compiles C (#85). |
 | Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |
@@ -360,7 +364,7 @@ Green says less than it looks, three ways:
 
 Inbound:
 
-- **hyperi-io/scalo-rs**, cargo dependency. The workspace declares `scalo = { version = ">=2.12.1, <3" }` and all three crates inherit it, so a scalo release is a range check, a bump and a rebuild.
+- **hyperi-io/scalo-rs**, cargo dependency. The workspace declares one `scalo` range in `[workspace.dependencies]` and all three crates inherit it, so a scalo release is a range check, a bump and a rebuild.
 - **hyperi-io/scalo-rs** again, generator, lockstep. `Dockerfile` comes from `scalo::deployment::generate_dockerfile()` over this repo's contract, so a generator or schema-version change means regenerate and commit the diff.
 
 Outbound -- the repo a change here breaks:

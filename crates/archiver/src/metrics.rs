@@ -91,7 +91,10 @@ impl ArchiverMetrics {
             "Total disk pressure backpressure events",
         );
 
-        let _ = manager.gauge("kafka_lag", "Kafka consumer lag (sum across partitions)");
+        let _ = manager.gauge(
+            "kafka_lag",
+            "Kafka records past this pod's read position (sum across assigned partitions)",
+        );
         let _ = manager.gauge("hot_buffers_active", "Number of active hot buffers");
         let _ = manager.gauge("hot_buffers_bytes", "Total bytes in hot buffers");
 
@@ -140,6 +143,10 @@ impl ArchiverMetrics {
         metrics::describe_counter!(
             "routing_fallback_total",
             "Expression-routing fields absent from a record, by field path"
+        );
+        metrics::describe_gauge!(
+            "pipeline_delivery_guarantee",
+            "1 for the delivery guarantee in force, by guarantee and reason"
         );
 
         let dfe = ServiceMetrics::register(manager);
@@ -257,9 +264,16 @@ impl ArchiverMetrics {
         histogram!("compression_duration_seconds").record(duration_secs);
     }
 
-    /// Update Kafka lag
+    /// Update Kafka lag: records past this pod's read position.
     pub fn set_kafka_lag(&self, lag: u64) {
         gauge!("kafka_lag").set(lag as f64);
+    }
+
+    /// Record the delivery guarantee in force, under the metric name and
+    /// labels scalo's pipeline builder uses for the pipelines it runs.
+    pub fn set_delivery_guarantee(&self, guarantee: &'static str, reason: &'static str) {
+        gauge!("pipeline_delivery_guarantee", "guarantee" => guarantee, "reason" => reason)
+            .set(1.0);
     }
 
     /// Record flush operation with duration and trigger
@@ -581,6 +595,7 @@ mod tests {
         m.record_bytes_compressed(2048, 4096);
         m.record_compression_duration(0.042);
         m.set_kafka_lag(500);
+        m.set_delivery_guarantee("at_least_once", "confirmed");
         m.record_flush(0.01, FlushTrigger::Size);
         m.record_error();
         m.record_sink_error("file");

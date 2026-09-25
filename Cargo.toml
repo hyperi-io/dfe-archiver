@@ -44,9 +44,10 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime. Floored at 2.12.6 for the deployment contract's
-# port listener declarations and KafkaLagTrigger, which contract.rs builds on.
-scalo = { version = ">=2.12.6, <3" }
+# scalo data-plane runtime. Floored at 2.12.0 only while [patch.crates-io]
+# below points at the at-least-once branch, whose manifest still says 2.12.0.
+# Restore >=2.13.0 when that release is on crates.io.
+scalo = { version = ">=2.12.0, <3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
@@ -149,6 +150,11 @@ testcontainers = ">=0.27.3, <0.28"
 hmac = ">=0.13, <0.14"
 sha2 = ">=0.11, <0.12"
 base64 = ">=0.22.1, <0.23"
+
+# scalo's source acknowledgement API is unreleased. Remove this block, and the
+# scalo-rs allow-git entry in deny.toml, once scalo 2.13.0 is on crates.io.
+[patch.crates-io]
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/at-least-once" }
 
 [profile.release]
 lto = "thin"             # hyperi-ci overrides to "fat" at beta+ channels

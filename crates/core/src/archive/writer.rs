@@ -10,12 +10,53 @@ use crate::Result;
 use crate::compression::Compressor;
 use crate::config::ArchiveConfig;
 use crate::storage::StorageBackend;
+use crate::types::{KafkaOffset, OffsetSet};
 use chrono::{DateTime, Utc};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
 const MAX_OPEN_RETRIES: u32 = 10_000;
+
+/// A file-name component unique to one writer.
+///
+/// The object-store `create` checks that no object exists, but an upload in
+/// progress is not an object, so two writers on the same destination and
+/// window -- two replicas, or an evicted writer still closing beside its
+/// replacement -- would otherwise pick the same key, and the later completion
+/// would replace the earlier object.
+fn writer_token() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    // RandomState is seeded from the OS, so the value differs between processes as well as writers.
+    let hash = std::hash::RandomState::new().hash_one((std::process::id(), n));
+    format!("{hash:016x}")
+}
+
+/// Offsets a writer settled since its caller last drained them.
+#[derive(Debug, Default)]
+pub struct Settled {
+    /// Records in a file that completed: written.
+    pub delivered: OffsetSet,
+    /// Records in a file whose completion failed: not written, so they must be
+    /// read again.
+    pub errored: OffsetSet,
+}
+
+impl Settled {
+    /// Move everything `other` settled into this one.
+    pub fn absorb(&mut self, mut other: Self) {
+        self.delivered.append(&mut other.delivered);
+        self.errored.append(&mut other.errored);
+    }
+
+    /// Whether nothing was settled.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.delivered.is_empty() && self.errored.is_empty()
+    }
+}
 
 /// The placeholders `path_stem` and `generate_path` substitute, and the whole
 /// set an operator may write in `archive.path_template`.
@@ -128,6 +169,12 @@ pub struct ArchiveWriter {
     /// `files_opened`. A single `write_record` can roll on either half, so one
     /// returned `CloseStats` would drop the other and undercount the closes.
     rolls: Vec<CloseStats>,
+    /// The file-name component no other writer shares.
+    token: String,
+    /// Offsets of the records flushed into the open file.
+    held: OffsetSet,
+    /// Offsets of files completed or failed since the caller last drained them.
+    settled: Settled,
 }
 
 impl ArchiveWriter {
@@ -149,7 +196,44 @@ impl ArchiveWriter {
             last_stem: None,
             files_opened: 0,
             rolls: Vec::new(),
+            token: writer_token(),
+            held: OffsetSet::default(),
+            settled: Settled::default(),
         }
+    }
+
+    /// Hold `offsets` against the open file until it completes.
+    ///
+    /// Call once their records are flushed into the file. With no file open
+    /// the offsets are settled errored, so they are read again rather than
+    /// released on a file their records never reached.
+    pub fn hold(&mut self, offsets: impl IntoIterator<Item = KafkaOffset>) {
+        if self.state.is_some() {
+            self.held.extend(offsets);
+        } else {
+            self.settled.errored.extend(offsets);
+        }
+    }
+
+    /// Take the offsets settled since the last call, resetting them.
+    ///
+    /// Delivered offsets belong to files that completed, errored ones to files
+    /// whose completion failed.
+    pub fn take_settled(&mut self) -> Settled {
+        std::mem::take(&mut self.settled)
+    }
+
+    /// Complete the file at `path` and settle the offsets held against it:
+    /// delivered when the storage close succeeds, errored when it fails.
+    async fn finish(&mut self, path: &str) -> Result<()> {
+        let mut held = std::mem::take(&mut self.held);
+        let closed = self.storage.close(path).await;
+        if closed.is_ok() {
+            self.settled.delivered.append(&mut held);
+        } else {
+            self.settled.errored.append(&mut held);
+        }
+        closed
     }
 
     /// Take the number of files opened since the last call, resetting the count.
@@ -285,7 +369,7 @@ impl ArchiveWriter {
 
         if let Some(state) = self.state.take() {
             let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
-            self.storage.close(&state.path).await?;
+            self.finish(&state.path).await?;
             info!(
                 path = %state.path,
                 file_size = compressed_bytes,
@@ -362,11 +446,15 @@ impl ArchiveWriter {
 
         let ext = &self.config.file_extension;
         let compression_ext = self.compressor.extension();
+        let token = &self.token;
 
         if compression_ext.is_empty() {
-            format!("{path}-{:04}.{ext}", self.file_seq)
+            format!("{path}-{:04}-{token}.{ext}", self.file_seq)
         } else {
-            format!("{path}-{:04}.{ext}.{compression_ext}", self.file_seq)
+            format!(
+                "{path}-{:04}-{token}.{ext}.{compression_ext}",
+                self.file_seq
+            )
         }
     }
 
@@ -376,7 +464,7 @@ impl ArchiveWriter {
 
         let close_stats = if let Some(state) = self.state.take() {
             let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
-            self.storage.close(&state.path).await?;
+            self.finish(&state.path).await?;
             info!(
                 path = %state.path,
                 file_size = compressed_bytes,
@@ -684,7 +772,7 @@ mod tests {
 
         writer.write_record(b"first").await.expect("write");
         let first = writer.test_current_path().expect("open file").to_string();
-        assert!(first.ends_with("-0001.jsonl"), "expected -0001: {first}");
+        assert!(first.contains("-0001-"), "expected -0001: {first}");
 
         writer.close().await.expect("close");
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
@@ -693,7 +781,7 @@ mod tests {
         let second = writer.test_current_path().expect("open file");
         assert_ne!(first, second, "stem should have changed");
         assert!(
-            second.ends_with("-0001.jsonl"),
+            second.contains("-0001-"),
             "sequence should restart in a new stem, got {second}"
         );
     }
@@ -917,6 +1005,153 @@ mod tests {
         );
         assert!(writer.test_current_path().is_some());
         assert_eq!(backend.file_count(), 1);
+    }
+
+    /// An upload in progress is invisible to the existence check, so two
+    /// writers on one destination and window must still pick different keys.
+    #[test]
+    fn two_writers_on_one_stem_and_sequence_pick_different_keys() {
+        let backend = Arc::new(MemoryBackend::new());
+        let first = test_writer_on(&backend, RollingPolicy::default(), "none");
+        let second = test_writer_on(&backend, RollingPolicy::default(), "none");
+        let now = Utc::now();
+
+        let (a, b) = (
+            first.test_generate_path(&now),
+            second.test_generate_path(&now),
+        );
+        assert_ne!(a, b, "two writers share a key");
+        assert!(a.contains("-0000-") && b.contains("-0000-"), "{a} / {b}");
+    }
+
+    fn offsets(partition: i32, range: std::ops::Range<i64>) -> Vec<KafkaOffset> {
+        range
+            .map(|offset| {
+                KafkaOffset::from(&crate::types::KafkaMessage::for_test(
+                    Vec::new(),
+                    "events",
+                    partition,
+                    offset,
+                ))
+            })
+            .collect()
+    }
+
+    fn settled_offsets(set: &OffsetSet) -> Vec<i64> {
+        let mut out: Vec<i64> = set.tokens().into_iter().map(|t| t.offset).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Offsets held against an open file are released only when it completes.
+    #[tokio::test]
+    async fn held_offsets_settle_delivered_when_the_file_completes() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "none");
+        writer.write_record(b"one").await.expect("write");
+        writer.hold(offsets(0, 0..3));
+
+        assert!(
+            writer.take_settled().is_empty(),
+            "an open file settles nothing"
+        );
+
+        writer.close().await.expect("close");
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1, 2]);
+        assert!(settled.errored.is_empty());
+        assert!(
+            writer.take_settled().is_empty(),
+            "draining twice must not release twice"
+        );
+    }
+
+    /// A roll completes the old file, so its offsets settle then and the new
+    /// file's do not.
+    #[tokio::test]
+    async fn a_roll_settles_the_offsets_of_the_file_it_completes() {
+        let (mut writer, _) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 0,
+            },
+            "none",
+        );
+        writer.write(b"first\n").await.expect("write");
+        writer.hold(offsets(0, 0..2));
+
+        writer.write(b"second\n").await.expect("write rolls first");
+        writer.hold(offsets(0, 2..4));
+
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1]);
+        assert!(settled.errored.is_empty());
+    }
+
+    /// Refuses every close, as an object store does when the multipart
+    /// completion fails.
+    struct FailingClose(Arc<MemoryBackend>);
+
+    #[async_trait]
+    impl StorageBackend for FailingClose {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.0.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.0.append(path, data).await
+        }
+        async fn close(&self, path: &str) -> Result<()> {
+            Err(crate::Error::storage(format!(
+                "multipart complete failed for {path}"
+            )))
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.0.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.0.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "failing-close"
+        }
+    }
+
+    /// A file that never completed wrote nothing, so its offsets settle
+    /// errored and are read again.
+    #[tokio::test]
+    async fn a_failed_completion_settles_its_offsets_errored() {
+        let config = ArchiveConfig {
+            destination: "memory://test".to_string(),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let mut writer = ArchiveWriter::new(
+            config,
+            RollingPolicy::default(),
+            create_compressor("none", 0).expect("compressor"),
+            Box::new(FailingClose(Arc::new(MemoryBackend::new()))),
+        );
+        writer.write_record(b"lost").await.expect("write");
+        writer.hold(offsets(3, 7..9));
+
+        writer.close().await.expect_err("close must fail");
+        let settled = writer.take_settled();
+        assert!(settled.delivered.is_empty());
+        assert_eq!(settled_offsets(&settled.errored), vec![7, 8]);
+    }
+
+    /// Offsets handed over with no file open never reached a file.
+    #[test]
+    fn offsets_held_with_no_file_open_settle_errored() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "none");
+        writer.hold(offsets(0, 5..6));
+
+        let settled = writer.take_settled();
+        assert!(settled.delivered.is_empty());
+        assert_eq!(settled_offsets(&settled.errored), vec![5]);
     }
 
     #[test]

@@ -534,6 +534,21 @@ mod tests {
         validate_config(&config).expect("every supported placeholder is valid");
     }
 
+    /// Both ack-capable sections default on, and each turns off on its own.
+    #[test]
+    fn test_acknowledgements_default_on_and_turn_off_per_transport() {
+        let config = Config::default();
+        assert!(config.kafka.acknowledgements.enabled);
+        assert!(config.grpc.acknowledgements.enabled);
+
+        let parsed: Config =
+            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
+                .expect("parse");
+        assert!(!parsed.kafka.acknowledgements.enabled);
+        assert!(parsed.grpc.acknowledgements.enabled);
+        validate_config(&parsed).expect("acknowledgements off is a valid config");
+    }
+
     #[test]
     fn test_s3_config_default_allow_http_is_false() {
         // Security invariant: S3 config must default to HTTPS-only.

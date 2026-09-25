@@ -1245,6 +1245,417 @@ pub async fn fake_gcs_object_len(
         .ok_or_else(|| format!("no usable size in {meta}"))
 }
 
+// -- Fixed host ports below the ephemeral range --
+
+/// First port probed for a fixed host mapping.
+const LOW_PORT_FIRST: u16 = 5100;
+
+/// How many ports past [`LOW_PORT_FIRST`] are probed.
+const LOW_PORT_SPAN: u16 = 900;
+
+/// A host port below 10240, where this host's ephemeral range starts, that
+/// nothing listens on right now.
+///
+/// Docker publishes a random mapping from the ephemeral range, so a container
+/// these tests start is mapped to a fixed port from here instead. The probe
+/// starts at an offset from the process id, so the two test processes nextest
+/// runs at once rarely try the same port first. `taken` skips ports an earlier
+/// attempt found Docker could not bind.
+pub fn free_low_port(taken: &[u16]) -> u16 {
+    let offset = u16::try_from(std::process::id() % u32::from(LOW_PORT_SPAN)).unwrap_or(0);
+    (0..LOW_PORT_SPAN)
+        .map(|step| LOW_PORT_FIRST + (offset + step) % LOW_PORT_SPAN)
+        .find(|port| {
+            !taken.contains(port) && std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok()
+        })
+        .expect("a free host port between 5100 and 6000")
+}
+
+/// How long a container these tests start may take to report it is up.
+const CONTAINER_STARTUP: Duration = Duration::from_secs(40);
+
+/// Whether a container start failed only because its fixed host port was
+/// taken between the probe and the bind, the one failure worth a retry.
+fn port_taken(error: &str) -> bool {
+    error.contains("port is already allocated") || error.contains("address already in use")
+}
+
+// -- MinIO, owned per test --
+
+/// `MinIO`, pinned by digest: the newest release with a published image, since
+/// RELEASE.2025-10-15T17-29-55Z shipped none.
+///
+/// renovate: datasource=docker depName=quay.io/minio/minio
+const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+
+/// Root credentials the fixture starts `MinIO` with.
+const MINIO_USER: &str = "minioadmin";
+const MINIO_PASSWORD: &str = "minioadmin";
+
+/// A `MinIO` this test owns, mapped to a port below 10240. Dropping it stops and
+/// removes the container.
+pub struct MinioFixture {
+    /// `http://127.0.0.1:<port>`.
+    pub endpoint: String,
+    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+}
+
+impl MinioFixture {
+    /// The archiver's `minio` section for `bucket` on this `MinIO`.
+    #[must_use]
+    pub fn config(&self, bucket: &str) -> dfe_archiver::config::MinioConfig {
+        dfe_archiver::config::MinioConfig {
+            endpoint: self.endpoint.clone(),
+            access_key: MINIO_USER.to_string(),
+            secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
+                MINIO_PASSWORD.to_string(),
+            ),
+            bucket: bucket.to_string(),
+            use_ssl: false,
+        }
+    }
+
+    /// A signed S3 client, for the bucket, listing and read calls
+    /// `object_store` does not offer.
+    #[must_use]
+    pub fn s3(&self) -> aws_sdk_s3::Client {
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .endpoint_url(&self.endpoint)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                MINIO_USER,
+                MINIO_PASSWORD,
+                None,
+                None,
+                "minio-fixture",
+            ))
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(config)
+    }
+
+    /// Create `bucket`.
+    pub async fn create_bucket(&self, bucket: &str) {
+        self.s3()
+            .create_bucket()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("create bucket {bucket}: {e:?}"));
+    }
+
+    /// Every object key in `bucket`.
+    pub async fn keys(&self, bucket: &str) -> Vec<String> {
+        let listed = self
+            .s3()
+            .list_objects_v2()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("list {bucket}: {e:?}"));
+        listed
+            .contents()
+            .iter()
+            .filter_map(|object| object.key().map(ToString::to_string))
+            .collect()
+    }
+
+    /// The bytes of `key` in `bucket`.
+    pub async fn read(&self, bucket: &str, key: &str) -> Vec<u8> {
+        self.s3()
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("get {bucket}/{key}: {e:?}"))
+            .body
+            .collect()
+            .await
+            .expect("read object body")
+            .into_bytes()
+            .to_vec()
+    }
+
+    /// Every NDJSON line across every object in `bucket`.
+    pub async fn lines(&self, bucket: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        for key in self.keys(bucket).await {
+            let body = self.read(bucket, &key).await;
+            lines.extend(
+                String::from_utf8_lossy(&body)
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(ToString::to_string),
+            );
+        }
+        lines
+    }
+
+    /// Multipart uploads started in `bucket` and not yet completed.
+    pub async fn open_uploads(&self, bucket: &str) -> usize {
+        self.s3()
+            .list_multipart_uploads()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("list uploads in {bucket}: {e:?}"))
+            .uploads()
+            .len()
+    }
+}
+
+/// Start a `MinIO` for `test` on a fixed port below 10240.
+///
+/// Returns `None` only when Docker is absent, having failed the run in CI.
+pub async fn acquire_minio(test: &str) -> Option<MinioFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    let name = container_name(Some(test), "minio");
+    let mut taken = Vec::new();
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        reap_stale(&name);
+        let port = free_low_port(&taken);
+        let image = GenericImage::new("quay.io/minio/minio", MINIO_TAG)
+            .with_exposed_port(9000u16.tcp())
+            // STDERR: MinIO writes its whole startup banner there.
+            .with_wait_for(WaitFor::message_on_stderr("API:"))
+            .with_env_var("MINIO_ROOT_USER", MINIO_USER)
+            .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
+            .with_cmd(["server", "/data"])
+            .with_mapped_port(port, 9000u16.tcp())
+            .with_container_name(&name)
+            .with_labels(test_labels("minio"))
+            .with_startup_timeout(CONTAINER_STARTUP);
+        match image.start().await {
+            Ok(container) => {
+                let endpoint = format!("http://127.0.0.1:{port}");
+                if let Err(e) = wait_for_port(&format!("127.0.0.1:{port}"), 120).await {
+                    require_container_in_ci("MinIO", &e);
+                    return None;
+                }
+                if let Err(e) = wait_for_minio(&endpoint).await {
+                    require_container_in_ci("MinIO", &e);
+                    return None;
+                }
+                return Some(MinioFixture {
+                    endpoint,
+                    _container: container,
+                });
+            }
+            Err(e) => {
+                last_error = format!("container start on port {port} failed: {e}");
+                if !port_taken(&last_error) {
+                    break;
+                }
+                taken.push(port);
+            }
+        }
+    }
+    require_container_in_ci("MinIO", &last_error);
+    None
+}
+
+/// Wait until `MinIO` answers its liveness probe.
+async fn wait_for_minio(endpoint: &str) -> Result<(), String> {
+    let url = format!("{endpoint}/minio/health/live");
+    let client = reqwest::Client::new();
+    for _ in 0..240 {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!("{url} did not answer within 60s"))
+}
+
+// -- Kafka, owned per test --
+
+/// Kafka to test against, pinned by digest, the same pin scalo's own tests use.
+///
+/// renovate: datasource=docker depName=apache/kafka-native
+const KAFKA_TAG: &str =
+    "4.3.1@sha256:2885898ba17065023f1bd605f3a81efcfa986014f062b73b91ef5462485f9060";
+
+/// A single-node `KRaft` broker this test owns, advertised on a fixed port below
+/// 10240. Dropping it stops and removes the container.
+pub struct KafkaFixture {
+    /// `127.0.0.1:<port>`.
+    pub bootstrap: String,
+    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+}
+
+impl KafkaFixture {
+    fn client(&self) -> rdkafka::config::ClientConfig {
+        let mut config = rdkafka::config::ClientConfig::new();
+        config.set("bootstrap.servers", &self.bootstrap);
+        config
+    }
+
+    /// Create `topic` with one partition and the given topic configs.
+    pub async fn create_topic(&self, topic: &str, configs: &[(&str, &str)]) {
+        use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+        use rdkafka::client::DefaultClientContext;
+
+        let admin: AdminClient<DefaultClientContext> =
+            self.client().create().expect("kafka admin client");
+        let mut spec = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+        for (key, value) in configs {
+            spec = spec.set(key, value);
+        }
+        for result in admin
+            .create_topics(&[spec], &AdminOptions::new())
+            .await
+            .expect("create topics")
+        {
+            result.unwrap_or_else(|(name, code)| panic!("create topic {name}: {code}"));
+        }
+    }
+
+    /// Produce `payloads` to `topic` and wait for every delivery report.
+    pub async fn produce(&self, topic: &str, payloads: &[Vec<u8>]) {
+        use rdkafka::producer::{FutureProducer, FutureRecord};
+
+        let producer: FutureProducer = self
+            .client()
+            .set("message.timeout.ms", "30000")
+            .create()
+            .expect("kafka producer");
+        for payload in payloads {
+            producer
+                .send(
+                    FutureRecord::<(), [u8]>::to(topic).payload(payload.as_slice()),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap_or_else(|(e, _)| panic!("produce to {topic}: {e}"));
+        }
+    }
+
+    /// How many records partition 0 of `topic` holds: its high watermark.
+    pub fn records_in(&self, topic: &str) -> i64 {
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", "watermark-probe")
+            .create()
+            .expect("kafka consumer");
+        let (_, high) = consumer
+            .fetch_watermarks(topic, 0, Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("watermarks of {topic}: {e}"));
+        high
+    }
+
+    /// The offset `group` has committed on partition 0 of `topic`, or `None`
+    /// when it has committed nothing there.
+    pub fn committed(&self, group: &str, topic: &str) -> Option<i64> {
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", group)
+            .set("enable.auto.commit", "false")
+            .create()
+            .expect("kafka consumer");
+        let mut wanted = TopicPartitionList::new();
+        wanted.add_partition(topic, 0);
+        let committed = consumer
+            .committed_offsets(wanted, Duration::from_secs(10))
+            .expect("committed offsets");
+        committed
+            .elements_for_topic(topic)
+            .first()
+            .and_then(|element| match element.offset() {
+                Offset::Offset(offset) => Some(offset),
+                _ => None,
+            })
+    }
+}
+
+/// Start a single-node Kafka for `test` on a fixed port below 10240.
+///
+/// Returns `None` only when Docker is absent, having failed the run in CI.
+pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    let name = container_name(Some(test), "kafka");
+    let mut taken = Vec::new();
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        reap_stale(&name);
+        let port = free_low_port(&taken);
+        let image = GenericImage::new("apache/kafka-native", KAFKA_TAG)
+            .with_exposed_port(9092u16.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
+            .with_env_var("KAFKA_NODE_ID", "1")
+            .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
+            .with_env_var(
+                "KAFKA_LISTENERS",
+                "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+            )
+            // The broker advertises the host mapping, so a client on the host
+            // reaches it by the address the metadata names.
+            .with_env_var(
+                "KAFKA_ADVERTISED_LISTENERS",
+                format!("PLAINTEXT://127.0.0.1:{port}"),
+            )
+            .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
+            .with_env_var(
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+            )
+            .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
+            .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+            .with_env_var(
+                "KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR",
+                "1",
+            )
+            .with_env_var("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR", "1")
+            .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+            .with_mapped_port(port, 9092u16.tcp())
+            .with_container_name(&name)
+            .with_labels(test_labels("kafka"))
+            .with_startup_timeout(CONTAINER_STARTUP);
+        match image.start().await {
+            Ok(container) => {
+                let bootstrap = format!("127.0.0.1:{port}");
+                if let Err(e) = wait_for_port(&bootstrap, 120).await {
+                    require_container_in_ci("Kafka", &e);
+                    return None;
+                }
+                return Some(KafkaFixture {
+                    bootstrap,
+                    _container: container,
+                });
+            }
+            Err(e) => {
+                last_error = format!("container start on port {port} failed: {e}");
+                if !port_taken(&last_error) {
+                    break;
+                }
+                taken.push(port);
+            }
+        }
+    }
+    require_container_in_ci("Kafka", &last_error);
+    None
+}
+
 // ── Test data helpers ────────────────────────────────────────────────
 
 /// Generate unique topic name for tests

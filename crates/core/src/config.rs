@@ -9,6 +9,7 @@
 use crate::buffer::DEFAULT_SPOOL_DIR;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use scalo::config::sensitive::SensitiveString;
+use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
 pub use scalo::config::sensitive;
@@ -157,6 +158,14 @@ pub struct GrpcConfig {
 
     /// Archive destination key for a record whose sender set no routing key.
     pub default_topic: String,
+
+    /// The listener answers each push once its records are queued, with this
+    /// on or off: a record is released only when its archive file completes, at
+    /// the roll interval, long after any sender's deadline. So the archive copy
+    /// on this transport is at-most-once, and `enabled: false` only changes the
+    /// reason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`
+    /// to `acks_disabled`.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for GrpcConfig {
@@ -168,6 +177,7 @@ impl Default for GrpcConfig {
             max_message_size: 16 * 1024 * 1024,
             compression: false,
             default_topic: "default_land".to_string(),
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -231,6 +241,13 @@ pub struct KafkaConfig {
 
     /// Session timeout (ms)
     pub session_timeout_ms: u32,
+
+    /// With `enabled: true` (the default) a record's offset is committed only
+    /// once the archive file holding it is complete in the store, so a kill
+    /// re-reads what an open file held: duplicates are possible, loss is not.
+    /// With `enabled: false` offsets are committed as records are received,
+    /// and a kill loses what the open files and buffers held.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for KafkaConfig {
@@ -253,6 +270,7 @@ impl Default for KafkaConfig {
             batch_size: 10_000,
             max_poll_interval_ms: 300_000,
             session_timeout_ms: 30_000,
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }

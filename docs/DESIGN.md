@@ -234,8 +234,8 @@ about the pipeline that differs between the two forms.
 
 | `transport` | How records arrive | Release point |
 |---|---|---|
-| `kafka` | a consumer group over the landing topics | broker offset commit after a confirmed write |
-| `grpc` | the scalo Push listener, from the previous stage | the Push RPC response |
+| `kafka` | a consumer group over the landing topics | broker offset commit once the archive file holding the record is complete |
+| `grpc` | the scalo Push listener, from the previous stage | the Push RPC response, at enqueue |
 
 On `kafka` an empty `topics` list turns on broker-side discovery: the topic set
 is re-read every `topic_refresh_secs` and filtered by `topic_include` and
@@ -248,6 +248,8 @@ the loader's preference.
 stage fans a matched record out to the loader and to the archiver over the same
 Push RPC. A push stream keeps no backlog, so the KEDA composite drops its
 `kafka_lag` term there rather than reading a false zero.
+
+The listener answers each push once its records are queued. A record is released only when its archive file completes, at the roll interval, long after any sender's deadline, so holding the answer until then would expire every push and the sender would resend it. The archive copy on `grpc` is therefore at-most-once: a kill loses what the queue and the open files held, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`.
 
 ### Why only two
 
@@ -285,7 +287,7 @@ brokers, a codec or routing mode that does not exist.
 4. **Flush Triggers**: Size (64MB), records (100K), or age (60s)
 5. **Compression**: Compress batch with configured codec
 6. **Storage Write**: Write compressed data to storage backend
-7. **Release**: Commit offsets only after a confirmed write (a no-op on `grpc`)
+7. **Release**: Commit offsets once the file holding their records is complete (a no-op on `grpc`)
 
 ### Critical Path Optimizations
 
@@ -352,43 +354,43 @@ Archive Writers (8 concurrent, semaphore-controlled)
 
 ### Guarantee
 
-Messages are **never lost**. In failure scenarios, duplicates may occur (at-least-once semantics).
+On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill or a failed file costs duplicates. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
 
 ### Implementation
 
 ```text
-1. Consume batch from Kafka
-2. Buffer messages (memory → disk spool if needed)
-3. Compress and write to storage
-4. CONFIRMED write successful
-5. Commit Kafka offsets ← Only happens AFTER step 4
+1. Receive a batch, and the armed consumer records every offset it hands out
+2. Buffer per destination
+3. Write each staged batch into the destination's open file, and hold its
+   offsets on that file
+4. The file completes (roll, age close, eviction or shutdown)
+5. Release the file's offsets, and the consumer commits each partition up to
+   its lowest offset not yet released
 ```
 
-### KafkaToken Tracking
+A record is durable only when its file completes: until then the multipart upload is in progress, and a crash abandons it. So step 5 waits for step 4, which comes at the roll -- `roll_size_bytes` or `roll_interval_secs`. The writer stores held offsets per partition, eight bytes each, because a file can hold a roll interval of intake.
 
-Each message carries a `KafkaToken` containing:
+A batch no file takes goes to the DLQ through scalo's confirming write. Only a write the DLQ confirms releases the batch's offsets. One the DLQ refuses, or any with the DLQ off, is released `Errored`: its offsets stay held, and no later commit passes them until a restart reads the records again. Offsets of a file whose completion fails are released `Errored` too.
 
-- Topic name
-- Partition number
-- Offset
-
-Tokens are accumulated during buffering and committed in batch after successful archive write.
+`kafka.acknowledgements.enabled: false` commits each batch at receipt instead.
 
 ### Failure Scenarios
 
 | Failure Point | Outcome | Data Status |
 |---------------|---------|-------------|
-| Before archive write | Restart re-consumes from Kafka | No data loss |
-| After write, before commit | Duplicates on restart | At-least-once |
-| After commit | Clean | Exactly processed |
+| Before the file completes | Restart re-reads every record the file held | Duplicates, up to one roll interval |
+| File completion fails | Offsets released `Errored`, held until restart | Duplicates |
+| Write fails, DLQ confirms | Offsets released | Record is in the DLQ |
+| Write fails, DLQ refuses or is off | Offsets held until restart | Duplicates |
+| After the commit | Clean | Archived once |
 
-### Crash Recovery
+### Shutdown
 
-On restart:
+The run loop stops first. The drain then closes the source -- the Push listener stops answering, the Kafka consumer stops fetching and can still commit -- and receives until the source reports it is empty, so every push already answered is written. Buffers flush into their files, evicted writers finish closing, every open file completes, and the released offsets commit.
 
-1. Kafka consumer rejoins group with last committed offset
-2. Re-processes any messages from uncommitted offset
-3. Duplicates may exist in archive (idempotent consumers downstream must handle)
+### Object keys
+
+Every file name ends `-<seq>-<writer id>`. The object-store create only checks for a completed object, and an upload in progress is not one, so two writers on the same destination and window -- two replicas, or an evicted writer still closing beside its replacement -- would otherwise pick the same key, and the later completion would replace the earlier object.
 
 ---
 
@@ -436,6 +438,8 @@ braces:
 - `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}` - Timestamp components
 - `{timestamp}` - Unix timestamp
 - `{seq}` - Rolled-file sequence number
+
+The writer appends `-<seq>-<writer id>`, the extension and the codec suffix to the expanded template, whatever the template holds. See [Object keys](#object-keys).
 
 ---
 
@@ -804,7 +808,8 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 |--------|-------------|
 | `dfe_archiver_buffer_bytes` | Current buffer size |
 | `dfe_archiver_buffer_records` | Current buffer record count |
-| `dfe_archiver_kafka_lag` | Consumer lag (sum across partitions) |
+| `dfe_archiver_kafka_lag` | Records past this pod's read position (sum across assigned partitions). The commit an open file holds does not inflate it |
+| `pipeline_delivery_guarantee{guarantee,reason}` | 1 for the delivery guarantee in force |
 | `dfe_archiver_hot_buffers_active` | Active hot buffers |
 | `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
 | `dfe_archiver_spool_bytes` | Current spool size |
@@ -827,26 +832,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 
 ### Kubernetes with KEDA
 
-Production deployment uses KEDA for autoscaling based on Kafka consumer lag:
-
-```yaml
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: dfe-archiver
-spec:
-  scaleTargetRef:
-    name: dfe-archiver
-  minReplicaCount: 1
-  maxReplicaCount: 100
-  triggers:
-    - type: kafka
-      metadata:
-        bootstrapServers: kafka:9092
-        consumerGroup: dfe-archiver
-        topic: events
-        lagThreshold: "10000"
-```
+KEDA scales on the `dfe_scaling_pressure` composite, not on a raw Kafka lag trigger: the deployment contract declares none. The composite's `kafka_lag` term is the consumer's position lag -- records past its read position -- because the committed-offset lag grows by up to a roll interval of intake while open files hold their commit, and would scale the archiver out on the hold rather than on backlog. `buffer_depth` and `memory` are the other terms, and an open sink circuit zeroes the composite.
 
 ### Resource Requirements
 
@@ -905,9 +891,9 @@ docker run -d \
 
 ### 5. At-Least-Once via Token Tracking
 
-**Decision**: Track KafkaToken per message, commit only after confirmed archive write.
+**Decision**: Track a Kafka offset per message, hold it on the archive file its record is written into, and release it when that file completes.
 
-**Rationale**: Guarantees no data loss. Duplicates acceptable for archive use case.
+**Rationale**: A record is durable only in a completed file, so this guarantees no data loss. Duplicates, up to a roll interval of them after a kill, are acceptable for the archive use case.
 
 **Alternatives**: Exactly-once (complex, requires transactional writes).
 

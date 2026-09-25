@@ -130,6 +130,91 @@ impl From<&KafkaMessage> for KafkaOffset {
     }
 }
 
+/// The offsets of one partition inside an [`OffsetSet`].
+#[derive(Debug)]
+struct PartitionOffsets {
+    topic: Arc<str>,
+    partition: i32,
+    offsets: Vec<i64>,
+}
+
+impl PartitionOffsets {
+    fn holds(&self, token: &KafkaToken) -> bool {
+        self.partition == token.partition
+            && (Arc::ptr_eq(&self.topic, &token.topic) || *self.topic == *token.topic)
+    }
+}
+
+/// Offsets grouped by partition, eight bytes each.
+///
+/// An open archive file holds the offset of every record in it until the file
+/// completes, which at the default roll interval is an hour of intake, so the
+/// topic and partition are stored once per partition rather than per record.
+#[derive(Debug, Default)]
+pub struct OffsetSet {
+    partitions: Vec<PartitionOffsets>,
+}
+
+impl OffsetSet {
+    /// Add `offsets`, in any order.
+    pub fn extend(&mut self, offsets: impl IntoIterator<Item = KafkaOffset>) {
+        // Records arrive in runs from one partition, so the last one matched
+        // is tried before the others are searched.
+        let mut at = 0;
+        for offset in offsets {
+            let token = offset.into_token();
+            if !self.partitions.get(at).is_some_and(|p| p.holds(&token)) {
+                at = self
+                    .partitions
+                    .iter()
+                    .position(|p| p.holds(&token))
+                    .unwrap_or_else(|| {
+                        self.partitions.push(PartitionOffsets {
+                            topic: Arc::clone(&token.topic),
+                            partition: token.partition,
+                            offsets: Vec::new(),
+                        });
+                        self.partitions.len() - 1
+                    });
+            }
+            if let Some(held) = self.partitions.get_mut(at) {
+                held.offsets.push(token.offset);
+            }
+        }
+    }
+
+    /// Move every offset of `other` into this set.
+    pub fn append(&mut self, other: &mut Self) {
+        self.partitions.append(&mut other.partitions);
+    }
+
+    /// How many offsets the set holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.partitions.iter().map(|p| p.offsets.len()).sum()
+    }
+
+    /// Whether the set holds no offset.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.partitions.iter().all(|p| p.offsets.is_empty())
+    }
+
+    /// The commit token of every offset in the set.
+    #[must_use]
+    pub fn tokens(&self) -> Vec<KafkaToken> {
+        let mut tokens = Vec::with_capacity(self.len());
+        for held in &self.partitions {
+            tokens.extend(
+                held.offsets.iter().map(|&offset| {
+                    KafkaToken::new(Arc::clone(&held.topic), held.partition, offset)
+                }),
+            );
+        }
+        tokens
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +258,61 @@ mod tests {
         assert_eq!(offset.topic(), "t");
         assert_eq!(offset.partition(), 0);
         assert_eq!(offset.offset(), 42);
+    }
+
+    fn offset(topic: &str, partition: i32, value: i64) -> KafkaOffset {
+        KafkaOffset::from(&KafkaMessage::for_test(Vec::new(), topic, partition, value))
+    }
+
+    fn triples(set: &OffsetSet) -> Vec<(String, i32, i64)> {
+        let mut out: Vec<_> = set
+            .tokens()
+            .into_iter()
+            .map(|t| (t.topic.to_string(), t.partition, t.offset))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Interleaved partitions come back as the tokens that went in, each once.
+    #[test]
+    fn an_offset_set_returns_every_token_it_was_given() {
+        let mut set = OffsetSet::default();
+        assert!(set.is_empty());
+        set.extend([
+            offset("events", 0, 10),
+            offset("events", 1, 20),
+            offset("events", 0, 11),
+            offset("other", 0, 5),
+            offset("events", 1, 21),
+        ]);
+
+        assert_eq!(set.len(), 5);
+        assert!(!set.is_empty());
+        assert_eq!(
+            triples(&set),
+            vec![
+                ("events".to_string(), 0, 10),
+                ("events".to_string(), 0, 11),
+                ("events".to_string(), 1, 20),
+                ("events".to_string(), 1, 21),
+                ("other".to_string(), 0, 5),
+            ]
+        );
+    }
+
+    /// Appending moves the offsets, so a settled file cannot be released twice.
+    #[test]
+    fn appending_an_offset_set_empties_the_source() {
+        let mut held = OffsetSet::default();
+        held.extend([offset("events", 0, 1), offset("events", 0, 2)]);
+        let mut settled = OffsetSet::default();
+        settled.extend([offset("events", 1, 9)]);
+
+        settled.append(&mut held);
+
+        assert!(held.is_empty());
+        assert_eq!(settled.len(), 3);
     }
 
     #[test]
