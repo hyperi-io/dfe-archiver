@@ -343,7 +343,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 | `hot_buffer_size` | 1 MiB | Size at which a destination's buffer flushes into its file (`buffer.flush_bytes` / `ARCHIVER_FLUSH_BYTES`); each buffer holds up to this plus one record in memory |
 | `hot_buffer_age_secs` | 60 | Age at which a buffer flushes whatever its size (`buffer.flush_age_secs`) |
 | `spool_dir` | `/var/spool/dfe/archiver` | Tier 2 spool directory (`buffer.spool_dir` / `ARCHIVER_SPOOL_DIR`) |
-| `max_writers` | 8 | Concurrent archive writers |
+| `hot_buffer_records` | 100,000 | Record count at which a destination's buffer flushes, whatever its size (`buffer.flush_records`) |
 | `max_spool_bytes` | 10GB | Spool size limit (disk protection) |
 | `min_free_disk_bytes` | 1GB | Reserved disk space |
 
@@ -597,7 +597,7 @@ A file is synced to disk, with the directories above it, before its offsets are 
 
 ### AWS S3
 
-All cloud backends use `ObjectStoreBackend`, which writes each file to local staging and uploads it whole once it closes, as a multipart upload via the `object_store` crate's `WriteMultipart`. Parts are `multipart_chunk_size` (default 8MB), four in flight per upload and two uploads at once, so upload memory stays near 64 MB whatever the file size.
+All cloud backends use `ObjectStoreBackend`, which writes each file to local staging and uploads it whole once it closes, as a multipart upload via the `object_store` crate's `WriteMultipart`. Parts are `multipart_chunk_size` (default 8MB), four in flight per upload and `buffer.writer_parallelism` uploads at once (default 2), so upload memory stays near 64 MB by default whatever the file size.
 
 Credentials are resolved via `AmazonS3Builder::from_env()`, then config-level
 overrides are applied on top. This means standard AWS environment variables and
@@ -780,7 +780,7 @@ archive:
 buffer:
   flush_bytes: 1048576
   flush_age_secs: 60
-  writer_parallelism: 4
+  writer_parallelism: 2
 
 compression:
   codec: zstd

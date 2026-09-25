@@ -14,10 +14,8 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use scalo::logger::helpers::log_state_change;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
-use tokio::sync::Semaphore;
 use tracing::{debug, info, trace, warn};
 
 /// Per-instance log-spam guards for disk pressure conditions.
@@ -42,14 +40,15 @@ pub struct TieredBufferConfig {
     /// Bytes at which a destination's hot buffer flushes (default 1 MiB).
     pub hot_buffer_size: usize,
 
+    /// Records at which a destination's hot buffer flushes, whatever its
+    /// size (default 100,000).
+    pub hot_buffer_records: usize,
+
     /// Flush age for hot buffers (seconds)
     pub hot_buffer_age_secs: u64,
 
     /// Staging spool directory
     pub spool_dir: PathBuf,
-
-    /// Maximum concurrent archive writers (default: 8)
-    pub max_writers: usize,
 
     /// Maximum spool size in bytes (disk protection)
     pub max_spool_bytes: u64,
@@ -66,9 +65,9 @@ impl Default for TieredBufferConfig {
         Self {
             max_hot_buffers: 64,
             hot_buffer_size: 1024 * 1024,
+            hot_buffer_records: 100_000,
             hot_buffer_age_secs: 30,
             spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
-            max_writers: 8,
             max_spool_bytes: 10 * 1024 * 1024 * 1024,
             min_free_disk_bytes: 1024 * 1024 * 1024,
             spool_compression: true,
@@ -205,7 +204,6 @@ pub struct TieredBufferManager {
     config: TieredBufferConfig,
     hot_buffers: DashMap<CompactString, HotBuffer>,
     lru: Mutex<LruTracker>,
-    writer_semaphore: Arc<Semaphore>,
     stats: BufferStats,
     log_guards: LogSpamGuards,
 }
@@ -251,12 +249,9 @@ impl TieredBufferManager {
             "Tiered buffer manager initialized"
         );
 
-        let writer_semaphore = Arc::new(Semaphore::new(config.max_writers));
-
         Ok(Self {
             lru: Mutex::new(LruTracker::new(config.max_hot_buffers)),
             hot_buffers: DashMap::with_capacity(config.max_hot_buffers),
-            writer_semaphore,
             config,
             stats: BufferStats::default(),
             log_guards: LogSpamGuards::default(),
@@ -377,14 +372,16 @@ impl TieredBufferManager {
             "Buffer state after push"
         );
 
-        if entry.size() >= self.config.hot_buffer_size
-            || entry.age_secs() >= self.config.hot_buffer_age_secs
-        {
-            let trigger = if entry.size() >= self.config.hot_buffer_size {
-                "size"
-            } else {
-                "age"
-            };
+        let trigger = if entry.size() >= self.config.hot_buffer_size {
+            Some("size")
+        } else if entry.record_count >= self.config.hot_buffer_records {
+            Some("records")
+        } else if entry.age_secs() >= self.config.hot_buffer_age_secs {
+            Some("age")
+        } else {
+            None
+        };
+        if let Some(trigger) = trigger {
             debug!(
                 destination = %key,
                 trigger,
@@ -449,17 +446,6 @@ impl TieredBufferManager {
         }
 
         batches
-    }
-
-    /// Get writer permit (blocks if max concurrent writers reached).
-    ///
-    /// Returns `Err` if the semaphore has been closed (typically during shutdown).
-    pub async fn acquire_writer_permit(&self) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
-        self.writer_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| crate::Error::Runtime("writer semaphore closed".to_string()))
     }
 
     /// Get current stats snapshot

@@ -152,8 +152,9 @@ archive:
 
 buffer:
   flush_bytes: 1048576         # 1 MiB: a destination's buffer flushes into its file at this size
+  flush_records: 100000        # ... or at this many records, whichever comes first
   flush_age_secs: 60
-  writer_parallelism: 4
+  writer_parallelism: 2        # object-store uploads at once, each holding 4 x multipart_chunk_size
 
 compression:
   codec: zstd

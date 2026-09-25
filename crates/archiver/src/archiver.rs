@@ -69,10 +69,6 @@ const DRAIN_UPLOAD_LIMIT: Duration = Duration::from_secs(20);
 /// The directory under `buffer.spool_dir` where object-store files are staged.
 const STAGING_DIR: &str = "uploads";
 
-/// Uploads running at once. Each holds `UPLOAD_PART_CONCURRENCY` parts of
-/// `multipart_chunk_size` in memory.
-const UPLOAD_SLOTS: usize = 2;
-
 /// The first retry of a failed upload, doubling to `UPLOAD_RETRY_MAX`.
 const UPLOAD_RETRY_FIRST: Duration = Duration::from_millis(500);
 
@@ -509,14 +505,20 @@ fn sink_confirmation(archive: &ArchiveConfig) -> SinkConfirmation {
     }
 }
 
+/// One permit per upload attempt running at once: `buffer.writer_parallelism`.
+/// Zero would never upload, so it counts as one.
+fn upload_slots(config: &Config) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(config.buffer.writer_parallelism.max(1)))
+}
+
 /// Map the operator's `buffer` section onto the tiered buffer's own config.
 fn buffer_config(config: &Config) -> dfe_archiver_core::buffer::TieredBufferConfig {
     dfe_archiver_core::buffer::TieredBufferConfig {
         max_hot_buffers: 64,
         hot_buffer_size: config.buffer.flush_bytes,
+        hot_buffer_records: config.buffer.flush_records,
         hot_buffer_age_secs: config.buffer.flush_age_secs,
         spool_dir: config.buffer.spool_dir.clone().into(),
-        max_writers: config.buffer.writer_parallelism,
         max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
         min_free_disk_bytes: 1024 * 1024 * 1024,  // 1GB
         spool_compression: true,
@@ -566,6 +568,7 @@ impl Archiver {
         let router = Router::new(config.routing.clone());
 
         let buffer = TieredBufferManager::new(buffer_config(&config))?;
+        let slots = upload_slots(&config);
 
         // The runtime's unified ScalingPressure, so the archiver's loops drive
         // the engine that emits the KEDA gauge. Its thresholds come from the
@@ -662,7 +665,7 @@ impl Archiver {
             evictions: parking_lot::Mutex::new(JoinSet::new()),
             staging,
             uploads: parking_lot::Mutex::new(JoinSet::new()),
-            upload_slots: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
+            upload_slots: slots,
             held_records,
             held_refreshed: parking_lot::Mutex::new(Instant::now()),
             withheld: AtomicU64::new(0),
@@ -1842,25 +1845,33 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        Screened, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config, held_record_cap,
-        publish_kafka_lag, record_files_opened, record_rolls, record_routing_fallbacks,
-        restart_required_changes, screen_dead_letters, sink_confirmation, upload_retry_delay,
+        Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config,
+        held_record_cap, publish_kafka_lag, record_files_opened, record_rolls,
+        record_routing_fallbacks, restart_required_changes, screen_dead_letters, sink_confirmation,
+        upload_retry_delay, upload_slots, upload_until_settled,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
-    use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
+    use dfe_archiver_core::OffsetSet;
+    use dfe_archiver_core::archive::{ArchiveWriter, PendingFile, RollingPolicy};
     use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
     use dfe_archiver_core::compression::compressor_for;
     use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config, RoutingConfig};
     use dfe_archiver_core::routing::Router;
+    use dfe_archiver_core::storage::PendingUpload;
     use dfe_archiver_core::types::KafkaMessage;
     use dfe_archiver_io::Staging;
     use dfe_archiver_io::storage::create_backend;
     use scalo::dlq::{Dlq, DlqConfig, DlqEntry, DlqMode, FileDlqConfig, KafkaDlqConfig};
     use scalo::scaling::{ScalingPressure, ScalingPressureConfig};
     use scalo::transport::{DeadLetterReason, SinkConfirmation};
+    use std::future::Future;
     use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     /// Held offsets may take a quarter of the memory limit, at 32 bytes each.
@@ -1944,37 +1955,155 @@ mod tests {
     /// by default, and a configured value moves it.
     #[test]
     fn flush_bytes_sets_the_size_a_buffer_flushes_at() {
-        // Records push this many bytes each: 1000 of payload and a newline.
-        const RECORD: usize = 1001;
-        let first_flush = |flush_bytes: Option<usize>| {
-            let spool = tempfile::TempDir::new().expect("spool");
-            let mut config = Config::default();
-            config.buffer.spool_dir = spool.path().display().to_string();
-            if let Some(flush_bytes) = flush_bytes {
-                config.buffer.flush_bytes = flush_bytes;
-            }
-            let buffer =
-                dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config))
-                    .expect("buffer");
-            for offset in 0.. {
-                let message = KafkaMessage::for_test(vec![b'x'; RECORD - 1], "events", 0, offset);
-                if let Some(batch) = buffer.push("dest", message).expect("push").pop() {
-                    return batch.data.len();
-                }
-            }
-            unreachable!("the offsets never run out")
-        };
-
+        let default = first_flush(|_| {});
         assert_eq!(Config::default().buffer.flush_bytes, 1024 * 1024);
         assert_eq!(
-            first_flush(None),
+            default.data.len(),
             (1024 * 1024usize).div_ceil(RECORD) * RECORD,
             "the default flushes at the first record past 1 MiB"
         );
         assert_eq!(
-            first_flush(Some(4096)),
+            first_flush(|config| config.buffer.flush_bytes = 4096)
+                .data
+                .len(),
             4096usize.div_ceil(RECORD) * RECORD,
             "a configured flush_bytes moves the flush"
+        );
+    }
+
+    /// `buffer.flush_records` flushes a buffer at a record count, whatever its
+    /// size. The default is past what a 1 MiB buffer of these records holds.
+    #[test]
+    fn flush_records_sets_the_record_count_a_buffer_flushes_at() {
+        assert_eq!(Config::default().buffer.flush_records, 100_000);
+        assert_eq!(
+            first_flush(|config| config.buffer.flush_records = 3).record_count,
+            3,
+            "a configured flush_records moves the flush"
+        );
+        assert_eq!(
+            first_flush(|config| config.buffer.flush_records = 50).record_count,
+            50
+        );
+    }
+
+    /// Records push this many bytes each: 1000 of payload and a newline.
+    const RECORD: usize = 1001;
+
+    /// The first batch a buffer on `configure`d settings flushes, pushing
+    /// records of [`RECORD`] bytes to one destination.
+    fn first_flush(configure: impl FnOnce(&mut Config)) -> dfe_archiver_core::buffer::StagedBatch {
+        let spool = tempfile::TempDir::new().expect("spool");
+        let mut config = Config::default();
+        config.buffer.spool_dir = spool.path().display().to_string();
+        configure(&mut config);
+        let buffer = dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config))
+            .expect("buffer");
+        for offset in 0.. {
+            let message = KafkaMessage::for_test(vec![b'x'; RECORD - 1], "events", 0, offset);
+            if let Some(batch) = buffer.push("dest", message).expect("push").pop() {
+                return batch;
+            }
+        }
+        unreachable!("the offsets never run out")
+    }
+
+    /// An upload that takes a while and records the most running at once.
+    struct CountedUpload {
+        running: Arc<AtomicUsize>,
+        most: Arc<AtomicUsize>,
+    }
+
+    impl PendingUpload for CountedUpload {
+        fn path(&self) -> &'static str {
+            "counted"
+        }
+
+        fn size(&self) -> u64 {
+            0
+        }
+
+        fn attempt<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = dfe_archiver_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                self.running.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn discard<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {})
+        }
+    }
+
+    /// `buffer.writer_parallelism` bounds the upload attempts running at once:
+    /// two by default, as many as configured otherwise.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn writer_parallelism_bounds_the_uploads_running_at_once() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = Arc::new(ArchiverMetrics::register(&manager, "test"));
+        let sink = Arc::new(SinkCircuit {
+            open: AtomicBool::new(false),
+            scaling: Arc::new(ScalingPressure::new(
+                ScalingPressureConfig::default(),
+                crate::scaling_components(),
+            )),
+            metrics: Arc::clone(&metrics),
+        });
+        let most_at_once = async |config: Config| {
+            let slots = upload_slots(&config);
+            let running = Arc::new(AtomicUsize::new(0));
+            let most = Arc::new(AtomicUsize::new(0));
+            let mut uploads = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let file = PendingFile {
+                    upload: Box::new(CountedUpload {
+                        running: Arc::clone(&running),
+                        most: Arc::clone(&most),
+                    }),
+                    offsets: OffsetSet::default(),
+                    records: 1,
+                };
+                uploads.spawn(upload_until_settled(
+                    file,
+                    Arc::clone(&slots),
+                    Arc::clone(&sink),
+                    Arc::clone(&metrics),
+                    "memory",
+                ));
+            }
+            while uploads.join_next().await.is_some() {}
+            most.load(Ordering::SeqCst)
+        };
+
+        assert_eq!(Config::default().buffer.writer_parallelism, 2);
+        assert_eq!(
+            most_at_once(Config::default()).await,
+            2,
+            "the default runs two uploads at once"
+        );
+        let mut config = Config::default();
+        config.buffer.writer_parallelism = 3;
+        assert_eq!(
+            most_at_once(config).await,
+            3,
+            "a configured writer_parallelism moves the bound"
         );
     }
 

@@ -466,10 +466,13 @@ pub struct BufferConfig {
     /// Flush when buffer exceeds this age (seconds)
     pub flush_age_secs: u64,
 
-    /// Maximum records per buffer before flush
+    /// Flush a destination's in-memory buffer into its archive file once it
+    /// holds this many records, whatever its size.
     pub flush_records: usize,
 
-    /// Number of concurrent archive writers
+    /// Object-store uploads of closed archive files running at once. Each
+    /// holds four parts of `archive.multipart_chunk_size` in memory. A local
+    /// destination has no uploads, so this does not apply to it.
     pub writer_parallelism: usize,
 
     /// How long to pause Kafka consumption after a backpressure trigger.
@@ -488,7 +491,7 @@ impl Default for BufferConfig {
             flush_bytes: 1024 * 1024, // 1 MiB
             flush_age_secs: 60,
             flush_records: 100_000,
-            writer_parallelism: 4,
+            writer_parallelism: 2,
             backpressure_pause_secs: 5,
             spool_dir: DEFAULT_SPOOL_DIR.to_string(),
         }

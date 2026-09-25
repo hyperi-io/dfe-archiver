@@ -161,6 +161,18 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    if config.buffer.flush_records == 0 {
+        return Err(Error::Config(
+            "buffer.flush_records must be greater than 0: it is the record count at which a destination's buffer flushes into its archive file".to_string(),
+        ));
+    }
+
+    if config.buffer.writer_parallelism == 0 {
+        return Err(Error::Config(
+            "buffer.writer_parallelism must be greater than 0: it is how many object-store uploads run at once".to_string(),
+        ));
+    }
+
     // The tiered buffer creates this directory at construction, so an empty
     // value fails the boot with an errno the operator cannot place.
     if config.buffer.spool_dir.trim().is_empty() {
@@ -424,6 +436,21 @@ mod tests {
         config.kafka.brokers = vec!["localhost:9092".to_string()];
         config.buffer.flush_bytes = 0;
 
+        assert!(validate_config(&config).is_err());
+    }
+
+    /// A zero record threshold would flush every record on its own, and zero
+    /// upload slots would never upload.
+    #[test]
+    fn zero_flush_records_or_writer_parallelism_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.flush_records = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.writer_parallelism = 0;
         assert!(validate_config(&config).is_err());
     }
 

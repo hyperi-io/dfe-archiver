@@ -77,7 +77,7 @@
         "flush_bytes": 1048576,
         "flush_age_secs": 60,
         "flush_records": 100000,
-        "writer_parallelism": 4,
+        "writer_parallelism": 2,
         "backpressure_pause_secs": 5,
         "spool_dir": "/var/spool/dfe/archiver"
       }
@@ -585,18 +585,18 @@
           "default": 60
         },
         "flush_records": {
-          "description": "Maximum records per buffer before flush",
+          "description": "Flush a destination's in-memory buffer into its archive file once it\nholds this many records, whatever its size.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 100000
         },
         "writer_parallelism": {
-          "description": "Number of concurrent archive writers",
+          "description": "Object-store uploads of closed archive files running at once. Each\nholds four parts of `archive.multipart_chunk_size` in memory. A local\ndestination has no uploads, so this does not apply to it.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
-          "default": 4
+          "default": 2
         },
         "backpressure_pause_secs": {
           "description": "How long to pause Kafka consumption after a backpressure trigger.\nLower values cycle faster but burn more CPU when downstream is slow;\nhigher values let buffers drain but increase tail latency.",
