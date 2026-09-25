@@ -770,6 +770,80 @@ async fn a_local_failure_no_dlq_can_hold_replays_and_lands_after_the_restart() {
     assert_eq!(counter(&manager, "messages_dropped_total"), 0);
 }
 
+/// A file the store refuses for good at upload is read back and dead-lettered
+/// a record at a time: every record reaches the DLQ intact, none is dropped,
+/// and the commit moves past them once the DLQ confirms them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_the_store_refuses_at_upload_dead_letters_every_record() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("upload_refused").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("upload_refused").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    config.archive.roll_interval_secs = Some(2);
+    // Under the 1024-byte key limit checked before staging, one segment past
+    // the store's 255, so the store refuses the file when it uploads.
+    config.archive.path_template = format!("{}/{{year}}", "s".repeat(300));
+    // The file is read back through the codec it was written with.
+    config.compression.enabled = true;
+    dead_letter_to(&mut config, "dlq");
+    let (manager, metrics) = metrics();
+
+    kafka.produce("events", &records(0..20)).await;
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the commit moved past every record", || async {
+        kafka.committed(GROUP, "events") == Some(20)
+    })
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a file the store refused ended the loop"
+    );
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        counter(&manager, "messages_dropped_total"),
+        0,
+        "nothing is dropped"
+    );
+    assert_eq!(counter(&manager, "messages_dlq_total"), 20);
+    assert_eq!(counter(&manager, "messages_archived_total"), 0);
+    let mut dead: Vec<(u64, Vec<u8>)> = kafka
+        .read_all("dlq")
+        .iter()
+        .map(|bytes| {
+            let entry: scalo::dlq::DlqEntry = serde_json::from_slice(bytes).expect("a DLQ entry");
+            let id = ids(&[String::from_utf8(entry.payload.clone()).expect("utf-8")])[0];
+            (id, entry.payload)
+        })
+        .collect();
+    dead.sort();
+    assert_eq!(
+        dead.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        (0..20).collect::<Vec<_>>(),
+        "one dead letter per record"
+    );
+    for (id, payload) in &dead {
+        assert_eq!(payload, &record(*id), "record {id} reached the DLQ intact");
+    }
+    assert!(
+        minio.keys(BUCKET).await.is_empty(),
+        "nothing reached the store"
+    );
+}
+
 /// While the governor holds intake the Push listener refuses every push as
 /// backpressure, so the sender keeps the record, and it takes pushes again
 /// once the pressure clears.

@@ -68,6 +68,10 @@ pub struct Settled {
     pub dropped_records: u64,
     /// Why the store refused the last dropped file.
     pub dropped_reason: Option<String>,
+    /// Records the store refused for good and the DLQ confirmed it holds.
+    pub rejected: OffsetSet,
+    /// Records `rejected` covers, counted whether or not offsets are held.
+    pub rejected_records: u64,
     /// Records in files whose write or completion failed on local disk: not
     /// written anywhere, so they must be read again.
     pub errored: OffsetSet,
@@ -106,6 +110,8 @@ impl Settled {
         if other.dropped_reason.is_some() {
             self.dropped_reason = other.dropped_reason;
         }
+        self.rejected.append(&mut other.rejected);
+        self.rejected_records += other.rejected_records;
         self.errored.append(&mut other.errored);
         self.uploads.append(&mut other.uploads);
     }
@@ -117,6 +123,8 @@ impl Settled {
             && self.delivered.is_empty()
             && self.dropped_records == 0
             && self.dropped.is_empty()
+            && self.rejected_records == 0
+            && self.rejected.is_empty()
             && self.errored.is_empty()
             && self.uploads.is_empty()
     }
@@ -1188,6 +1196,9 @@ mod tests {
         }
         async fn attempt(&self) -> Result<()> {
             Ok(())
+        }
+        async fn block(&self, _index: usize) -> Result<Option<Vec<u8>>> {
+            Ok(None)
         }
         async fn discard(&self) {}
     }

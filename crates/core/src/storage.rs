@@ -22,6 +22,11 @@ pub trait PendingUpload: Send + Sync {
     /// holds it. Safe to call again after an error.
     async fn attempt(&self) -> Result<()>;
 
+    /// The `index`th block appended to the file, exactly as it was appended,
+    /// or `None` past the last one. The writer appends one compressed flush
+    /// per block, so each block decompresses on its own.
+    async fn block(&self, index: usize) -> Result<Option<Vec<u8>>>;
+
     /// Give the file up and remove the local copy.
     async fn discard(&self);
 }

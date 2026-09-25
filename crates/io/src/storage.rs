@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
@@ -280,6 +280,8 @@ struct OpenFile {
     local: PathBuf,
     file: tokio::fs::File,
     size: u64,
+    /// The length of each block appended, in order.
+    blocks: Vec<u64>,
 }
 
 /// Cloud object store backend.
@@ -537,6 +539,8 @@ struct StagedUpload {
     path: String,
     local: PathBuf,
     size: u64,
+    /// The length of each block appended, in order.
+    blocks: Vec<u64>,
     chunk_size: usize,
     backend_name: &'static str,
     staged_bytes: Arc<AtomicU64>,
@@ -630,6 +634,31 @@ impl PendingUpload for StagedUpload {
         Ok(())
     }
 
+    async fn block(&self, index: usize) -> Result<Option<Vec<u8>>> {
+        let Some(&len) = self.blocks.get(index) else {
+            return Ok(None);
+        };
+        let unreadable = |e: std::io::Error| {
+            Error::storage_with(
+                format!(
+                    "block {index} of the staged copy of {} is unreadable",
+                    self.path
+                ),
+                e,
+            )
+        };
+        let start: u64 = self.blocks.iter().take(index).sum();
+        let mut file = tokio::fs::File::open(&self.local)
+            .await
+            .map_err(unreadable)?;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(unreadable)?;
+        let mut block = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+        file.read_exact(&mut block).await.map_err(unreadable)?;
+        Ok(Some(block))
+    }
+
     async fn discard(&self) {
         self.remove_local().await;
     }
@@ -664,6 +693,7 @@ impl StorageBackend for ObjectStoreBackend {
                 local,
                 file,
                 size: 0,
+                blocks: Vec::new(),
             },
         );
 
@@ -683,6 +713,7 @@ impl StorageBackend for ObjectStoreBackend {
             )
         })?;
         staged.size += data.len() as u64;
+        staged.blocks.push(data.len() as u64);
         self.staging
             .bytes
             .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -699,6 +730,7 @@ impl StorageBackend for ObjectStoreBackend {
             local,
             mut file,
             size,
+            blocks,
         } = staged;
         file.flush().await.map_err(|e| {
             Error::storage_with(format!("staging {path} at {} failed", local.display()), e)
@@ -711,6 +743,7 @@ impl StorageBackend for ObjectStoreBackend {
             path: path.to_string(),
             local,
             size,
+            blocks,
             chunk_size: self.chunk_size,
             backend_name: self.backend_name,
             staged_bytes: self.staging.bytes(),
@@ -1139,6 +1172,36 @@ mod tests {
             0,
             "the local copy is removed once the store holds the file"
         );
+    }
+
+    /// Each appended block reads back whole and in order, so a compressed
+    /// flush decompresses on its own, and nothing is returned past the last.
+    #[tokio::test]
+    async fn a_staged_file_reads_back_block_by_block() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+
+        backend.create("events/a.jsonl").await.expect("create");
+        for block in [&b"one\n"[..], b"", b"two\nthree\n"] {
+            backend
+                .append("events/a.jsonl", block)
+                .await
+                .expect("append");
+        }
+        let Closed::Pending(upload) = backend.close("events/a.jsonl").await.expect("close") else {
+            unreachable!("an object-store file is staged");
+        };
+
+        assert_eq!(
+            upload.block(0).await.expect("read"),
+            Some(b"one\n".to_vec())
+        );
+        assert_eq!(upload.block(1).await.expect("read"), Some(Vec::new()));
+        assert_eq!(
+            upload.block(2).await.expect("read"),
+            Some(b"two\nthree\n".to_vec())
+        );
+        assert_eq!(upload.block(3).await.expect("read"), None);
     }
 
     /// A key the store would refuse is refused before any record is staged.

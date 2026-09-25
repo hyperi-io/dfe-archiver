@@ -29,11 +29,11 @@ use crate::config::{Config, SharedConfig};
 use crate::metrics::ArchiverMetrics;
 use dfe_archiver_core::archive::{ArchiveWriter, PendingFile, RollingPolicy, Settled};
 use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
-use dfe_archiver_core::compression::compressor_for;
+use dfe_archiver_core::compression::{Compressor, compressor_for};
 use dfe_archiver_core::config::{ArchiveConfig, HELD_OFFSET_BYTES};
 use dfe_archiver_core::routing::Router;
-use dfe_archiver_core::storage::probe_sink;
-use dfe_archiver_core::types::KafkaOffset;
+use dfe_archiver_core::storage::{PendingUpload, probe_sink};
+use dfe_archiver_core::types::{KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::{KafkaStatsEmitter, ReceivedBatch, SourceTransport, Staging};
@@ -159,16 +159,24 @@ impl SinkCircuit {
     }
 }
 
-/// Upload one staged file until the store takes it or refuses it for good,
-/// and settle its records accordingly. A transient failure keeps the file and
-/// its held offsets, and the next attempt starts a fresh upload.
-async fn upload_until_settled(
-    file: PendingFile,
+/// What every upload task shares.
+struct Uploader {
+    /// One permit per upload attempt running at once.
     slots: Arc<Semaphore>,
     sink: Arc<SinkCircuit>,
     metrics: Arc<ArchiverMetrics>,
     backend: &'static str,
-) -> Settled {
+    /// Where the records of a file the store refuses for good go.
+    dlq: Arc<Dlq>,
+    /// Reads a refused file's blocks back into records.
+    compressor: Arc<dyn Compressor + Send + Sync>,
+}
+
+/// Upload one staged file until the store takes it or refuses it for good,
+/// and settle its records accordingly. A transient failure keeps the file and
+/// its held offsets, and the next attempt starts a fresh upload. A refused
+/// file's records go to the DLQ when one is enabled, and are dropped when not.
+async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Settled {
     let PendingFile {
         upload,
         offsets,
@@ -177,13 +185,23 @@ async fn upload_until_settled(
     let mut attempt: u32 = 0;
     loop {
         let result = {
-            let _slot = slots.acquire().await.ok();
+            let _slot = uploader.slots.acquire().await.ok();
             upload.attempt().await
         };
         match result {
             Ok(()) => {
-                sink.set(false);
+                uploader.sink.set(false);
                 return Settled::delivered(offsets, records);
+            }
+            Err(e) if e.is_refused() && uploader.dlq.is_enabled() => {
+                warn!(
+                    path = %upload.path(),
+                    records,
+                    error = %e,
+                    "The store refused an archive file for good; its records go to the DLQ"
+                );
+                return dead_letter_refused_file(upload.as_ref(), offsets, records, &e, &uploader)
+                    .await;
             }
             Err(e) if e.is_refused() => {
                 upload.discard().await;
@@ -196,9 +214,9 @@ async fn upload_until_settled(
                 return Settled::dropped(offsets, records, e.to_string());
             }
             Err(e) => {
-                metrics.record_error();
-                metrics.record_sink_error(backend);
-                sink.set(true);
+                uploader.metrics.record_error();
+                uploader.metrics.record_sink_error(uploader.backend);
+                uploader.sink.set(true);
                 let delay = upload_retry_delay(attempt);
                 attempt = attempt.saturating_add(1);
                 if attempt == 1 || attempt.is_multiple_of(10) {
@@ -215,6 +233,117 @@ async fn upload_until_settled(
                 tokio::time::sleep(delay).await;
             }
         }
+    }
+}
+
+/// Dead-letter the records of a staged file the store refused for good, read
+/// back block by block, one DLQ entry per line, since an archive file holds
+/// one record per line.
+///
+/// The file's offsets are released `Rejected` once the DLQ confirms every
+/// record it can hold. A record no DLQ backend can hold is counted dropped,
+/// and the offsets are released `Dropped` only when nothing reached the DLQ.
+/// A file that cannot be read back, or a DLQ write that fails, is `Errored`,
+/// so a restart writes the records again.
+async fn dead_letter_refused_file(
+    upload: &dyn PendingUpload,
+    offsets: OffsetSet,
+    records: u64,
+    refusal: &Error,
+    uploader: &Uploader,
+) -> Settled {
+    let reason = format!("storage_write_failed: {refusal}");
+    let mut written: u64 = 0;
+    let mut too_large: u64 = 0;
+    let mut too_large_reason = None;
+    for index in 0.. {
+        let block = match upload.block(index).await {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            Err(e) => return settle_unreadable(offsets, upload.path(), &e),
+        };
+        let plain = match uploader.compressor.decompress(&block) {
+            Ok(plain) => plain,
+            Err(e) => return settle_unreadable(offsets, upload.path(), &e),
+        };
+        let entries = plain
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(|line| {
+                let record = line.strip_suffix(b"\n").unwrap_or(line);
+                let entry = DlqEntry::new("dfe-archiver", reason.as_str(), record.to_vec())
+                    .with_destination(upload.path());
+                (entry, ())
+            })
+            .collect();
+        let Screened { writable, refused } = screen_dead_letters(&uploader.dlq, entries);
+        if let Some((why, ())) = refused.first() {
+            too_large_reason.get_or_insert_with(|| why.to_string());
+        }
+        too_large += refused.len() as u64;
+        if writable.is_empty() {
+            continue;
+        }
+        let count = writable.len() as u64;
+        let writable = writable.into_iter().map(|(entry, ())| entry).collect();
+        if let Err(dlq_err) = uploader.dlq.write_confirmed(writable).await {
+            error!(
+                path = %upload.path(),
+                records,
+                error = %dlq_err,
+                "The DLQ could not take the records of a file the store refused; a restart writes them again"
+            );
+            return Settled {
+                errored: offsets,
+                ..Settled::default()
+            };
+        }
+        written += count;
+    }
+
+    let lines = written + too_large;
+    if lines == 0 && records > 0 {
+        return settle_unreadable(
+            offsets,
+            upload.path(),
+            &Error::storage("no record could be read back"),
+        );
+    }
+    if lines != records {
+        warn!(
+            path = %upload.path(),
+            records,
+            lines,
+            "A refused file holds more lines than records: a payload held a newline of its own, so it reached the DLQ in pieces"
+        );
+    }
+    upload.discard().await;
+    let mut settled = Settled::default();
+    if let Some(why) = too_large_reason {
+        settled.dropped_records = too_large;
+        settled.dropped_reason = Some(format!(
+            "{refusal}, and no DLQ backend can hold them: {why}"
+        ));
+    }
+    if written > 0 {
+        settled.rejected = offsets;
+        settled.rejected_records = written;
+    } else {
+        settled.dropped = offsets;
+    }
+    settled
+}
+
+/// Settle a refused file that cannot be read back for the DLQ `Errored`, so a
+/// restart writes its records again.
+fn settle_unreadable(offsets: OffsetSet, path: &str, error: &Error) -> Settled {
+    error!(
+        path,
+        error = %error,
+        "A file the store refused could not be read back for the DLQ; a restart writes its records again"
+    );
+    Settled {
+        errored: offsets,
+        ..Settled::default()
     }
 }
 
@@ -265,8 +394,9 @@ pub struct Archiver {
     /// Uploads of staged files, each returning what its file settled.
     /// Collected every cycle and waited on, with a limit, at drain.
     uploads: parking_lot::Mutex<JoinSet<Settled>>,
-    /// Limits the uploads running at once, and with them upload memory.
-    upload_slots: Arc<Semaphore>,
+    /// What every upload task shares, its slots bounding the uploads running
+    /// at once and with them upload memory.
+    uploader: Arc<Uploader>,
     /// Records handed out and not yet released, read by the inbound brake.
     held_records: Arc<AtomicU64>,
     /// When `held_records` was last counted.
@@ -505,6 +635,36 @@ fn sink_confirmation(archive: &ArchiveConfig) -> SinkConfirmation {
     }
 }
 
+/// Start the DLQ. The Kafka backend rides the same config conversion as the
+/// consumer transport, so dead letters land on the broker the data came from.
+fn spawn_dlq(config: &Config) -> Result<Dlq> {
+    let mut dlq_config = config.dlq.clone();
+    let dlq_kafka = if config.is_direct() {
+        // No broker to dead-letter to, and the file backend is an EROFS
+        // no-op on a read-only rootfs, so there is no backend to offer.
+        if dlq_config.enabled {
+            warn!("no broker on the direct transport -- the DLQ is disabled");
+            dlq_config.enabled = false;
+        }
+        None
+    } else {
+        Some(dfe_archiver_io::kafka::convert_config(&config.kafka))
+    };
+    // Not tied to the loop's cancel token: the shutdown drain still
+    // dead-letters after the loop stops, and `drain` shuts the DLQ down last.
+    let dlq = Dlq::spawn(
+        &dlq_config,
+        "dfe-archiver",
+        dlq_kafka.as_ref(),
+        CancellationToken::new(),
+    )
+    .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
+    if dlq_config.enabled {
+        info!(mode = ?dlq_config.mode, "DLQ enabled");
+    }
+    Ok(dlq)
+}
+
 /// One permit per upload attempt running at once: `buffer.writer_parallelism`.
 /// Zero would never upload, so it counts as one.
 fn upload_slots(config: &Config) -> Arc<Semaphore> {
@@ -598,33 +758,7 @@ impl Archiver {
 
         let cancel = CancellationToken::new();
 
-        // Create DLQ. The Kafka backend rides the same config conversion as
-        // the consumer transport -- dead-letters land on the broker the data
-        // came from.
-        let mut dlq_config = config.dlq.clone();
-        let dlq_kafka = if config.is_direct() {
-            // No broker to dead-letter to, and the file backend is an EROFS
-            // no-op on a read-only rootfs, so there is no backend to offer.
-            if dlq_config.enabled {
-                warn!("no broker on the direct transport -- the DLQ is disabled");
-                dlq_config.enabled = false;
-            }
-            None
-        } else {
-            Some(dfe_archiver_io::kafka::convert_config(&config.kafka))
-        };
-        // Not tied to `cancel`: the shutdown drain still dead-letters after the
-        // loop stops, and `drain` shuts the DLQ down last.
-        let dlq = Dlq::spawn(
-            &dlq_config,
-            "dfe-archiver",
-            dlq_kafka.as_ref(),
-            CancellationToken::new(),
-        )
-        .map_err(|e| Error::Config(format!("DLQ init failed: {e}")))?;
-        if dlq_config.enabled {
-            info!(mode = ?dlq_config.mode, "DLQ enabled");
-        }
+        let dlq = Arc::new(spawn_dlq(&config)?);
 
         info!(
             transport = %config.transport,
@@ -653,6 +787,14 @@ impl Archiver {
             scaling: Arc::clone(&scaling),
             metrics: Arc::clone(&metrics),
         });
+        let uploader = Arc::new(Uploader {
+            slots,
+            sink: Arc::clone(&sink),
+            metrics: Arc::clone(&metrics),
+            backend: config.archive.backend_name(),
+            dlq: Arc::clone(&dlq),
+            compressor: Arc::from(compressor_for(&config.compression)?),
+        });
 
         Ok(Self {
             startup_config: config,
@@ -665,7 +807,7 @@ impl Archiver {
             evictions: parking_lot::Mutex::new(JoinSet::new()),
             staging,
             uploads: parking_lot::Mutex::new(JoinSet::new()),
-            upload_slots: slots,
+            uploader,
             held_records,
             held_refreshed: parking_lot::Mutex::new(Instant::now()),
             withheld: AtomicU64::new(0),
@@ -674,7 +816,7 @@ impl Archiver {
             sink,
             memory_guard,
             _stats_emitter: stats_emitter,
-            dlq: Arc::new(dlq),
+            dlq,
             log_guards: LogSpamGuards::default(),
             routing_fallback_guards,
         })
@@ -1066,15 +1208,21 @@ impl Archiver {
     }
 
     /// Start the uploads of staged files, then release the rest of what the
-    /// writers settled: the offsets of durable files `Delivered`, of files the
-    /// store refused `Dropped`, and of files that failed on local disk
-    /// `Errored`, which keeps them below every later commit and ends the loop.
+    /// writers settled: the offsets of durable files `Delivered`, of refused
+    /// files the DLQ holds `Rejected`, of refused files nothing holds
+    /// `Dropped`, and of files that failed on local disk `Errored`, which keeps
+    /// them below every later commit and ends the loop.
     async fn release_settled(&self, settled: Settled) {
         let settled = self.dispatch_uploads(settled);
         if settled.delivered_records > 0 {
             self.metrics.record_archived(settled.delivered_records);
         }
         self.release(settled.delivered.tokens(), DeliveryStatus::Delivered)
+            .await;
+        if settled.rejected_records > 0 {
+            self.metrics.record_dlq(settled.rejected_records);
+        }
+        self.release(settled.rejected.tokens(), DeliveryStatus::Rejected)
             .await;
         if settled.dropped_records > 0 {
             self.metrics.record_dropped(settled.dropped_records);
@@ -1113,16 +1261,9 @@ impl Archiver {
         if files.is_empty() {
             return settled;
         }
-        let backend = self.startup_config.archive.backend_name();
         let mut uploads = self.uploads.lock();
         for file in files {
-            uploads.spawn(upload_until_settled(
-                file,
-                Arc::clone(&self.upload_slots),
-                Arc::clone(&self.sink),
-                Arc::clone(&self.metrics),
-                backend,
-            ));
+            uploads.spawn(upload_until_settled(file, Arc::clone(&self.uploader)));
         }
         settled
     }
@@ -1845,7 +1986,7 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config,
+        Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader, buffer_config,
         held_record_cap, publish_kafka_lag, record_files_opened, record_rolls,
         record_routing_fallbacks, restart_required_changes, screen_dead_letters, sink_confirmation,
         upload_retry_delay, upload_slots, upload_until_settled,
@@ -2039,6 +2180,23 @@ mod tests {
             })
         }
 
+        fn block<'life0, 'async_trait>(
+            &'life0 self,
+            _index: usize,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = dfe_archiver_core::Result<Option<Vec<u8>>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(None) })
+        }
+
         fn discard<'life0, 'async_trait>(
             &'life0 self,
         ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
@@ -2067,7 +2225,14 @@ mod tests {
             metrics: Arc::clone(&metrics),
         });
         let most_at_once = async |config: Config| {
-            let slots = upload_slots(&config);
+            let uploader = Arc::new(Uploader {
+                slots: upload_slots(&config),
+                sink: Arc::clone(&sink),
+                metrics: Arc::clone(&metrics),
+                backend: "memory",
+                dlq: Arc::new(Dlq::disabled()),
+                compressor: Arc::from(compressor_for(&config.compression).expect("compressor")),
+            });
             let running = Arc::new(AtomicUsize::new(0));
             let most = Arc::new(AtomicUsize::new(0));
             let mut uploads = tokio::task::JoinSet::new();
@@ -2080,13 +2245,7 @@ mod tests {
                     offsets: OffsetSet::default(),
                     records: 1,
                 };
-                uploads.spawn(upload_until_settled(
-                    file,
-                    Arc::clone(&slots),
-                    Arc::clone(&sink),
-                    Arc::clone(&metrics),
-                    "memory",
-                ));
+                uploads.spawn(upload_until_settled(file, Arc::clone(&uploader)));
             }
             while uploads.join_next().await.is_some() {}
             most.load(Ordering::SeqCst)

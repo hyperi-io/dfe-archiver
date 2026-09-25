@@ -353,7 +353,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 
 ### Guarantee
 
-On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself drops records, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
+On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself can drop records, when no DLQ can take them, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
 
 ### Implementation
 
@@ -375,7 +375,7 @@ Holding costs memory for as long as a file is not durable: about 32 bytes a reco
 
 While uploads fail, held records and staged files grow, so both are pressure sources on the self-regulation latch that pauses the Kafka partitions. Held records read against a quarter of the memory limit at 32 bytes each, staged bytes against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit. Both pause at the latch's `pause_above` (0.8 by default), so a store outage turns into consumer lag rather than memory or disk growth. With self-regulation off nothing pauses, and the archiver logs that at startup.
 
-Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. Its records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
+Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. A file refused at upload is read back a block at a time, each block one flush decompressed on its own, and its records go to the DLQ one entry per line, since the file holds one record per line. The file's offsets are released `Rejected` once the DLQ confirms them, and a record too large for any DLQ backend is counted dropped. A file that cannot be read back, or a DLQ write that fails, is released `Errored`, so a restart writes the records again. With the DLQ off the records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
 
 A batch no file takes goes to the DLQ through scalo's confirming write, one entry per record, and only a write the DLQ confirms releases a record's offset, `Rejected`. The buffer records where each record ends, because a payload may hold a newline of its own. First `Dlq::refusal` measures each entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the record. When the store refused the batch for good, a record no backend can ever hold is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same pair of refusals, and the rest of the batch still goes to the DLQ. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
 
@@ -391,7 +391,8 @@ Inbound-filter dead letters are screened too. One no DLQ backend can hold is dro
 |---------------|---------|-------------|
 | Before the file is durable | Restart re-reads every record the file held, and clears the staged files | Duplicates, up to one roll interval plus pending uploads |
 | Upload fails | File and offsets kept, upload retried, intake paused near the caps | Delayed, never lost |
-| Store refuses the object for good | Offsets released `Dropped`, counted, reason logged | Dropped |
+| Store refuses the object for good, DLQ confirms | Records read back into the DLQ, offsets released | Records are in the DLQ |
+| Store refuses the object for good, DLQ off | Offsets released `Dropped`, counted, reason logged | Dropped |
 | Local write or sync fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | Write fails, DLQ confirms | Offsets released | Record is in the DLQ |
 | Store refuses for good, no DLQ backend can hold one record | That record's offset released `Dropped`, counted, reason logged; the rest go to the DLQ | That record dropped |
