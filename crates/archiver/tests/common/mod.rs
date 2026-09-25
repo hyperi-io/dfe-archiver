@@ -8,9 +8,36 @@
 
 #![allow(dead_code, clippy::expect_used)]
 
+use dfe_archiver::archive::ArchiveWriter;
+use dfe_archiver::io::Staging;
+use dfe_archiver::storage::Closed;
 use std::env;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
+
+// -- Staged uploads ---------------------------------------------------
+
+/// A staging area removed with the returned directory.
+pub fn staging() -> (tempfile::TempDir, Staging) {
+    let dir = tempfile::TempDir::new().expect("staging dir");
+    let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+    (dir, staging)
+}
+
+/// Upload a closed file now if it was staged, as the archiver's upload task
+/// does in the background.
+pub async fn finish(closed: Closed) {
+    if let Closed::Pending(upload) = closed {
+        upload.attempt().await.expect("upload");
+    }
+}
+
+/// Upload every file `writer` closed, as the archiver's upload tasks do.
+pub async fn upload_closed(writer: &mut ArchiveWriter) {
+    for file in writer.take_settled().uploads {
+        file.upload.attempt().await.expect("upload");
+    }
+}
 
 // -- Reachability -----------------------------------------------------
 

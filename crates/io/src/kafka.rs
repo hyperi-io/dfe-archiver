@@ -193,6 +193,17 @@ impl TransportAdapter {
         self.held
     }
 
+    /// Records handed out and not yet released.
+    #[must_use]
+    pub fn held_records(&self) -> u64 {
+        if !self.held {
+            return 0;
+        }
+        self.transport
+            .ack_control()
+            .map_or(0, |control| control.held().count)
+    }
+
     /// Records past this pod's read position, summed over its partitions.
     ///
     /// The committed-offset lag grows by up to a roll interval of intake while

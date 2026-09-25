@@ -175,6 +175,7 @@ async fn two_writers_on_one_destination_and_window_write_two_objects() {
         return; // no Docker; acquire_minio said so and failed the run in CI
     };
     minio.create_bucket(BUCKET).await;
+    let (_staging_dir, staging) = common::staging();
 
     let archive = ArchiveConfig {
         destination: format!("minio://{BUCKET}/events"),
@@ -186,7 +187,7 @@ async fn two_writers_on_one_destination_and_window_write_two_objects() {
             archive.clone(),
             RollingPolicy::default(),
             create_compressor("none", 0).expect("compressor"),
-            create_backend(&archive).expect("backend"),
+            create_backend(&archive, &staging).expect("backend"),
         )
     };
     let mut first = writer();
@@ -203,6 +204,8 @@ async fn two_writers_on_one_destination_and_window_write_two_objects() {
         .expect("second write");
     first.close().await.expect("first close");
     second.close().await.expect("second close");
+    common::upload_closed(&mut first).await;
+    common::upload_closed(&mut second).await;
 
     let keys = minio.keys(BUCKET).await;
     assert_eq!(
@@ -246,7 +249,7 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
     });
     wait_until(
         "the first archiver wrote all 50 records into its open file",
-        || async { counter(&manager, "messages_archived_total") >= 50 },
+        || async { counter(&manager, "messages_written_total") >= 50 },
     )
     .await;
     assert_eq!(
@@ -267,7 +270,7 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
         async move { second.run().await }
     });
     wait_until("the second archiver wrote all 50 records again", || async {
-        counter(&manager, "messages_archived_total") >= 100
+        counter(&manager, "messages_written_total") >= 100
     })
     .await;
     stop(&second, running).await;
@@ -348,7 +351,7 @@ async fn a_graceful_stop_under_traffic_writes_every_record_it_answered() {
     });
 
     wait_until("records are flowing into the archive files", || async {
-        counter(&manager, "messages_archived_total") >= 200
+        counter(&manager, "messages_written_total") >= 200
     })
     .await;
 
@@ -380,75 +383,114 @@ async fn a_graceful_stop_under_traffic_writes_every_record_it_answered() {
     );
 }
 
-/// A batch no file took and the DLQ refused keeps its offsets held, so no
-/// later commit may pass them, however many files complete after it.
+/// A store that fails every upload until it comes back costs time, never
+/// records: the staged file and its offsets are kept, the loop keeps running,
+/// and once the store answers every record lands once and the commit follows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_batch_the_dlq_refuses_never_lets_the_commit_pass_it() {
+async fn a_store_that_fails_until_it_recovers_loses_nothing() {
     init_logs();
-    let Some(kafka) = common::acquire_kafka("dlq_refuses").await else {
+    let Some(kafka) = common::acquire_kafka("store_recovers").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("dlq_refuses").await else {
+    let Some(minio) = common::acquire_minio("store_recovers").await else {
         return;
     };
     kafka.create_topic("events", &[]).await;
-    // Every padded record is past this ceiling on its own.
-    kafka
-        .create_topic("refusing-dlq", &[("max.message.bytes", "1024")])
-        .await;
 
     let spool = tempfile::TempDir::new().expect("spool");
     let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
     config.archive.roll_interval_secs = Some(2);
-    config.dlq.enabled = true;
-    config.dlq.mode = scalo::dlq::DlqMode::KafkaOnly;
-    config.dlq.file.enabled = false;
-    config.dlq.kafka.enabled = true;
-    config.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-    config.dlq.kafka.common_topic = "refusing-dlq".to_string();
     let (manager, metrics) = metrics();
 
-    // The bucket does not exist yet, so the first batch's write fails.
+    // The bucket does not exist yet, so every upload fails until it does.
     kafka.produce("events", &records(0..20)).await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
         async move { archiver.run().await }
     });
-    wait_until("the first batch's write failed", || async {
-        counter(&manager, "archive_errors_total") >= 1
+    wait_until("three uploads failed", || async {
+        counter(&manager, "archive_errors_total") >= 3
     })
     .await;
-
-    // Later records write and roll normally.
-    minio.create_bucket(BUCKET).await;
-    kafka.produce("events", &records(20..40)).await;
-    wait_until("a later file completed", || async {
-        !minio.keys(BUCKET).await.is_empty()
-    })
-    .await;
-    // Several more flush and roll cycles.
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    assert_eq!(
-        kafka.records_in("refusing-dlq"),
-        0,
-        "the DLQ topic took the batch, so this run tests nothing: its ceiling did not refuse"
-    );
+    assert!(!running.is_finished(), "a failing store ended the loop");
     assert_eq!(
         kafka.committed(GROUP, "events"),
         None,
-        "the commit passed a batch the DLQ refused"
+        "a record was committed before its file reached the store"
+    );
+    assert_eq!(
+        counter(&manager, "messages_archived_total"),
+        0,
+        "a record was counted archived before its file reached the store"
     );
 
+    minio.create_bucket(BUCKET).await;
+    wait_until("every record landed once the store came back", || async {
+        counter(&manager, "messages_archived_total") >= 20
+    })
+    .await;
     stop(&archiver, running).await;
     assert_eq!(
-        kafka.committed(GROUP, "events"),
-        None,
-        "the drain's commit passed a batch the DLQ refused"
+        ids(&minio.lines(BUCKET).await),
+        (0..20).collect::<Vec<_>>(),
+        "every record lands, once"
     );
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
-        (20..40).collect::<Vec<_>>(),
-        "the later records are archived; the refused batch is not"
+        kafka.committed(GROUP, "events"),
+        Some(20),
+        "the confirmed upload releases the records, and the commit follows"
+    );
+    assert_eq!(
+        counter(&manager, "messages_archived_total"),
+        20,
+        "each record is counted once, when the store confirms its file"
+    );
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+}
+
+/// A key the store can never accept is refused before any record is staged.
+/// With no DLQ to take the batch its records are dropped with the reason and
+/// counted, the commit moves past them, and the loop keeps running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_the_store_refuses_for_good_is_dropped_and_the_commit_moves_on() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("store_refuses").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("store_refuses").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    // Past the 1024-byte object key limit, so every file's key is refused.
+    config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
+    let (manager, metrics) = metrics();
+
+    kafka.produce("events", &records(0..20)).await;
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the refused batch was dropped", || async {
+        counter(&manager, "messages_dropped_total") >= 20
+    })
+    .await;
+    wait_until("the commit moved past the dropped records", || async {
+        kafka.committed(GROUP, "events") == Some(20)
+    })
+    .await;
+    assert!(!running.is_finished(), "a refused object ended the loop");
+    stop(&archiver, running).await;
+
+    assert_eq!(counter(&manager, "messages_dropped_total"), 20);
+    assert_eq!(counter(&manager, "messages_archived_total"), 0);
+    assert!(
+        minio.keys(BUCKET).await.is_empty(),
+        "nothing reached the store"
     );
 }

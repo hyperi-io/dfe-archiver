@@ -18,7 +18,7 @@
 use dfe_archiver::archive::RollingPolicy;
 use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::{Config, validate_config};
-use dfe_archiver::io::create_backend;
+use dfe_archiver::io::{Staging, create_backend};
 use dfe_archiver::metrics::ArchiverMetrics;
 use dfe_archiver::routing::Router;
 use dfe_archiver_core::buffer::BufferManager;
@@ -61,7 +61,9 @@ fn smoke_startup_boots_with_default_config() {
     };
 
     // File backend (default destination is file://)
-    let _backend = create_backend(&config.archive).expect("default file backend");
+    let spool = tempfile::TempDir::new().expect("spool");
+    let staging = Staging::open(spool.path().join("uploads")).expect("staging");
+    let _backend = create_backend(&config.archive, &staging).expect("default file backend");
 }
 
 /// Verify the deployment contract is valid and produces JSON without panic.

@@ -67,7 +67,7 @@ fn e2e_topic(suffix: &str) -> String {
     }
 }
 
-/// Create a topic via the admin client (idempotent — ignores "already exists").
+/// Create a topic via the admin client (idempotent -- ignores "already exists").
 ///
 /// Works in both modes: docker (auto-create) and remote (requires Create ACL on prefix).
 /// The `dfe-archiver` Kafka user has `Create` permission on `dfe-archiver-*` topics.
@@ -126,6 +126,7 @@ async fn produce_messages(topic: &str, count: u64, kf: &common::KafkaTestConfig)
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_e2e_kafka_to_file_archive() {
+    let (_staging_dir, staging) = common::staging();
     skip_if_no_kafka!();
 
     let topic = e2e_topic("archive");
@@ -152,7 +153,7 @@ async fn test_e2e_kafka_to_file_archive() {
     };
 
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
     // Consume from Kafka
@@ -229,6 +230,7 @@ async fn test_e2e_kafka_to_file_archive() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_e2e_kafka_to_compressed_archive() {
+    let (_staging_dir, staging) = common::staging();
     skip_if_no_kafka!();
 
     let topic = e2e_topic("zstd");
@@ -254,7 +256,7 @@ async fn test_e2e_kafka_to_compressed_archive() {
     };
 
     let compressor = create_compressor("zstd", 3).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
     let config = build_kafka_config(&topic);

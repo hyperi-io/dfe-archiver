@@ -8,27 +8,124 @@
 
 use async_trait::async_trait;
 use dfe_archiver_core::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConfig, S3Config};
-use dfe_archiver_core::storage::StorageBackend;
+use dfe_archiver_core::storage::{Closed, PendingUpload, StorageBackend};
 use dfe_archiver_core::{Error, Result};
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
 /// Default multipart chunk size: 8MB
 const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Default max concurrent part uploads per file
-const DEFAULT_MAX_CONCURRENCY: usize = 8;
+/// Parts of one upload in flight at once, which bounds its memory to this
+/// many chunks.
+const UPLOAD_PART_CONCURRENCY: usize = 4;
+
+/// The longest object key S3, GCS and Azure accept, in bytes.
+const MAX_OBJECT_KEY_BYTES: usize = 1024;
+
+/// Local disk where object-store files are written before they upload.
+///
+/// A file stays here until the store confirms it, so an outage of any length
+/// costs disk rather than records.
+#[derive(Clone, Debug)]
+pub struct Staging {
+    dir: PathBuf,
+    bytes: Arc<AtomicU64>,
+}
+
+impl Staging {
+    /// Stage under `dir`, removing what a previous process left there: those
+    /// files' offsets were never committed, so their records are read again.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be created or cleared.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_file() {
+                std::fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            info!(
+                dir = %dir.display(),
+                removed,
+                "Removed staged files a previous process never uploaded; their records are read again"
+            );
+        }
+        Ok(Self {
+            dir,
+            bytes: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Bytes staged and not yet uploaded or discarded.
+    #[must_use]
+    pub fn bytes(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.bytes)
+    }
+
+    /// Where files are staged.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// A local file name no other staged file shares.
+    fn next_file(&self) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!("{}-{n}.part", std::process::id()))
+    }
+}
+
+/// Classify an object store error: refused for good when the same object can
+/// never be accepted, a storage error to retry otherwise.
+fn store_error(backend: &str, what: &str, path: &str, e: object_store::Error) -> Error {
+    let message = format!("{backend}: {what} failed for {path}");
+    if refused_for_good(&e) {
+        Error::refused_with(message, e)
+    } else {
+        Error::storage_with(message, e)
+    }
+}
+
+/// Whether the store rejects this object whatever is retried.
+///
+/// Deliberately narrow: an unrecognised refusal is retried, which holds the
+/// commit rather than dropping records. `object_store` does not export its
+/// request error, so the store's own error codes are recognised by their text.
+fn refused_for_good(e: &object_store::Error) -> bool {
+    const PERMANENT_CODES: [&str; 3] = ["KeyTooLongError", "EntityTooLarge", "InvalidObjectName"];
+    if matches!(e, object_store::Error::InvalidPath { .. }) {
+        return true;
+    }
+    let mut cause: Option<&dyn std::error::Error> = Some(e);
+    while let Some(err) = cause {
+        let text = err.to_string();
+        if PERMANENT_CODES.iter().any(|code| text.contains(code)) {
+            return true;
+        }
+        cause = err.source();
+    }
+    false
+}
 
 /// Local filesystem backend
 pub struct FileBackend {
@@ -104,14 +201,25 @@ impl StorageBackend for FileBackend {
     /// Syncs the file, then every directory from its parent up to the base
     /// path, because `create` may have made any of them and a directory entry
     /// is durable only once its parent is synced.
-    async fn close(&self, path: &str) -> Result<()> {
+    async fn close(&self, path: &str) -> Result<Closed> {
         let full_path = self.full_path(path);
         tokio::fs::File::open(&full_path).await?.sync_all().await?;
         for dir in Path::new(path).ancestors().skip(1) {
             sync_dir(&self.base_path.join(dir)).await?;
         }
         debug!(path = %full_path.display(), "File synced to disk");
-        Ok(())
+        Ok(Closed::Durable)
+    }
+
+    /// Removes the partial file, whose records are read again or dropped, so
+    /// no half-written line is left in the archive.
+    async fn abort(&self, path: &str) {
+        let full_path = self.full_path(path);
+        if let Err(e) = tokio::fs::remove_file(&full_path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(path = %full_path.display(), error = %e, "Could not remove an abandoned archive file");
+        }
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
@@ -167,25 +275,56 @@ impl StorageBackend for FileBackend {
     }
 }
 
-/// Cloud object store backend using multipart uploads
+/// A staged file still being written.
+struct OpenFile {
+    local: PathBuf,
+    file: tokio::fs::File,
+    size: u64,
+}
+
+/// Cloud object store backend.
 ///
 /// Supports S3, `MinIO`, GCS, and Azure Blob via the `object_store` crate.
-/// Uses `WriteMultipart` for streaming uploads -- data is uploaded in
-/// configurable chunk sizes (default 8MB), keeping memory usage bounded
-/// to ~`chunk_size` per active file rather than buffering the entire file.
+/// A file is written to [`Staging`] and uploaded whole once it closes, in
+/// `chunk_size` parts, so the store is never on the write path and a failed
+/// upload can be tried again from the local copy with fresh credentials.
 pub struct ObjectStoreBackend {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     backend_name: &'static str,
     chunk_size: usize,
-    max_concurrency: usize,
-    /// Active multipart uploads (path -> `WriteMultipart`)
-    uploads: Mutex<HashMap<String, WriteMultipart>>,
+    staging: Staging,
+    /// Files being written, by archive path.
+    open: Mutex<HashMap<String, OpenFile>>,
 }
 
 impl ObjectStoreBackend {
+    /// Stage files for `store` under `staging`.
+    #[must_use]
+    pub fn with_store(
+        store: Arc<dyn ObjectStore>,
+        prefix: String,
+        backend_name: &'static str,
+        chunk_size: usize,
+        staging: &Staging,
+    ) -> Self {
+        Self {
+            store,
+            prefix,
+            backend_name,
+            chunk_size,
+            staging: staging.clone(),
+            open: Mutex::new(HashMap::new()),
+        }
+    }
+
     /// Create backend for AWS S3
-    pub fn new_s3(config: &S3Config, prefix: String, chunk_size: usize) -> Result<Self> {
+    pub fn new_s3(
+        config: &S3Config,
+        prefix: String,
+        chunk_size: usize,
+        staging: &Staging,
+    ) -> Result<Self> {
         // `allow_http` defaults to false (HTTPS required). Only enable for local/dev endpoints.
         let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&config.bucket)
@@ -210,18 +349,22 @@ impl ObjectStoreBackend {
 
         info!(bucket = %config.bucket, prefix = %prefix, chunk_size, "S3 backend initialized");
 
-        Ok(Self {
-            store: Arc::new(store),
+        Ok(Self::with_store(
+            Arc::new(store),
             prefix,
-            backend_name: "s3",
+            "s3",
             chunk_size,
-            max_concurrency: DEFAULT_MAX_CONCURRENCY,
-            uploads: Mutex::new(HashMap::new()),
-        })
+            staging,
+        ))
     }
 
     /// Create backend for `MinIO` (S3-compatible)
-    pub fn new_minio(config: &MinioConfig, prefix: String, chunk_size: usize) -> Result<Self> {
+    pub fn new_minio(
+        config: &MinioConfig,
+        prefix: String,
+        chunk_size: usize,
+        staging: &Staging,
+    ) -> Result<Self> {
         let scheme = if config.use_ssl { "https" } else { "http" };
         let endpoint = if config.endpoint.starts_with("http") {
             config.endpoint.clone()
@@ -248,14 +391,13 @@ impl ObjectStoreBackend {
             "MinIO backend initialized"
         );
 
-        Ok(Self {
-            store: Arc::new(store),
+        Ok(Self::with_store(
+            Arc::new(store),
             prefix,
-            backend_name: "minio",
+            "minio",
             chunk_size,
-            max_concurrency: DEFAULT_MAX_CONCURRENCY,
-            uploads: Mutex::new(HashMap::new()),
-        })
+            staging,
+        ))
     }
 
     /// Create backend for Google Cloud Storage
@@ -265,7 +407,12 @@ impl ObjectStoreBackend {
     /// 2. `credentials_path` (path to service account JSON file)
     /// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (Application Default Credentials)
     /// 4. Instance metadata (when running on GCP)
-    pub fn new_gcs(config: &GcsConfig, prefix: String, chunk_size: usize) -> Result<Self> {
+    pub fn new_gcs(
+        config: &GcsConfig,
+        prefix: String,
+        chunk_size: usize,
+        staging: &Staging,
+    ) -> Result<Self> {
         let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&config.bucket);
 
         if let Some(ref key) = config.service_account_key {
@@ -281,18 +428,22 @@ impl ObjectStoreBackend {
 
         info!(bucket = %config.bucket, prefix = %prefix, "GCS backend initialized");
 
-        Ok(Self {
-            store: Arc::new(store),
+        Ok(Self::with_store(
+            Arc::new(store),
             prefix,
-            backend_name: "gcs",
+            "gcs",
             chunk_size,
-            max_concurrency: DEFAULT_MAX_CONCURRENCY,
-            uploads: Mutex::new(HashMap::new()),
-        })
+            staging,
+        ))
     }
 
     /// Create backend for Azure Blob Storage
-    pub fn new_azure(config: &AzureConfig, prefix: String, chunk_size: usize) -> Result<Self> {
+    pub fn new_azure(
+        config: &AzureConfig,
+        prefix: String,
+        chunk_size: usize,
+        staging: &Staging,
+    ) -> Result<Self> {
         let mut builder = MicrosoftAzureBuilder::from_env()
             .with_account(&config.account_name)
             .with_container_name(&config.container);
@@ -342,14 +493,13 @@ impl ObjectStoreBackend {
             "Azure Blob backend initialized"
         );
 
-        Ok(Self {
-            store: Arc::new(store),
+        Ok(Self::with_store(
+            Arc::new(store),
             prefix,
-            backend_name: "azure",
+            "azure",
             chunk_size,
-            max_concurrency: DEFAULT_MAX_CONCURRENCY,
-            uploads: Mutex::new(HashMap::new()),
-        })
+            staging,
+        ))
     }
 
     fn object_path(&self, path: &str) -> ObjectPath {
@@ -380,100 +530,205 @@ fn parse_sas_pairs(sas: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A file staged for an object store, uploaded whole on each attempt.
+struct StagedUpload {
+    store: Arc<dyn ObjectStore>,
+    object_path: ObjectPath,
+    path: String,
+    local: PathBuf,
+    size: u64,
+    chunk_size: usize,
+    backend_name: &'static str,
+    staged_bytes: Arc<AtomicU64>,
+    /// Set once the local copy is gone, so its bytes are counted off once.
+    removed: AtomicBool,
+}
+
+impl StagedUpload {
+    /// Remove the local copy and count its bytes off the staging total.
+    async fn remove_local(&self) {
+        if self.removed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.staged_bytes.fetch_sub(self.size, Ordering::Relaxed);
+        if let Err(e) = tokio::fs::remove_file(&self.local).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(local = %self.local.display(), error = %e, "Could not remove a staged file");
+        }
+    }
+
+    /// Stream the local copy into one multipart upload.
+    async fn upload(&self) -> Result<()> {
+        let error = |what: &str, e: object_store::Error| {
+            store_error(self.backend_name, what, &self.path, e)
+        };
+        if self.size == 0 {
+            self.store
+                .put(&self.object_path, PutPayload::default())
+                .await
+                .map_err(|e| error("put", e))?;
+            return Ok(());
+        }
+        let mut file = tokio::fs::File::open(&self.local).await.map_err(|e| {
+            Error::storage_with(format!("the staged copy of {} is unreadable", self.path), e)
+        })?;
+        let upload = self
+            .store
+            .put_multipart(&self.object_path)
+            .await
+            .map_err(|e| error("multipart init", e))?;
+        let mut write = WriteMultipart::new_with_chunk_size(upload, self.chunk_size);
+        let mut chunk = vec![0u8; self.chunk_size];
+        loop {
+            let read = match file.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(e) => {
+                    let _ = write.abort().await;
+                    return Err(Error::storage_with(
+                        format!("reading the staged copy of {} failed", self.path),
+                        e,
+                    ));
+                }
+            };
+            write.write(&chunk[..read]);
+            if let Err(e) = write.wait_for_capacity(UPLOAD_PART_CONCURRENCY).await {
+                let _ = write.abort().await;
+                return Err(error("part upload", e));
+            }
+        }
+        write
+            .finish()
+            .await
+            .map(|_| ())
+            .map_err(|e| error("multipart complete", e))
+    }
+}
+
+#[async_trait]
+impl PendingUpload for StagedUpload {
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    async fn attempt(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+        self.upload().await?;
+        info!(
+            path = %self.path,
+            backend = self.backend_name,
+            bytes = self.size,
+            duration_ms = start.elapsed().as_millis(),
+            "Uploaded archive file"
+        );
+        self.remove_local().await;
+        Ok(())
+    }
+
+    async fn discard(&self) {
+        self.remove_local().await;
+    }
+}
+
 #[async_trait]
 impl StorageBackend for ObjectStoreBackend {
+    /// Stages the file locally. The key is refused here when the store would
+    /// refuse it, before any record is written into the file.
     async fn create(&self, path: &str) -> Result<()> {
         let object_path = self.object_path(path);
-
-        if self.exists(path).await? {
-            return Err(Error::AlreadyExists {
-                path: path.to_string(),
-            });
+        if object_path.as_ref().len() > MAX_OBJECT_KEY_BYTES {
+            return Err(Error::refused(format!(
+                "{}: the object key for {path} is {} bytes, past the {MAX_OBJECT_KEY_BYTES}-byte limit",
+                self.backend_name,
+                object_path.as_ref().len()
+            )));
         }
 
-        let upload = self.store.put_multipart(&object_path).await.map_err(|e| {
-            Error::storage_with(
-                format!("{}: multipart init failed for {path}", self.backend_name),
-                e,
-            )
-        })?;
+        let local = self.staging.next_file();
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&local)
+            .await
+            .map_err(|e| {
+                Error::storage_with(format!("could not stage {path} at {}", local.display()), e)
+            })?;
+        self.open.lock().await.insert(
+            path.to_string(),
+            OpenFile {
+                local,
+                file,
+                size: 0,
+            },
+        );
 
-        let write = WriteMultipart::new_with_chunk_size(upload, self.chunk_size);
-
-        let mut uploads = self.uploads.lock().await;
-        uploads.insert(path.to_string(), write);
-
-        debug!(path = %path, backend = self.backend_name, "Started multipart upload");
+        debug!(path = %path, backend = self.backend_name, "Staged a new archive file");
         Ok(())
     }
 
     async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
-        let mut uploads = self.uploads.lock().await;
-
-        let write = uploads.get_mut(path).ok_or_else(|| {
-            Error::storage(format!(
-                "{}: no active upload for path: {path}",
-                self.backend_name
-            ))
+        let mut open = self.open.lock().await;
+        let staged = open.get_mut(path).ok_or_else(|| {
+            Error::storage(format!("{}: no staged file for {path}", self.backend_name))
         })?;
-
-        write.write(data);
-
-        write
-            .wait_for_capacity(self.max_concurrency)
-            .await
-            .map_err(|e| {
-                Error::storage_with(
-                    format!("{}: part upload failed for {path}", self.backend_name),
-                    e,
-                )
-            })?;
-
-        debug!(
-            path = %path,
-            bytes = data.len(),
-            backend = self.backend_name,
-            "Appended to multipart upload"
-        );
-
-        Ok(())
-    }
-
-    async fn close(&self, path: &str) -> Result<()> {
-        let write = {
-            let mut uploads = self.uploads.lock().await;
-            uploads.remove(path)
-        };
-
-        let Some(write) = write else {
-            warn!(
-                path = %path,
-                backend = self.backend_name,
-                "close called but no active upload"
-            );
-            return Ok(());
-        };
-
-        debug!(path = %path, backend = self.backend_name, "Completing multipart upload");
-        let start = std::time::Instant::now();
-        write.finish().await.map_err(|e| {
+        staged.file.write_all(data).await.map_err(|e| {
             Error::storage_with(
-                format!(
-                    "{}: multipart complete failed for {path}",
-                    self.backend_name
-                ),
+                format!("staging {path} at {} failed", staged.local.display()),
                 e,
             )
         })?;
-
-        let duration = start.elapsed();
-        info!(
-            path = %path,
-            backend = self.backend_name,
-            duration_ms = duration.as_millis(),
-            "Completed multipart upload"
-        );
+        staged.size += data.len() as u64;
+        self.staging
+            .bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        trace!(path = %path, bytes = data.len(), "Staged bytes");
         Ok(())
+    }
+
+    /// Hands back the staged file to upload. Nothing reaches the store here.
+    async fn close(&self, path: &str) -> Result<Closed> {
+        let staged = self.open.lock().await.remove(path).ok_or_else(|| {
+            Error::storage(format!("{}: no staged file for {path}", self.backend_name))
+        })?;
+        let OpenFile {
+            local,
+            mut file,
+            size,
+        } = staged;
+        file.flush().await.map_err(|e| {
+            Error::storage_with(format!("staging {path} at {} failed", local.display()), e)
+        })?;
+        drop(file);
+
+        Ok(Closed::Pending(Box::new(StagedUpload {
+            store: Arc::clone(&self.store),
+            object_path: self.object_path(path),
+            path: path.to_string(),
+            local,
+            size,
+            chunk_size: self.chunk_size,
+            backend_name: self.backend_name,
+            staged_bytes: self.staging.bytes(),
+            removed: AtomicBool::new(false),
+        })))
+    }
+
+    async fn abort(&self, path: &str) {
+        let Some(staged) = self.open.lock().await.remove(path) else {
+            return;
+        };
+        self.staging.bytes.fetch_sub(staged.size, Ordering::Relaxed);
+        drop(staged.file);
+        if let Err(e) = tokio::fs::remove_file(&staged.local).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(local = %staged.local.display(), error = %e, "Could not remove an abandoned staged file");
+        }
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
@@ -532,8 +787,12 @@ impl StorageBackend for ObjectStoreBackend {
     }
 }
 
-/// Create storage backend from destination URL
-pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend + Send + Sync>> {
+/// Create storage backend from destination URL. Object-store files are
+/// staged under `staging` until they upload.
+pub fn create_backend(
+    config: &ArchiveConfig,
+    staging: &Staging,
+) -> Result<Box<dyn StorageBackend + Send + Sync>> {
     let dest = &config.destination;
     let chunk_size = if config.multipart_chunk_size > 0 {
         config.multipart_chunk_size
@@ -557,6 +816,7 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             &s3_config,
             prefix.to_string(),
             chunk_size,
+            staging,
         )?))
     } else if dest.starts_with("minio://") {
         let rest = dest.strip_prefix("minio://").unwrap_or("");
@@ -574,6 +834,7 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             &minio_config,
             prefix.to_string(),
             chunk_size,
+            staging,
         )?))
     } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
         // Both spellings, because `ArchiveConfig::backend_name()` labels either
@@ -593,6 +854,7 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             &gcs_config,
             prefix.to_string(),
             chunk_size,
+            staging,
         )?))
     } else if dest.starts_with("az://") || dest.starts_with("azure://") {
         let rest = if let Some(r) = dest.strip_prefix("az://") {
@@ -615,6 +877,7 @@ pub fn create_backend(config: &ArchiveConfig) -> Result<Box<dyn StorageBackend +
             &azure_config,
             prefix.to_string(),
             chunk_size,
+            staging,
         )?))
     } else if dest.contains("://") {
         // URL-shaped but not a scheme this implements. The local-path branch
@@ -808,34 +1071,187 @@ mod tests {
         assert_eq!(pairs[1], ("key".to_string(), "value".to_string()));
     }
 
+    /// A staging area in its own temporary directory.
+    fn staging() -> (TempDir, Staging) {
+        let dir = TempDir::new().expect("create temp dir");
+        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        (dir, staging)
+    }
+
+    fn in_memory(staging: &Staging) -> (Arc<object_store::memory::InMemory>, ObjectStoreBackend) {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let backend = ObjectStoreBackend::with_store(
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            "archive".to_string(),
+            "memory",
+            5 * 1024 * 1024,
+            staging,
+        );
+        (store, backend)
+    }
+
+    /// Nothing reaches the store until the closed file uploads, and the upload
+    /// carries every staged byte and leaves no local copy behind.
+    #[tokio::test]
+    async fn a_staged_file_reaches_the_store_only_when_it_uploads() {
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"one\n")
+            .await
+            .expect("append");
+        backend
+            .append("events/a.jsonl", b"two\n")
+            .await
+            .expect("append");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 8);
+
+        let closed = backend.close("events/a.jsonl").await.expect("close");
+        assert!(
+            matches!(closed, Closed::Pending(_)),
+            "an object-store file has to upload"
+        );
+        let Closed::Pending(upload) = closed else {
+            return;
+        };
+        assert!(
+            store
+                .head(&ObjectPath::from("archive/events/a.jsonl"))
+                .await
+                .is_err(),
+            "closing stages, it does not upload"
+        );
+
+        upload.attempt().await.expect("upload");
+        let object = store
+            .get(&ObjectPath::from("archive/events/a.jsonl"))
+            .await
+            .expect("uploaded")
+            .bytes()
+            .await
+            .expect("bytes");
+        assert_eq!(object.as_ref(), b"one\ntwo\n");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
+        assert_eq!(
+            std::fs::read_dir(staging.dir()).expect("dir").count(),
+            0,
+            "the local copy is removed once the store holds the file"
+        );
+    }
+
+    /// A key the store would refuse is refused before any record is staged.
+    #[tokio::test]
+    async fn a_key_past_the_store_limit_is_refused_at_create() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+        let long = format!("events/{}.jsonl", "k".repeat(MAX_OBJECT_KEY_BYTES));
+
+        let err = backend.create(&long).await.expect_err("too long");
+        assert!(err.is_refused(), "{err:?}");
+        assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// An abandoned file leaves no local copy and no staged bytes behind.
+    #[tokio::test]
+    async fn an_aborted_file_is_removed_from_staging() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+
+        backend.create("events/b.jsonl").await.expect("create");
+        backend
+            .append("events/b.jsonl", b"gone\n")
+            .await
+            .expect("append");
+        backend.abort("events/b.jsonl").await;
+
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
+        assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// Files a previous process left staged were never committed, so opening
+    /// the staging area clears them instead of uploading duplicates.
+    #[test]
+    fn opening_staging_clears_what_a_previous_process_left() {
+        let dir = TempDir::new().expect("create temp dir");
+        let uploads = dir.path().join("uploads");
+        std::fs::create_dir_all(&uploads).expect("dir");
+        std::fs::write(uploads.join("41-0.part"), b"stale").expect("stale file");
+
+        let staging = Staging::open(&uploads).expect("staging");
+        assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// Only a refusal the store gives for the object itself is permanent.
+    /// Everything else, including credentials and missing buckets, retries.
+    #[test]
+    fn only_an_object_level_refusal_is_permanent() {
+        #[derive(Debug)]
+        struct Response(&'static str);
+        impl std::fmt::Display for Response {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Response {}
+        let generic = |body: &'static str| object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(Response(body)),
+        };
+
+        assert!(refused_for_good(&generic(
+            "Server returned non-2xx status code: 400 Bad Request: <Code>KeyTooLongError</Code>"
+        )));
+        assert!(refused_for_good(&object_store::Error::InvalidPath {
+            source: object_store::path::Error::EmptySegment {
+                path: "a//b".to_string(),
+            },
+        }));
+        assert!(!refused_for_good(&generic(
+            "Server returned non-2xx status code: 503 Service Unavailable"
+        )));
+        assert!(!refused_for_good(&object_store::Error::NotFound {
+            path: "bucket".to_string(),
+            source: Box::new(Response("NoSuchBucket")),
+        }));
+        assert!(!refused_for_good(&object_store::Error::PermissionDenied {
+            path: "key".to_string(),
+            source: Box::new(Response("AccessDenied")),
+        }));
+    }
+
     #[test]
     fn test_create_backend_file_url() {
+        let (_dir, staging) = staging();
         let config = ArchiveConfig {
             destination: "file:///tmp/test-archive".to_string(),
             ..Default::default()
         };
-        let backend = create_backend(&config).expect("create file backend");
+        let backend = create_backend(&config, &staging).expect("create file backend");
         assert_eq!(backend.name(), "file");
     }
 
     #[test]
     fn test_create_backend_bare_path_falls_back_to_file() {
+        let (_dir, staging) = staging();
         let config = ArchiveConfig {
             destination: "/tmp/bare-path".to_string(),
             ..Default::default()
         };
-        let backend = create_backend(&config).expect("bare path -> file backend");
+        let backend = create_backend(&config, &staging).expect("bare path -> file backend");
         assert_eq!(backend.name(), "file");
     }
 
     #[test]
     fn test_create_backend_minio_requires_config() {
+        let (_dir, staging) = staging();
         let config = ArchiveConfig {
             destination: "minio://bucket/prefix".to_string(),
             minio: None,
             ..Default::default()
         };
-        let result = create_backend(&config);
+        let result = create_backend(&config, &staging);
         assert!(result.is_err(), "minio:// without config should fail");
     }
 
@@ -852,7 +1268,8 @@ mod tests {
         };
         assert_eq!(config.backend_name(), "gcs", "backend_name claims gcs");
 
-        match create_backend(&config) {
+        let (_dir, staging) = staging();
+        match create_backend(&config, &staging) {
             // No GCS credentials here, so a client build error is acceptable.
             Err(_) => {}
             Ok(backend) => assert_eq!(
@@ -880,7 +1297,8 @@ mod tests {
             use_emulator: true,
             endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
         };
-        let err = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024)
+        let (_dir, staging) = staging();
+        let err = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging)
             .err()
             .expect("use_emulator with an endpoint and no credential must be rejected");
         let message = err.to_string();
@@ -904,8 +1322,10 @@ mod tests {
             use_emulator: true,
             endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
         };
-        let backend = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024)
-            .expect("emulator behind an explicit endpoint with a key must build");
+        let (_dir, staging) = staging();
+        let backend =
+            ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging)
+                .expect("emulator behind an explicit endpoint with a key must build");
         assert_eq!(backend.name(), "azure");
     }
 
@@ -916,13 +1336,14 @@ mod tests {
     /// stay valid.
     #[test]
     fn test_create_backend_rejects_unknown_url_scheme() {
+        let (_dir, staging) = staging();
         for dest in ["S3://upper-bucket", "blob://bucket/x", "http://host/path"] {
             let config = ArchiveConfig {
                 destination: dest.to_string(),
                 ..Default::default()
             };
             assert!(
-                create_backend(&config).is_err(),
+                create_backend(&config, &staging).is_err(),
                 "unsupported scheme '{dest}' must be rejected, not written to local disk"
             );
         }

@@ -9,6 +9,6 @@
 mod writer;
 
 pub use writer::{
-    ArchiveWriter, CloseStats, FlushStats, PATH_TEMPLATE_PLACEHOLDERS, RollingPolicy, Settled,
-    unknown_placeholders,
+    ArchiveWriter, CloseStats, FlushStats, PATH_TEMPLATE_PLACEHOLDERS, PendingFile, RollingPolicy,
+    Settled, unknown_placeholders,
 };

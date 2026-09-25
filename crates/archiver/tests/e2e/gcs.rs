@@ -46,6 +46,7 @@ use dfe_archiver::storage::StorageBackend;
 /// and the three operations that are not multipart.
 #[tokio::test]
 async fn test_gcs_read_list_and_delete() {
+    let (_staging_dir, staging) = common::staging();
     let Some(gcs) = common::acquire_gcs("test_gcs_read_list_and_delete", "archive-test").await
     else {
         return; // reason printed by acquire_gcs, and a hard failure in CI
@@ -56,8 +57,9 @@ async fn test_gcs_read_list_and_delete() {
     }
 
     let prefix = format!("test-read-{}", std::process::id());
-    let backend = ObjectStoreBackend::new_gcs(&gcs.config, prefix.clone(), 8 * 1024 * 1024)
-        .expect("create GCS backend");
+    let backend =
+        ObjectStoreBackend::new_gcs(&gcs.config, prefix.clone(), 8 * 1024 * 1024, &staging)
+            .expect("create GCS backend");
 
     // Seed three objects under the prefix and one outside it, so list_prefix has
     // something to exclude as well as something to find.
@@ -126,6 +128,7 @@ async fn test_gcs_read_list_and_delete() {
 /// `name()` alone would pass on a backend wired to nothing.
 #[tokio::test]
 async fn test_create_backend_gcs_url() {
+    let (_staging_dir, staging) = common::staging();
     let Some(gcs) = common::acquire_gcs("test_create_backend_gcs_url", "archive-test").await else {
         return;
     };
@@ -137,7 +140,7 @@ async fn test_create_backend_gcs_url() {
         ..Default::default()
     };
 
-    let backend = create_backend(&archive_config).expect("create backend");
+    let backend = create_backend(&archive_config, &staging).expect("create backend");
     assert_eq!(backend.name(), "gcs");
 
     if !gcs.manages_container() {
@@ -157,6 +160,7 @@ async fn test_create_backend_gcs_url() {
 #[tokio::test]
 #[ignore = "write path needs GCS credentials: object_store uses the XML multipart API and fake-gcs-server does not implement it"]
 async fn test_gcs_basic_operations() {
+    let (_staging_dir, staging) = common::staging();
     let Some(gcs) = common::acquire_gcs("test_gcs_basic_operations", "archive-test").await else {
         return;
     };
@@ -164,9 +168,13 @@ async fn test_gcs_basic_operations() {
         return; // the emulator cannot serve GCS multipart; reason printed
     }
 
-    let backend =
-        ObjectStoreBackend::new_gcs(&gcs.config, "test-basic".to_string(), 8 * 1024 * 1024)
-            .expect("create GCS backend");
+    let backend = ObjectStoreBackend::new_gcs(
+        &gcs.config,
+        "test-basic".to_string(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create GCS backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -176,7 +184,7 @@ async fn test_gcs_basic_operations() {
         .await
         .expect("append 1");
     backend.append(&test_path, b"GCS!").await.expect("append 2");
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -188,6 +196,7 @@ async fn test_gcs_basic_operations() {
 #[tokio::test]
 #[ignore = "write path needs GCS credentials: object_store uses the XML multipart API and fake-gcs-server does not implement it"]
 async fn test_gcs_multipart_large_file() {
+    let (_staging_dir, staging) = common::staging();
     let Some(gcs) = common::acquire_gcs("test_gcs_multipart_large_file", "archive-test").await
     else {
         return;
@@ -196,9 +205,13 @@ async fn test_gcs_multipart_large_file() {
         return;
     }
 
-    let backend =
-        ObjectStoreBackend::new_gcs(&gcs.config, "test-multipart".to_string(), 5 * 1024 * 1024)
-            .expect("create GCS backend");
+    let backend = ObjectStoreBackend::new_gcs(
+        &gcs.config,
+        "test-multipart".to_string(),
+        5 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create GCS backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -209,7 +222,7 @@ async fn test_gcs_multipart_large_file() {
         backend.append(&test_path, &chunk).await.expect("append");
     }
 
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -231,6 +244,7 @@ async fn test_gcs_multipart_large_file() {
 async fn test_gcs_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     let Some(gcs) = common::acquire_gcs("test_gcs_archive_roundtrip", "archive-test").await else {
         return;
@@ -253,7 +267,7 @@ async fn test_gcs_archive_roundtrip() {
     };
 
     let compressor = create_compressor("zstd", 3).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -263,11 +277,16 @@ async fn test_gcs_archive_roundtrip() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
     // A clean close proves nothing if nothing reads the object back.
-    let verify =
-        ObjectStoreBackend::new_gcs(&gcs.config, "test-archive".to_string(), 8 * 1024 * 1024)
-            .expect("create verify backend");
+    let verify = ObjectStoreBackend::new_gcs(
+        &gcs.config,
+        "test-archive".to_string(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create verify backend");
     let objects = verify
         .list_prefix("data/", None)
         .await
@@ -284,6 +303,7 @@ async fn test_gcs_archive_roundtrip() {
 async fn test_gcs_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     let Some(gcs) = common::acquire_gcs("test_gcs_rolling_by_size", "archive-test").await else {
         return;
@@ -308,7 +328,7 @@ async fn test_gcs_rolling_by_size() {
     };
 
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -322,9 +342,10 @@ async fn test_gcs_rolling_by_size() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
     let verify_backend =
-        ObjectStoreBackend::new_gcs(&gcs.config, test_prefix.clone(), 8 * 1024 * 1024)
+        ObjectStoreBackend::new_gcs(&gcs.config, test_prefix.clone(), 8 * 1024 * 1024, &staging)
             .expect("create verify backend");
 
     let objects = verify_backend

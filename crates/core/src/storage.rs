@@ -9,23 +9,65 @@
 use crate::Result;
 use async_trait::async_trait;
 
+/// A completed file on local disk, waiting to reach the store.
+#[async_trait]
+pub trait PendingUpload: Send + Sync {
+    /// The file's path under the destination.
+    fn path(&self) -> &str;
+
+    /// The file's size in bytes.
+    fn size(&self) -> u64;
+
+    /// Upload the whole file once, removing the local copy once the store
+    /// holds it. Safe to call again after an error.
+    async fn attempt(&self) -> Result<()>;
+
+    /// Give the file up and remove the local copy.
+    async fn discard(&self);
+}
+
+/// Where a closed file stands.
+pub enum Closed {
+    /// Durable where it was written: its records are archived.
+    Durable,
+    /// Complete on local disk, and archived once an upload attempt succeeds.
+    Pending(Box<dyn PendingUpload>),
+}
+
+impl std::fmt::Debug for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Durable => f.write_str("Durable"),
+            Self::Pending(upload) => f
+                .debug_struct("Pending")
+                .field("path", &upload.path())
+                .field("size", &upload.size())
+                .finish(),
+        }
+    }
+}
+
 /// Storage backend trait
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// Create a new file/object, refusing a path that already holds one.
+    /// Create a new file/object.
     ///
-    /// An object store only finds completed objects, so an upload another
-    /// writer has in progress on the same path is not refused: keeping two
-    /// writers' paths apart is the caller's job.
+    /// A local file refuses a path that already holds one. An object is
+    /// staged on local disk and never checked against the store, so keeping
+    /// two writers' paths apart is the caller's job.
     async fn create(&self, path: &str) -> Result<()>;
 
     /// Append data to existing file/object
     async fn append(&self, path: &str, data: &[u8]) -> Result<()>;
 
-    /// Complete the file/object so it survives a crash of the process or the
-    /// node: the offsets of the records it holds are released once this
-    /// returns `Ok`.
-    async fn close(&self, path: &str) -> Result<()>;
+    /// Complete the file: [`Closed::Durable`] once it survives a crash of the
+    /// process or the node, [`Closed::Pending`] when it still has to reach
+    /// the store. A record's offset is released only once its file is durable
+    /// in the store.
+    async fn close(&self, path: &str) -> Result<Closed>;
+
+    /// Give up a file whose write failed, removing what it left behind.
+    async fn abort(&self, _path: &str) {}
 
     /// Check if path exists
     async fn exists(&self, path: &str) -> Result<bool>;
@@ -75,8 +117,8 @@ mod tests {
         async fn append(&self, _path: &str, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn close(&self, _path: &str) -> Result<()> {
-            Ok(())
+        async fn close(&self, _path: &str) -> Result<Closed> {
+            Ok(Closed::Durable)
         }
         async fn exists(&self, _path: &str) -> Result<bool> {
             Ok(false)
@@ -103,8 +145,8 @@ mod tests {
         async fn append(&self, _path: &str, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn close(&self, _path: &str) -> Result<()> {
-            Ok(())
+        async fn close(&self, _path: &str) -> Result<Closed> {
+            Ok(Closed::Durable)
         }
         async fn exists(&self, _path: &str) -> Result<bool> {
             Ok(false)

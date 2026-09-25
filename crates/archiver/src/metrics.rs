@@ -77,10 +77,7 @@ impl ArchiverMetrics {
             "messages_received_total",
             "Total messages received from Kafka",
         );
-        let _ = manager.counter(
-            "messages_archived_total",
-            "Total messages successfully archived",
-        );
+        Self::register_delivery(manager);
         let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
         let _ = manager.counter("files_created_total", "Total archive files created");
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
@@ -164,7 +161,32 @@ impl ArchiverMetrics {
         }
     }
 
-    // ── Layer 1: ServiceMetrics pass-throughs ────────────────────────
+    /// Register how records end: written, confirmed or dropped, and the uploads
+    /// still between written and confirmed.
+    fn register_delivery(manager: &MetricsManager) {
+        let _ = manager.counter(
+            "messages_archived_total",
+            "Records in archive files the store confirmed",
+        );
+        let _ = manager.counter(
+            "messages_written_total",
+            "Records written into an open archive file, before the store confirms it",
+        );
+        let _ = manager.counter(
+            "messages_dropped_total",
+            "Records dropped because the store refused their object for good",
+        );
+        let _ = manager.gauge(
+            "uploads_pending",
+            "Archive files staged locally and not yet confirmed by the store",
+        );
+        let _ = manager.gauge(
+            "staged_bytes",
+            "Bytes of archive files staged locally and not yet uploaded",
+        );
+    }
+
+    // -- Layer 1: ServiceMetrics pass-throughs ------------------------
 
     /// Record messages received (dual-emit: archiver + `ServiceMetrics`)
     ///
@@ -196,7 +218,9 @@ impl ArchiverMetrics {
         *last = Instant::now();
     }
 
-    /// Record messages archived (dual-emit: archiver + `ServiceMetrics`)
+    /// Record records whose archive file the store confirmed (dual-emit:
+    /// archiver + `ServiceMetrics`). Counted at confirmation, not when the
+    /// record is written into an open file that may never land.
     pub fn record_archived(&self, count: u64) {
         counter!("messages_archived_total").increment(count);
         if let Some(ref app) = self.app {
@@ -207,6 +231,11 @@ impl ArchiverMetrics {
         }
     }
 
+    /// Record records written into an open archive file.
+    pub fn record_written(&self, count: u64) {
+        counter!("messages_written_total").increment(count);
+    }
+
     /// Record messages sent to DLQ
     pub fn record_dlq(&self, count: u64) {
         counter!("messages_dlq_total").increment(count);
@@ -215,7 +244,18 @@ impl ArchiverMetrics {
         }
     }
 
-    // ── Layer 3: Archiver-specific ───────────────────────────────────
+    /// Record records dropped because the store refused their object for good.
+    pub fn record_dropped(&self, count: u64) {
+        counter!("messages_dropped_total").increment(count);
+    }
+
+    /// Publish the files waiting for their upload and the bytes they stage.
+    pub fn set_uploads(&self, pending: usize, staged_bytes: u64) {
+        gauge!("uploads_pending").set(pending as f64);
+        gauge!("staged_bytes").set(staged_bytes as f64);
+    }
+
+    // -- Layer 3: Archiver-specific -----------------------------------
 
     /// Record archive files created.
     ///
@@ -453,7 +493,7 @@ impl ArchiverMetrics {
 ///
 /// The `ServiceRuntime` already installs the global Prometheus recorder and
 /// starts the metrics HTTP server. This function only registers app-specific
-/// counters/gauges/histograms on that manager — no duplicate recorder.
+/// counters/gauges/histograms on that manager -- no duplicate recorder.
 pub fn init_metrics(manager: &mut MetricsManager, commit: &str) -> Arc<ArchiverMetrics> {
     let metrics = ArchiverMetrics::register(manager, commit);
 

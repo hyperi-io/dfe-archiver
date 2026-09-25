@@ -42,6 +42,15 @@ pub enum Error {
         source: Option<BoxSource>,
     },
 
+    /// The store refused this object for good: retrying the same object gets
+    /// the same answer, so its records are dropped rather than retried.
+    #[error("refused by the store: {message}")]
+    Refused {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
+
     /// Already exists (file create was overwriting)
     #[error("already exists: {path}")]
     AlreadyExists { path: String },
@@ -69,6 +78,13 @@ pub enum Error {
     /// Runtime error
     #[error("runtime error: {0}")]
     Runtime(String),
+
+    /// Records neither archived nor dead-lettered hold the commit below them,
+    /// and only a restart or rebalance reads them again.
+    #[error(
+        "{records} records were neither archived nor dead-lettered and hold the commit below them"
+    )]
+    Withheld { records: u64 },
 
     /// Shutdown requested
     #[error("shutdown requested")]
@@ -107,6 +123,28 @@ impl Error {
             source: Some(source.into()),
         }
     }
+
+    /// Construct a refusal without an underlying source.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::Refused {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Construct a refusal wrapping the underlying error chain.
+    pub fn refused_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Refused {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Whether the store refused the object for good.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Self::Refused { .. })
+    }
 }
 
 /// Error category for retry/DLQ decisions
@@ -129,11 +167,15 @@ impl Error {
             Self::Transport { .. }
             | Self::Storage { .. }
             | Self::Runtime(_)
+            | Self::Withheld { .. }
             | Self::AlreadyExists { .. }
             | Self::BufferOverflow { .. } => ErrorCategory::Transient,
 
             // Data - DLQ
-            Self::Serialization(_) | Self::Routing(_) | Self::Compression(_) => ErrorCategory::Data,
+            Self::Serialization(_)
+            | Self::Routing(_)
+            | Self::Compression(_)
+            | Self::Refused { .. } => ErrorCategory::Data,
 
             // Fatal - fail
             Self::Config(_) | Self::Shutdown => ErrorCategory::Fatal,
@@ -181,6 +223,12 @@ mod tests {
             message: "exceeded 64MB".to_string(),
         };
         assert_eq!(format!("{e}"), "buffer overflow: exceeded 64MB");
+
+        let e = Error::Withheld { records: 20 };
+        assert_eq!(
+            format!("{e}"),
+            "20 records were neither archived nor dead-lettered and hold the commit below them"
+        );
     }
 
     #[test]
@@ -195,6 +243,10 @@ mod tests {
         );
         assert_eq!(
             Error::Runtime("panic".into()).category(),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            Error::Withheld { records: 1 }.category(),
             ErrorCategory::Transient
         );
         assert_eq!(
@@ -213,6 +265,12 @@ mod tests {
             Error::Compression("corrupt".into()).category(),
             ErrorCategory::Data
         );
+        assert_eq!(
+            Error::refused("key too long").category(),
+            ErrorCategory::Data
+        );
+        assert!(Error::refused("key too long").is_refused());
+        assert!(!Error::storage("503").is_refused());
 
         assert_eq!(
             Error::Config("missing".into()).category(),

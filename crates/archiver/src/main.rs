@@ -262,27 +262,35 @@ impl ServiceApp for App {
         archiver.metrics().set_pipeline_ready(true);
         info!("dfe-archiver ready");
 
-        // Spawn main loop
-        let run_handle = tokio::spawn(async move {
-            if let Err(e) = archiver_run.run().await {
-                tracing::error!(error = %e, "Archiver run failed");
+        let mut run_handle = tokio::spawn(async move { archiver_run.run().await });
+
+        // A loop that ends without a signal cannot go on, so the process exits
+        // with its error and the restart reads again from the committed offsets.
+        let stopped = tokio::select! {
+            () = shutdown_token.cancelled() => {
+                info!("Shutdown signal received");
+                // The loop must have stopped before the drain receives from the source.
+                archiver.shutdown();
+                run_handle.await
             }
-        });
-
-        // Wait for shutdown signal
-        shutdown_token.cancelled().await;
-        info!("Shutdown signal received");
-
-        // The loop must have stopped before the drain receives from the source.
-        archiver.shutdown();
-        if let Err(e) = run_handle.await {
-            tracing::error!(error = %e, "Archiver loop did not finish cleanly");
-        }
+            finished = &mut run_handle => finished,
+        };
+        let failure = match stopped {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Archiver run failed");
+                Some(e.to_string())
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Archiver loop did not finish cleanly");
+                Some(e.to_string())
+            }
+        };
         archiver.drain().await;
 
         info!("Shutdown complete");
 
-        Ok(())
+        failure.map_or(Ok(()), |reason| Err(CliError::Service(reason)))
     }
 
     fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {

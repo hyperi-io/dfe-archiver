@@ -204,7 +204,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
                     │  ┌────────────────────────────────────────────────┐     │
                     │  │ Rolling Policy                                 │     │
                     │  │ - By final compressed file size (1GB default)  │     │
-                    │  │ - By time (1 hour default)                     │     │
+                    │  │ - By time (default 300 s or 1 hour)            │     │
                     │  └────────────────────────────────────────────────┘     │
                     │                                                          │
                     └─────────────────────────▼───────────────────────────────┘
@@ -354,7 +354,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 
 ### Guarantee
 
-On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill or a failed file costs duplicates. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
+On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself drops records, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
 
 ### Implementation
 
@@ -363,16 +363,22 @@ On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a ki
 2. Buffer per destination
 3. Write each staged batch into the destination's open file, and hold its
    offsets on that file
-4. The file completes (roll, age close, eviction or shutdown)
-5. Release the file's offsets, and the consumer commits each partition up to
+4. The file closes (roll, age close, eviction or shutdown): a local file is
+   synced, an object-store file is handed to an upload task
+5. The upload task retries until the store takes the file
+6. Release the file's offsets, and the consumer commits each partition up to
    its lowest offset not yet released
 ```
 
-A record is durable only when its file completes: until then the multipart upload is in progress, and a crash abandons it. On a local path completion syncs the file, and every directory above it up to the destination, to disk. So step 5 waits for step 4, which comes at the roll -- `roll_size_bytes` or `roll_interval_secs`.
+An object-store file is written to local staging, `<buffer.spool_dir>/uploads`, and uploaded whole once it closes. The loop never waits on the store: step 5 runs in a background task, which the loop collects each cycle. A failed upload keeps the staged file and its held offsets and retries with exponential backoff and jitter, from 0.5 s up to 60 s between attempts. Every attempt is a fresh multipart upload from the staged copy, so it signs its requests afresh however long the store has been down. On a local path, step 4 syncs the file, and every directory above it up to the destination, to disk.
 
-Holding costs memory for as long as a file is open: about 32 bytes a record, scalo's offset tracking plus the writer's own eight. At 10k records/s that is 96 MB over a 300 s roll and 1.15 GB over an hour. So while offsets are held an unset `roll_interval_secs` defaults to 300 rather than 3600. A configured value always wins, and one above 900 logs a startup warning with the cost.
+Holding costs memory for as long as a file is not durable: about 32 bytes a record, scalo's offset tracking plus the writer's own eight. At 10k records/s that is 96 MB over a 300 s roll and 1.15 GB over an hour. So while offsets are held an unset `roll_interval_secs` defaults to 300 rather than 3600. A configured value always wins, and one above 900 logs a startup warning with the cost.
 
-A batch no file takes goes to the DLQ through scalo's confirming write. Only a write the DLQ confirms releases the batch's offsets. One the DLQ refuses, or any with the DLQ off, is released `Errored`: its offsets stay held, and no later commit passes them until a restart reads the records again. Offsets of a file whose completion fails are released `Errored` too.
+While uploads fail, held records and staged files grow, so both are pressure sources on the self-regulation latch that pauses the Kafka partitions. Held records read against a quarter of the memory limit at 32 bytes each, staged bytes against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit. Both pause at the latch's `pause_above` (0.8 by default), so a store outage turns into consumer lag rather than memory or disk growth. With self-regulation off nothing pauses, and the archiver logs that at startup.
+
+Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. Its records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
+
+A batch no file takes goes to the DLQ through scalo's confirming write. Only a write the DLQ confirms releases the batch's offsets. When the DLQ refuses it or is off, a batch the store refused for good is released `Dropped` with its reason. Any other -- a local disk failure -- is released `Errored`, as are the offsets of a file whose local write or sync failed. Nothing reads an `Errored` span again short of a restart or rebalance, and scalo's consumer has no seek back to the commit floor, so the loop ends with `Error::Withheld`: the process drains, exits non-zero, and the restart reads again from the committed offset.
 
 `kafka.acknowledgements.enabled: false` commits each batch at receipt instead.
 
@@ -380,19 +386,20 @@ A batch no file takes goes to the DLQ through scalo's confirming write. Only a w
 
 | Failure Point | Outcome | Data Status |
 |---------------|---------|-------------|
-| Before the file completes | Restart re-reads every record the file held | Duplicates, up to one roll interval |
-| File completion fails | Offsets released `Errored`, held until restart | Duplicates |
+| Before the file is durable | Restart re-reads every record the file held, and clears the staged files | Duplicates, up to one roll interval plus pending uploads |
+| Upload fails | File and offsets kept, upload retried, intake paused near the caps | Delayed, never lost |
+| Store refuses the object for good | Offsets released `Dropped`, counted, reason logged | Dropped |
+| Local write or sync fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | Write fails, DLQ confirms | Offsets released | Record is in the DLQ |
-| Write fails, DLQ refuses or is off | Offsets held until restart | Duplicates |
 | After the commit | Clean | Archived once |
 
 ### Shutdown
 
-The run loop stops first. The drain then closes the source -- the Push listener stops answering, the Kafka consumer stops fetching and can still commit -- and receives until the source reports it is empty, so every push already answered is written. Buffers flush into their files, evicted writers finish closing, every open file completes, and the released offsets commit.
+The run loop stops first. The drain then closes the source -- the Push listener stops answering, the Kafka consumer stops fetching and can still commit -- and receives until the source reports it is empty, so every push already answered is written. Buffers flush into their files, evicted writers finish closing, every open file completes, and the uploads get 20 s. A file still uploading then keeps its offsets unreleased, to be read again after the restart.
 
 ### Object keys
 
-Every file name ends `-<seq>-<writer id>`. The object-store create only checks for a completed object, and an upload in progress is not one, so two writers on the same destination and window -- two replicas, or an evicted writer still closing beside its replacement -- would otherwise pick the same key, and the later completion would replace the earlier object.
+Every file name ends `-<seq>-<writer id>`. A staged file is never checked against the store, so two writers on the same destination and window -- two replicas, or an evicted writer still closing beside its replacement -- would otherwise pick the same key, and the later upload would replace the earlier object.
 
 ---
 
@@ -584,10 +591,7 @@ A file is synced to disk, with the directories above it, before its offsets are 
 
 ### AWS S3
 
-All cloud backends use `ObjectStoreBackend` with streaming multipart uploads via
-the `object_store` crate's `WriteMultipart`. Data is uploaded in configurable
-chunk sizes (default 8MB), keeping memory usage bounded to ~chunk_size per active
-file rather than buffering the entire file in memory.
+All cloud backends use `ObjectStoreBackend`, which writes each file to local staging and uploads it whole once it closes, as a multipart upload via the `object_store` crate's `WriteMultipart`. Parts are `multipart_chunk_size` (default 8MB), four in flight per upload and two uploads at once, so upload memory stays near 64 MB whatever the file size.
 
 Credentials are resolved via `AmazonS3Builder::from_env()`, then config-level
 overrides are applied on top. This means standard AWS environment variables and
@@ -796,7 +800,9 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | Metric | Description |
 |--------|-------------|
 | `dfe_archiver_messages_received_total` | Messages received from Kafka |
-| `dfe_archiver_messages_archived_total` | Messages successfully archived |
+| `dfe_archiver_messages_archived_total` | Records in archive files the store confirmed |
+| `dfe_archiver_messages_written_total` | Records written into an open archive file, before the store confirms it |
+| `dfe_archiver_messages_dropped_total` | Records dropped because the store refused their object for good |
 | `dfe_archiver_messages_dlq_total` | Messages sent to DLQ |
 | `dfe_archiver_bytes_written_total` | Uncompressed bytes written |
 | `dfe_archiver_bytes_compressed_total` | Compressed bytes written |
@@ -817,6 +823,8 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_hot_buffers_active` | Active hot buffers |
 | `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
 | `dfe_archiver_spool_bytes` | Current spool size |
+| `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
+| `dfe_archiver_staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
 
 ### Histograms
 

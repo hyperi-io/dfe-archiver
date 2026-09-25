@@ -117,6 +117,15 @@ impl SourceTransport {
         }
     }
 
+    /// Records handed out and not yet released: zero unless offsets are held.
+    #[must_use]
+    pub fn held_records(&self) -> u64 {
+        match self {
+            Self::Bus(a) => a.held_records(),
+            Self::Direct(_) => 0,
+        }
+    }
+
     /// The delivery guarantee of the pipeline from this source into a sink
     /// that confirms as `sink` does.
     #[must_use]
