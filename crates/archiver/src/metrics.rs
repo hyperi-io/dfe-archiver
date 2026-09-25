@@ -84,10 +84,6 @@ impl ArchiverMetrics {
         let _ = manager.counter("messages_dlq_total", "Total messages sent to DLQ");
         let _ = manager.counter("files_created_total", "Total archive files created");
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
-        let _ = manager.counter(
-            "bytes_written_total",
-            "Total bytes written (uncompressed input)",
-        );
         let _ = manager.counter("flush_operations_total", "Total flush operations");
         let _ = manager.counter("archive_errors_total", "Total archive errors");
         let _ = manager.counter(
@@ -165,13 +161,12 @@ impl ArchiverMetrics {
 
     /// Record messages received (dual-emit: archiver + `ServiceMetrics`)
     ///
-    /// Also feeds the EPS rate calculator.
+    /// Also feeds the EPS rate calculator. `records_received_total` is counted
+    /// through `ServiceMetrics` alone: the app group's handle names the same
+    /// series.
     pub fn record_received(&self, count: u64) {
         counter!("messages_received_total").increment(count);
         self.eps_counter.fetch_add(count, Ordering::Relaxed);
-        if let Some(ref app) = self.app {
-            app.record_received(count);
-        }
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(count);
         }
@@ -241,9 +236,9 @@ impl ArchiverMetrics {
         counter!("writer_evictions_total").increment(1);
     }
 
-    /// Record bytes written (uncompressed input to writer)
+    /// Record bytes written (uncompressed input to writer), in the app group's
+    /// `bytes_written_total`.
     pub fn record_bytes_written(&self, bytes: u64) {
-        counter!("bytes_written_total").increment(bytes);
         if let Some(ref app) = self.app {
             app.record_bytes_written(bytes);
         }
@@ -459,6 +454,110 @@ pub fn init_metrics(manager: &mut MetricsManager, commit: &str) -> Arc<ArchiverM
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Counts one named counter across every label set, as a `sum()` over the
+    /// name reads it.
+    struct CountingRecorder {
+        name: &'static str,
+        hits: Arc<AtomicU64>,
+    }
+
+    struct CountingHandle(Arc<AtomicU64>);
+
+    impl metrics::CounterFn for CountingHandle {
+        fn increment(&self, value: u64) {
+            self.0.fetch_add(value, Ordering::Relaxed);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.0.store(value, Ordering::Relaxed);
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            if key.name() == self.name {
+                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
+            } else {
+                metrics::Counter::noop()
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Run `f` with a thread-local recorder counting `name`.
+    fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
+        let hits = Arc::new(AtomicU64::new(0));
+        let recorder = CountingRecorder {
+            name,
+            hits: Arc::clone(&hits),
+        };
+        metrics::with_local_recorder(&recorder, f);
+        hits.load(Ordering::Relaxed)
+    }
+
+    /// Registered metrics against a manager that installs no global recorder.
+    fn registered() -> ArchiverMetrics {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        ArchiverMetrics::register(&manager, "abc")
+    }
+
+    #[test]
+    fn received_messages_count_once_in_records_received_total() {
+        let hits = counted("records_received_total", || {
+            let m = registered();
+            m.record_received(3);
+            m.record_received(4);
+        });
+        assert_eq!(hits, 7, "seven messages received read as seven");
+    }
+
+    #[test]
+    fn bytes_written_count_once_in_bytes_written_total() {
+        let hits = counted("bytes_written_total", || {
+            registered().record_bytes_written(4096);
+        });
+        assert_eq!(hits, 4096, "4096 bytes written read as 4096");
+    }
 
     /// Verify `ArchiverMetrics::default()` doesn't panic (test-mode with no exporter)
     #[test]
