@@ -354,7 +354,7 @@ Archive Writers (8 concurrent, semaphore-controlled)
 
 ### Guarantee
 
-On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself, or a dead letter too large for any DLQ backend, drops records, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
+On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself drops records, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
 
 ### Implementation
 
@@ -378,9 +378,11 @@ While uploads fail, held records and staged files grow, so both are pressure sou
 
 Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. Its records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
 
-A batch no file takes goes to the DLQ through scalo's confirming write, and only a write the DLQ confirms releases the batch's offsets, `Rejected`. First `Dlq::refusal` measures the entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the batch. An entry no backend can ever hold is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same refusal. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
+A batch no file takes goes to the DLQ through scalo's confirming write, and only a write the DLQ confirms releases the batch's offsets, `Rejected`. First `Dlq::refusal` measures the entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the batch. When no backend can ever hold the entry and the store refused the batch for good, it is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same pair of refusals. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
 
-A DLQ write that fails can clear, so its batch is released `Errored`. With the DLQ off, a batch the store refused for good is released `Dropped` with its reason, and any other -- a local disk failure -- `Errored`, as are the offsets of a file whose local write or sync failed. Nothing reads an `Errored` span again short of a restart or rebalance, and scalo's consumer has no seek back to the commit floor, so the loop ends with `Error::Withheld`: the process drains, exits non-zero, and the restart reads again from the committed offset. Inbound-filter dead letters are screened and settled the same way.
+With the DLQ off, a batch the store refused for good is released `Dropped` with its reason. Every other batch is released `Errored`: a failed DLQ write can clear, and so can a local disk failure, whose staged files the restart clears. The offsets of a file whose local write or sync failed are `Errored` too. A disk that stays broken restarts the pod repeatedly, which is visible, rather than losing records. Nothing reads an `Errored` span again short of a restart or rebalance, and scalo's consumer has no seek back to the commit floor, so the loop ends with `Error::Withheld`: the process drains, exits non-zero, and the restart reads again from the committed offset.
+
+Inbound-filter dead letters are screened too. One no DLQ backend can hold is dropped and counted, because the filter routed it out of the archive by policy and no restart can land it. A failed DLQ write for the rest is `Errored`.
 
 `kafka.acknowledgements.enabled: false` commits each batch at receipt instead.
 
@@ -393,7 +395,8 @@ A DLQ write that fails can clear, so its batch is released `Errored`. With the D
 | Store refuses the object for good | Offsets released `Dropped`, counted, reason logged | Dropped |
 | Local write or sync fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | Write fails, DLQ confirms | Offsets released | Record is in the DLQ |
-| Write fails, no DLQ backend can hold the entry | Offsets released `Dropped`, counted, reason logged | Dropped |
+| Store refuses for good, no DLQ backend can hold the entry | Offsets released `Dropped`, counted, reason logged | Dropped |
+| Local write fails, no DLQ backend can hold the entry | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | Write fails, DLQ write fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | After the commit | Clean | Archived once |
 

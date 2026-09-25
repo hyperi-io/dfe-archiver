@@ -1482,8 +1482,8 @@ impl Archiver {
     /// Call once [`run`](Self::run) has returned. The source closes first, so
     /// the Push listener stops answering new pushes while every push it already
     /// answered is received and written. On Kafka the consumer stops fetching
-    /// and its commit still lands. Uploads get [`DRAIN_UPLOAD_LIMIT`]: a file
-    /// still uploading then keeps its records unreleased, to be read again.
+    /// and its commit still lands. Uploads get 20 s: a file still uploading
+    /// then keeps its records unreleased, to be read again.
     #[instrument(skip(self))]
     pub async fn drain(&self) {
         if let Err(e) = self.transport.close().await {
@@ -1588,11 +1588,11 @@ impl Archiver {
     }
 
     /// Dead-letter a batch no file took, and release its offsets: `Rejected`
-    /// once the DLQ confirms it holds the batch, and `Dropped` with the reason
-    /// when no DLQ backend can ever hold it. A DLQ write that can clear is
-    /// `Errored`, which ends the loop so a restart writes the batch again.
-    /// With the DLQ off, a batch the store refused for good is `Dropped` and
-    /// any other is `Errored`.
+    /// once the DLQ confirms it holds the batch. A batch the store refused for
+    /// good is `Dropped` with the reason when the DLQ is off or no DLQ backend
+    /// can ever hold it. Every other outcome is `Errored`, which ends the loop
+    /// so a restart writes the batch again: a local failure can clear, and so
+    /// can a failed DLQ write.
     async fn dead_letter(&self, batch: StagedBatch, error: &Error) {
         let StagedBatch {
             destination,
@@ -1615,15 +1615,26 @@ impl Archiver {
             )
             .with_destination(destination.as_str());
             if let Some(reason) = self.dlq.refusal(&entry) {
-                self.metrics.record_dropped(records);
-                error!(
-                    records,
-                    destination = %destination,
-                    reason = %reason,
-                    error = %error,
-                    "Dropped records no file took and the DLQ can never hold"
-                );
-                DeliveryStatus::Dropped
+                if error.is_refused() {
+                    self.metrics.record_dropped(records);
+                    error!(
+                        records,
+                        destination = %destination,
+                        reason = %reason,
+                        error = %error,
+                        "Dropped records the store refused for good and the DLQ can never hold"
+                    );
+                    DeliveryStatus::Dropped
+                } else {
+                    error!(
+                        records,
+                        destination = %destination,
+                        reason = %reason,
+                        error = %error,
+                        "The DLQ can never hold a batch that failed locally; a restart writes it again"
+                    );
+                    DeliveryStatus::Errored
+                }
             } else {
                 match self.dlq.write_confirmed(vec![entry]).await {
                     Ok(()) => {

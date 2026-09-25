@@ -609,11 +609,18 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
     );
 }
 
-/// A dead letter over every DLQ backend's ceiling can never land, so its
-/// records are dropped with the reason and counted, the commit moves past
-/// them, and the loop runs on instead of restarting into the same refusal.
+/// Under the 16 MiB record ceiling as a record, over every DLQ backend's
+/// ceiling as a dead letter once base64 grows the payload by a third.
+fn oversize_record(id: u64) -> Vec<u8> {
+    padded(id, 13_000_000)
+}
+
+/// A batch the store refused for good whose dead letter no DLQ backend can
+/// hold can never land, so its records are dropped with the reason and
+/// counted, the commit moves past them, and the loop runs on instead of
+/// restarting into the same refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_dead_letter_the_dlq_can_never_hold_is_dropped_and_the_loop_runs_on() {
+async fn a_refused_batch_no_dlq_can_hold_is_dropped_and_the_loop_runs_on() {
     init_logs();
     let Some(kafka) = common::acquire_kafka("dlq_never_holds").await else {
         return;
@@ -627,14 +634,13 @@ async fn a_dead_letter_the_dlq_can_never_hold_is_dropped_and_the_loop_runs_on() 
 
     let spool = tempfile::TempDir::new().expect("spool");
     let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    // Past the 1024-byte object key limit, so every file's key is refused.
+    config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
     dead_letter_to(&mut config, "dlq");
     let (manager, metrics) = metrics();
 
-    // Under the 16 MiB record ceiling as a record, over it as a dead letter
-    // once base64 grows the payload by a third.
-    kafka.produce("events", &[padded(0, 13_000_000)]).await;
+    kafka.produce("events", &[oversize_record(0)]).await;
     let archiver = archiver(&config, &metrics).await;
-    block_staging(spool.path());
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
         async move { archiver.run().await }
@@ -656,6 +662,82 @@ async fn a_dead_letter_the_dlq_can_never_hold_is_dropped_and_the_loop_runs_on() 
     assert_eq!(counter(&manager, "messages_dropped_total"), 1);
     assert_eq!(counter(&manager, "messages_dlq_total"), 0);
     assert_eq!(kafka.records_in("dlq"), 0, "nothing reached the DLQ topic");
+}
+
+/// A batch that failed on local disk is never dropped, even when no DLQ
+/// backend can hold its dead letter: the loop ends, nothing commits, and once
+/// the disk recovers the restart archives the record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_failure_no_dlq_can_hold_replays_and_lands_after_the_restart() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("local_failure_oversize").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("local_failure_oversize").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    config.archive.roll_interval_secs = Some(2);
+    dead_letter_to(&mut config, "dlq");
+    let (manager, metrics) = metrics();
+
+    kafka.produce("events", &[oversize_record(0)]).await;
+    let first = archiver(&config, &metrics).await;
+    block_staging(spool.path());
+    let running = tokio::spawn({
+        let first = Arc::clone(&first);
+        async move { first.run().await }
+    });
+    let ended = tokio::time::timeout(Duration::from_secs(45), running)
+        .await
+        .expect("the loop ran on past a batch it could neither write nor dead-letter")
+        .expect("loop task");
+    assert!(
+        matches!(ended, Err(dfe_archiver::Error::Withheld { records }) if records > 0),
+        "the loop must end with the withheld record, for main to exit non-zero: {ended:?}"
+    );
+    first.drain().await;
+    drop(first);
+    assert_eq!(
+        kafka.committed(GROUP, "events"),
+        None,
+        "the commit passed a record that failed locally"
+    );
+    assert_eq!(
+        counter(&manager, "messages_dropped_total"),
+        0,
+        "a local failure dropped a record"
+    );
+    assert_eq!(kafka.records_in("dlq"), 0, "nothing reached the DLQ topic");
+
+    // The restart, with local staging working again.
+    std::fs::remove_file(spool.path().join("uploads")).expect("unblock staging");
+    let second = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let second = Arc::clone(&second);
+        async move { second.run().await }
+    });
+    wait_until("the restart archived the record", || async {
+        counter(&manager, "messages_archived_total") >= 1
+    })
+    .await;
+    stop(&second, running).await;
+    assert_eq!(
+        ids(&minio.lines(BUCKET).await),
+        vec![0],
+        "the restart archives the record, once"
+    );
+    assert_eq!(
+        kafka.committed(GROUP, "events"),
+        Some(1),
+        "the commit follows once the record is archived"
+    );
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
 }
 
 /// While the governor holds intake the Push listener refuses every push as
