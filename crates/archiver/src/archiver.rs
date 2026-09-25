@@ -181,6 +181,7 @@ async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Set
         upload,
         offsets,
         records,
+        destination,
     } = file;
     let mut attempt: u32 = 0;
     loop {
@@ -200,8 +201,13 @@ async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Set
                     error = %e,
                     "The store refused an archive file for good; its records go to the DLQ"
                 );
-                return dead_letter_refused_file(upload.as_ref(), offsets, records, &e, &uploader)
-                    .await;
+                let refused = RefusedFile {
+                    upload: upload.as_ref(),
+                    records,
+                    destination: &destination,
+                    refusal: &e,
+                };
+                return dead_letter_refused_file(&refused, offsets, &uploader).await;
             }
             Err(e) if e.is_refused() => {
                 upload.discard().await;
@@ -236,59 +242,126 @@ async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Set
     }
 }
 
+/// The lines in `plain`, each ending in a newline but perhaps the last.
+fn line_count(plain: &[u8]) -> u64 {
+    plain.split_inclusive(|byte| *byte == b'\n').count() as u64
+}
+
+/// A staged file the store refused for good, and what it holds.
+struct RefusedFile<'a> {
+    upload: &'a dyn PendingUpload,
+    records: u64,
+    /// The routed destination its records were written for.
+    destination: &'a str,
+    refusal: &'a Error,
+}
+
+impl RefusedFile<'_> {
+    /// The decompressed `index`th block, `None` past the last.
+    async fn block(
+        &self,
+        index: usize,
+        compressor: &(dyn Compressor + Send + Sync),
+    ) -> Result<Option<Vec<u8>>> {
+        match self.upload.block(index).await? {
+            Some(block) => compressor.decompress(&block).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The lines across every block of the file.
+    async fn lines(&self, compressor: &(dyn Compressor + Send + Sync)) -> Result<u64> {
+        let mut lines: u64 = 0;
+        for index in 0.. {
+            let Some(plain) = self.block(index, compressor).await? else {
+                break;
+            };
+            lines += line_count(&plain);
+        }
+        Ok(lines)
+    }
+}
+
 /// Dead-letter the records of a staged file the store refused for good, read
-/// back block by block, one DLQ entry per line, since an archive file holds
-/// one record per line.
+/// back block by block, each block one flush decompressed on its own.
+///
+/// An archive file holds one record per line, so each line goes to the DLQ as
+/// its own entry. When the file holds more lines than records, a payload held
+/// a newline of its own, and each block goes whole as one entry instead, so no
+/// record is ever split across entries.
 ///
 /// The file's offsets are released `Rejected` once the DLQ confirms every
-/// record it can hold. A record no DLQ backend can hold is counted dropped,
-/// and the offsets are released `Dropped` only when nothing reached the DLQ.
-/// A file that cannot be read back, or a DLQ write that fails, is `Errored`,
-/// so a restart writes the records again.
+/// entry it can hold. An entry no DLQ backend can hold is counted dropped, by
+/// its lines, and the offsets are released `Dropped` only when nothing reached
+/// the DLQ. A file that cannot be read back, or a DLQ write that fails, is
+/// `Errored`, so a restart writes the records again.
 async fn dead_letter_refused_file(
-    upload: &dyn PendingUpload,
+    file: &RefusedFile<'_>,
     offsets: OffsetSet,
-    records: u64,
-    refusal: &Error,
     uploader: &Uploader,
 ) -> Settled {
-    let reason = format!("storage_write_failed: {refusal}");
+    let path = file.upload.path();
+    let compressor = uploader.compressor.as_ref();
+    let lines = match file.lines(compressor).await {
+        Ok(lines) if lines > 0 || file.records == 0 => lines,
+        Ok(_) => {
+            let empty = Error::storage("no record could be read back");
+            return settle_unreadable(offsets, path, &empty);
+        }
+        Err(e) => return settle_unreadable(offsets, path, &e),
+    };
+    let whole_blocks = lines != file.records;
+    let reason = if whole_blocks {
+        warn!(
+            path,
+            records = file.records,
+            lines,
+            "A refused file holds more lines than records: a payload held a newline of its own, so each block goes to the DLQ whole"
+        );
+        format!(
+            "storage_write_failed: {}; a record held a newline of its own, so this is a whole block of newline-joined records",
+            file.refusal
+        )
+    } else {
+        format!("storage_write_failed: {}", file.refusal)
+    };
+
     let mut written: u64 = 0;
     let mut too_large: u64 = 0;
     let mut too_large_reason = None;
     for index in 0.. {
-        let block = match upload.block(index).await {
-            Ok(Some(block)) => block,
+        let plain = match file.block(index, compressor).await {
+            Ok(Some(plain)) => plain,
             Ok(None) => break,
-            Err(e) => return settle_unreadable(offsets, upload.path(), &e),
+            Err(e) => return settle_unreadable(offsets, path, &e),
         };
-        let plain = match uploader.compressor.decompress(&block) {
-            Ok(plain) => plain,
-            Err(e) => return settle_unreadable(offsets, upload.path(), &e),
+        let entry = |payload: Vec<u8>, lines: u64| {
+            let entry = DlqEntry::new("dfe-archiver", reason.as_str(), payload)
+                .with_destination(file.destination);
+            (entry, lines)
         };
-        let entries = plain
-            .split_inclusive(|byte| *byte == b'\n')
-            .map(|line| {
-                let record = line.strip_suffix(b"\n").unwrap_or(line);
-                let entry = DlqEntry::new("dfe-archiver", reason.as_str(), record.to_vec())
-                    .with_destination(upload.path());
-                (entry, ())
-            })
-            .collect();
+        let entries = if whole_blocks {
+            let block_lines = line_count(&plain);
+            vec![entry(plain, block_lines)]
+        } else {
+            plain
+                .split_inclusive(|byte| *byte == b'\n')
+                .map(|line| entry(line.strip_suffix(b"\n").unwrap_or(line).to_vec(), 1))
+                .collect()
+        };
         let Screened { writable, refused } = screen_dead_letters(&uploader.dlq, entries);
-        if let Some((why, ())) = refused.first() {
+        if let Some((why, _)) = refused.first() {
             too_large_reason.get_or_insert_with(|| why.to_string());
         }
-        too_large += refused.len() as u64;
+        too_large += refused.iter().map(|(_, lines)| lines).sum::<u64>();
         if writable.is_empty() {
             continue;
         }
-        let count = writable.len() as u64;
-        let writable = writable.into_iter().map(|(entry, ())| entry).collect();
+        let (writable, counts): (Vec<DlqEntry>, Vec<u64>) = writable.into_iter().unzip();
         if let Err(dlq_err) = uploader.dlq.write_confirmed(writable).await {
             error!(
-                path = %upload.path(),
-                records,
+                path,
+                records = file.records,
                 error = %dlq_err,
                 "The DLQ could not take the records of a file the store refused; a restart writes them again"
             );
@@ -297,36 +370,23 @@ async fn dead_letter_refused_file(
                 ..Settled::default()
             };
         }
-        written += count;
+        written += counts.iter().sum::<u64>();
     }
 
-    let lines = written + too_large;
-    if lines == 0 && records > 0 {
-        return settle_unreadable(
-            offsets,
-            upload.path(),
-            &Error::storage("no record could be read back"),
-        );
-    }
-    if lines != records {
-        warn!(
-            path = %upload.path(),
-            records,
-            lines,
-            "A refused file holds more lines than records: a payload held a newline of its own, so it reached the DLQ in pieces"
-        );
-    }
-    upload.discard().await;
+    file.upload.discard().await;
+    // Lines stand in for records, and a whole block of them holds more lines than records.
+    let dropped = too_large.min(file.records);
     let mut settled = Settled::default();
     if let Some(why) = too_large_reason {
-        settled.dropped_records = too_large;
+        settled.dropped_records = dropped;
         settled.dropped_reason = Some(format!(
-            "{refusal}, and no DLQ backend can hold them: {why}"
+            "{}, and no DLQ backend can hold them: {why}",
+            file.refusal
         ));
     }
     if written > 0 {
         settled.rejected = offsets;
-        settled.rejected_records = written;
+        settled.rejected_records = file.records - dropped;
     } else {
         settled.dropped = offsets;
     }
@@ -1642,12 +1702,10 @@ impl Archiver {
 
         let storage = create_backend(&archive_config, &self.staging)?;
 
-        Ok(ArchiveWriter::new(
-            archive_config,
-            policy,
-            compressor,
-            storage,
-        ))
+        Ok(
+            ArchiveWriter::new(archive_config, policy, compressor, storage)
+                .with_destination(destination),
+        )
     }
 
     /// Request graceful shutdown
@@ -1986,17 +2044,20 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader, buffer_config,
-        held_record_cap, publish_kafka_lag, record_files_opened, record_rolls,
-        record_routing_fallbacks, restart_required_changes, screen_dead_letters, sink_confirmation,
-        upload_retry_delay, upload_slots, upload_until_settled,
+        RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader,
+        buffer_config, dead_letter_refused_file, held_record_cap, publish_kafka_lag,
+        record_files_opened, record_rolls, record_routing_fallbacks, restart_required_changes,
+        screen_dead_letters, sink_confirmation, upload_retry_delay, upload_slots,
+        upload_until_settled,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
+    use dfe_archiver_core::Error;
     use dfe_archiver_core::OffsetSet;
+    use dfe_archiver_core::archive::Settled;
     use dfe_archiver_core::archive::{ArchiveWriter, PendingFile, RollingPolicy};
     use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
-    use dfe_archiver_core::compression::compressor_for;
+    use dfe_archiver_core::compression::{Compressor, compressor_for};
     use dfe_archiver_core::config::{ArchiveConfig, CompressionConfig, Config, RoutingConfig};
     use dfe_archiver_core::routing::Router;
     use dfe_archiver_core::storage::PendingUpload;
@@ -2244,6 +2305,7 @@ mod tests {
                     }),
                     offsets: OffsetSet::default(),
                     records: 1,
+                    destination: "events".to_string(),
                 };
                 uploads.spawn(upload_until_settled(file, Arc::clone(&uploader)));
             }
@@ -2309,6 +2371,194 @@ mod tests {
                 .any(|line| line == "archiver_files_created_total 1"),
             "files_created_total did not move after a write:\n{rendered}"
         );
+    }
+
+    /// A staged file read back from compressed blocks, as its local copy is.
+    struct BlockUpload {
+        blocks: Vec<Vec<u8>>,
+        discarded: AtomicBool,
+    }
+
+    impl PendingUpload for BlockUpload {
+        fn path(&self) -> &'static str {
+            "events/2026/archive-0001-token.jsonl.zst"
+        }
+
+        fn size(&self) -> u64 {
+            0
+        }
+
+        fn attempt<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = dfe_archiver_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn block<'life0, 'async_trait>(
+            &'life0 self,
+            index: usize,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = dfe_archiver_core::Result<Option<Vec<u8>>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { Ok(self.blocks.get(index).cloned()) })
+        }
+
+        fn discard<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.discarded.store(true, Ordering::SeqCst) })
+        }
+    }
+
+    /// Dead-letter a refused file of `records` records in plain `blocks`
+    /// through a file DLQ, and return what it settled and the entries the DLQ
+    /// holds.
+    async fn dead_letter_blocks(blocks: &[&[u8]], records: u64) -> (Settled, Vec<DlqEntry>, bool) {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = Arc::new(ArchiverMetrics::register(&manager, "test"));
+        let dir = tempfile::TempDir::new().expect("dlq dir");
+        let config = DlqConfig {
+            mode: DlqMode::FileOnly,
+            file: FileDlqConfig {
+                enabled: true,
+                path: dir.path().to_path_buf(),
+                compress_rotated: false,
+                ..FileDlqConfig::default()
+            },
+            flush_interval_ms: 20,
+            ..DlqConfig::default()
+        };
+        let dlq = Arc::new(
+            Dlq::spawn(&config, "dfe-archiver", None, CancellationToken::new()).expect("dlq"),
+        );
+        let compressor: Arc<dyn Compressor + Send + Sync> =
+            Arc::from(compressor_for(&CompressionConfig::default()).expect("compressor"));
+        let upload = BlockUpload {
+            blocks: blocks
+                .iter()
+                .map(|block| compressor.compress(block).expect("compress"))
+                .collect(),
+            discarded: AtomicBool::new(false),
+        };
+        let uploader = Uploader {
+            slots: upload_slots(&Config::default()),
+            sink: Arc::new(SinkCircuit {
+                open: AtomicBool::new(false),
+                scaling: Arc::new(ScalingPressure::new(
+                    ScalingPressureConfig::default(),
+                    crate::scaling_components(),
+                )),
+                metrics: Arc::clone(&metrics),
+            }),
+            metrics,
+            backend: "memory",
+            dlq: Arc::clone(&dlq),
+            compressor,
+        };
+        let refusal = Error::refused("the store refused the object");
+        let file = RefusedFile {
+            upload: &upload,
+            records,
+            destination: "events",
+            refusal: &refusal,
+        };
+        let settled = dead_letter_refused_file(&file, OffsetSet::default(), &uploader).await;
+        dlq.shutdown().await.expect("dlq shutdown");
+
+        let mut entries = Vec::new();
+        for file in walkdir::WalkDir::new(dir.path()) {
+            let file = file.expect("dlq file");
+            if !file.file_type().is_file() {
+                continue;
+            }
+            let text = std::fs::read_to_string(file.path()).expect("read dlq file");
+            for line in text.lines() {
+                entries.push(serde_json::from_str::<DlqEntry>(line).expect("a DLQ entry"));
+            }
+        }
+        (settled, entries, upload.discarded.load(Ordering::SeqCst))
+    }
+
+    /// A refused file of one record per line goes to the DLQ a record at a
+    /// time, carrying the destination a batch carries, not the file path.
+    #[tokio::test]
+    async fn a_refused_file_goes_to_the_dlq_a_record_at_a_time() {
+        let (settled, entries, discarded) =
+            dead_letter_blocks(&[b"{\"id\":0}\n{\"id\":1}\n", b"{\"id\":2}\n"], 3).await;
+
+        let payloads: Vec<&[u8]> = entries
+            .iter()
+            .map(|entry| entry.payload.as_slice())
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![&b"{\"id\":0}"[..], b"{\"id\":1}", b"{\"id\":2}"]
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.destination.as_deref() == Some("events")),
+            "{entries:?}"
+        );
+        assert_eq!(settled.rejected_records, 3);
+        assert_eq!(settled.dropped_records, 0);
+        assert!(
+            discarded,
+            "the staged copy is removed once the DLQ holds it"
+        );
+    }
+
+    /// A payload holding a newline of its own, text or binary, would split
+    /// across entries line by line, so each block of a file holding more lines
+    /// than records goes to the DLQ whole, as one entry.
+    #[tokio::test]
+    async fn a_payload_with_its_own_newline_never_reaches_the_dlq_in_pieces() {
+        // A MessagePack map carrying a 0x0a byte, beside a pretty-printed JSON record.
+        let binary: &[u8] = &[0x81, 0xa2, b'i', b'd', 0x0a];
+        let mut second = b"{\"id\":1,\n  \"note\":\"two lines\"}\n".to_vec();
+        second.extend_from_slice(binary);
+        second.push(b'\n');
+        let first: &[u8] = b"{\"id\":0}\n";
+
+        let (settled, entries, discarded) = dead_letter_blocks(&[first, &second], 3).await;
+
+        let payloads: Vec<&[u8]> = entries
+            .iter()
+            .map(|entry| entry.payload.as_slice())
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![first, second.as_slice()],
+            "one entry a block, each block whole"
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.reason.contains("whole block")
+                    && entry.destination.as_deref() == Some("events")),
+            "{entries:?}"
+        );
+        assert_eq!(settled.rejected_records, 3);
+        assert_eq!(settled.dropped_records, 0);
+        assert!(discarded);
     }
 
     /// A second write to the same open file must not count another creation.

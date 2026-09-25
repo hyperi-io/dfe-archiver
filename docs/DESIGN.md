@@ -375,7 +375,7 @@ Holding costs memory for as long as a file is not durable: about 32 bytes a reco
 
 While uploads fail, held records and staged files grow, so both are pressure sources on the self-regulation latch that pauses the Kafka partitions. Held records read against a quarter of the memory limit at 32 bytes each, staged bytes against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit. Both pause at the latch's `pause_above` (0.8 by default), so a store outage turns into consumer lag rather than memory or disk growth. With self-regulation off nothing pauses, and the archiver logs that at startup.
 
-Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. A file refused at upload is read back a block at a time, each block one flush decompressed on its own, and its records go to the DLQ one entry per line, since the file holds one record per line. The file's offsets are released `Rejected` once the DLQ confirms them, and a record too large for any DLQ backend is counted dropped. A file that cannot be read back, or a DLQ write that fails, is released `Errored`, so a restart writes the records again. With the DLQ off the records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
+Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. A file refused at upload is read back a block at a time, each block one flush decompressed on its own, and its records go to the DLQ one entry per line, with the routed destination a batch carries. A payload is written as it arrived with a newline after it, so a payload holding a newline of its own spans lines: when a file holds more lines than records, each block goes to the DLQ whole, as one entry saying so, and no record, text or binary, is split across entries. The file's offsets are released `Rejected` once the DLQ confirms them, and a record too large for any DLQ backend is counted dropped. A file that cannot be read back, or a DLQ write that fails, is released `Errored`, so a restart writes the records again. With the DLQ off the records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
 
 A batch no file takes goes to the DLQ through scalo's confirming write, one entry per record, and only a write the DLQ confirms releases a record's offset, `Rejected`. The buffer records where each record ends, because a payload may hold a newline of its own. First `Dlq::refusal` measures each entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the record. When the store refused the batch for good, a record no backend can ever hold is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same pair of refusals, and the rest of the batch still goes to the DLQ. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
 
@@ -558,12 +558,14 @@ routing:
 
 ### Supported Codecs
 
-| Codec | Extension | Use Case |
-|-------|-----------|----------|
-| zstd | `.zst` | Default - best ratio with good speed |
-| lz4 | `.lz4` | Speed-critical, lower ratio |
-| snappy | `.snappy` | Hadoop ecosystem compatibility |
-| gzip | `.gz` | Universal compatibility |
+| Codec | Extension | Format | Use Case |
+|-------|-----------|--------|----------|
+| zstd | `.zst` | zstd frames | Default - best ratio with good speed |
+| lz4 | `.lz4` | LZ4 frame format, as the `lz4` tool reads | Speed-critical, lower ratio |
+| snappy | `.snappy` | Snappy framing format (`application/x-snappy-framed`) | Speed-critical, lower ratio |
+| gzip | `.gz` | gzip members | Universal compatibility |
+
+Each flush into a file appends one complete frame, framed stream or gzip member, so a file of many flushes is one standard concatenated stream that the codec's own tools read whole. The archiver reads a staged file back the same way, a flush at a time, when it has to dead-letter the file's records.
 
 ### Configuration
 

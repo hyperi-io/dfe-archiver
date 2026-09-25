@@ -1204,6 +1204,139 @@ mod tests {
         assert_eq!(upload.block(3).await.expect("read"), None);
     }
 
+    /// `object` decoded by the codec's own crate, every frame or member of it.
+    fn decode_with_the_codecs_reader(codec: &str, object: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut out = Vec::new();
+        match codec {
+            "zstd" => {
+                zstd::stream::read::Decoder::new(object)
+                    .expect("zstd decoder")
+                    .read_to_end(&mut out)
+                    .expect("zstd read");
+            }
+            "gzip" => {
+                flate2::read::MultiGzDecoder::new(object)
+                    .read_to_end(&mut out)
+                    .expect("gzip read");
+            }
+            "lz4" => {
+                // The frame decoder ends its stream at each frame's end.
+                let mut rest = object;
+                while !rest.is_empty() {
+                    lz4_flex::frame::FrameDecoder::new(&mut rest)
+                        .read_to_end(&mut out)
+                        .expect("lz4 frame read");
+                }
+            }
+            "snappy" => {
+                snap::read::FrameDecoder::new(object)
+                    .read_to_end(&mut out)
+                    .expect("snappy frame read");
+            }
+            other => unreachable!("no reader for {other}"),
+        }
+        out
+    }
+
+    /// `object` decoded by the codec's command-line tool, or `None` when the
+    /// host has none.
+    fn decode_with_the_command_line_tool(codec: &str, object: &[u8]) -> Option<Vec<u8>> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let program = match codec {
+            "zstd" | "gzip" | "lz4" => codec,
+            _ => return None,
+        };
+        let mut child = Command::new(program)
+            .args(["-d", "-c"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(object)
+            .expect("feed the tool");
+        let output = child.wait_with_output().expect("run the tool");
+        assert!(output.status.success(), "{program} -d refused the object");
+        Some(output.stdout)
+    }
+
+    /// An archive object written as the pipeline writes one, three flushes
+    /// staged and uploaded, reads back whole through a decoder that is not
+    /// the archiver's: the codec's own reader, and its command-line tool where
+    /// the host has one. Each staged block also decompresses on its own.
+    #[tokio::test]
+    async fn every_codec_uploads_an_object_standard_decoders_read() {
+        use dfe_archiver_core::archive::{ArchiveWriter, RollingPolicy};
+        use dfe_archiver_core::compression::create_compressor;
+        use dfe_archiver_core::config::ArchiveConfig;
+
+        let flushes: [&[u8]; 3] = [
+            b"{\"id\":0}\n{\"id\":1}\n",
+            b"{\"id\":2}\n",
+            b"{\"id\":3}\n{\"id\":4}\n",
+        ];
+        let records = flushes.concat();
+        for codec in ["zstd", "gzip", "lz4", "snappy"] {
+            let (_dir, staging) = staging();
+            let (store, backend) = in_memory(&staging);
+            let compressor = create_compressor(codec, 3).expect("codec");
+            let mut writer = ArchiveWriter::new(
+                ArchiveConfig::default(),
+                RollingPolicy::default(),
+                compressor,
+                Box::new(backend),
+            );
+            for flush in flushes {
+                writer.write(flush).await.expect("write");
+                writer.flush().await.expect("flush");
+            }
+            writer.close().await.expect("close");
+            let file = writer.take_settled().uploads.pop().expect("a staged file");
+
+            let own = create_compressor(codec, 3).expect("codec");
+            let mut blocks = Vec::new();
+            while let Some(block) = file.upload.block(blocks.len()).await.expect("block") {
+                blocks.push(block);
+            }
+            assert_eq!(blocks.len(), 3, "{codec}: one block a flush");
+            let per_block: Vec<u8> = blocks
+                .iter()
+                .flat_map(|block| own.decompress(block).expect("block decompress"))
+                .collect();
+            assert_eq!(
+                per_block, records,
+                "{codec}: each block decompresses on its own"
+            );
+
+            file.upload.attempt().await.expect("upload");
+            let object = store
+                .get(&ObjectPath::from(format!("archive/{}", file.upload.path())))
+                .await
+                .expect("uploaded")
+                .bytes()
+                .await
+                .expect("bytes");
+            assert_eq!(
+                decode_with_the_codecs_reader(codec, &object),
+                records,
+                "{codec}: the codec's own reader reads every flush"
+            );
+            if let Some(decoded) = decode_with_the_command_line_tool(codec, &object) {
+                assert_eq!(
+                    decoded, records,
+                    "{codec}: the command-line tool reads every flush"
+                );
+            }
+        }
+    }
+
     /// A key the store would refuse is refused before any record is staged.
     #[tokio::test]
     async fn a_key_past_the_store_limit_is_refused_at_create() {

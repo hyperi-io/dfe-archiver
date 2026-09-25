@@ -670,24 +670,7 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
         "only the record too large on its own is dropped"
     );
     assert_eq!(counter(&manager, "messages_dlq_total"), 20);
-    let mut dead: Vec<(u64, Vec<u8>)> = kafka
-        .read_all("dlq")
-        .iter()
-        .map(|bytes| {
-            let entry: scalo::dlq::DlqEntry = serde_json::from_slice(bytes).expect("a DLQ entry");
-            let id = ids(&[String::from_utf8(entry.payload.clone()).expect("utf-8")])[0];
-            (id, entry.payload)
-        })
-        .collect();
-    dead.sort();
-    assert_eq!(
-        dead.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        (0..20).collect::<Vec<_>>(),
-        "one dead letter per record the DLQ can hold"
-    );
-    for (id, payload) in &dead {
-        assert_eq!(payload, &record(*id), "record {id} reached the DLQ intact");
-    }
+    assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
     assert!(
         minio.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
@@ -820,11 +803,25 @@ async fn a_file_the_store_refuses_at_upload_dead_letters_every_record() {
     );
     assert_eq!(counter(&manager, "messages_dlq_total"), 20);
     assert_eq!(counter(&manager, "messages_archived_total"), 0);
-    let mut dead: Vec<(u64, Vec<u8>)> = kafka
-        .read_all("dlq")
+    assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
+    assert!(
+        minio.keys(BUCKET).await.is_empty(),
+        "nothing reached the store"
+    );
+}
+
+/// Assert the DLQ `entries` are one per record of `ids`, each intact and
+/// carrying the routed destination a batch carries, not the file path.
+fn assert_dead_letters_are(entries: &[Vec<u8>], ids_expected: std::ops::Range<u64>) {
+    let mut dead: Vec<(u64, Vec<u8>)> = entries
         .iter()
         .map(|bytes| {
             let entry: scalo::dlq::DlqEntry = serde_json::from_slice(bytes).expect("a DLQ entry");
+            assert_eq!(
+                entry.destination.as_deref(),
+                Some("events"),
+                "a dead letter names the routed destination"
+            );
             let id = ids(&[String::from_utf8(entry.payload.clone()).expect("utf-8")])[0];
             (id, entry.payload)
         })
@@ -832,12 +829,65 @@ async fn a_file_the_store_refuses_at_upload_dead_letters_every_record() {
     dead.sort();
     assert_eq!(
         dead.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        (0..20).collect::<Vec<_>>(),
+        ids_expected.collect::<Vec<_>>(),
         "one dead letter per record"
     );
     for (id, payload) in &dead {
         assert_eq!(payload, &record(*id), "record {id} reached the DLQ intact");
     }
+}
+
+/// A file the store refuses for good at upload, holding one record too large
+/// for any DLQ backend beside records that fit, dead-letters every record
+/// that fits, intact, and drops and counts only the one too large.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("upload_refused_oversize").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("upload_refused_oversize").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    config.archive.roll_interval_secs = Some(5);
+    // Under the 1024-byte key limit checked before staging, one segment past
+    // the store's 255, so the store refuses the file when it uploads.
+    config.archive.path_template = format!("{}/{{year}}", "s".repeat(300));
+    config.compression.enabled = true;
+    dead_letter_to(&mut config, "dlq");
+    let (manager, metrics) = metrics();
+
+    kafka.produce("events", &records(0..20)).await;
+    kafka.produce("events", &[oversize_record(20)]).await;
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the commit moved past every record", || async {
+        kafka.committed(GROUP, "events") == Some(21)
+    })
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a file the store refused ended the loop"
+    );
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        counter(&manager, "messages_dropped_total"),
+        1,
+        "only the record too large on its own is dropped"
+    );
+    assert_eq!(counter(&manager, "messages_dlq_total"), 20);
+    assert_eq!(counter(&manager, "messages_archived_total"), 0);
+    assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
     assert!(
         minio.keys(BUCKET).await.is_empty(),
         "nothing reached the store"

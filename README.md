@@ -18,7 +18,7 @@ contract).
 ## Features
 
 - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
-- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none
+- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none, each in its standard framed format (LZ4 frames, the snappy framing format, gzip members), so the codec's own tools read an archive file whole
 - **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
 - **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete

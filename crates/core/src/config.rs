@@ -527,7 +527,8 @@ impl Default for RoutingConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompressionConfig {
-    /// Compression codec: none, zstd, lz4, snappy, gzip
+    /// Compression codec: none, zstd, lz4 (LZ4 frame format), snappy (snappy
+    /// framing format), gzip. Each flush appends one frame or gzip member.
     pub codec: String,
 
     /// Compression level (codec-specific)

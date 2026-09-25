@@ -1397,15 +1397,19 @@ dependencies = [
  "async-trait",
  "compact_str",
  "dfe-archiver-core",
+ "flate2",
  "futures",
+ "lz4_flex",
  "object_store",
  "percent-encoding",
  "rdkafka",
  "scalo",
+ "snap",
  "tempfile",
  "tokio",
  "tokio-test",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

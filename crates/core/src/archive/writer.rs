@@ -43,6 +43,8 @@ pub struct PendingFile {
     pub offsets: OffsetSet,
     /// Records in the file, counted whether or not their offsets are held.
     pub records: u64,
+    /// The routed destination the file's records were written for.
+    pub destination: String,
 }
 
 impl std::fmt::Debug for PendingFile {
@@ -249,6 +251,8 @@ pub struct ArchiveWriter {
     held_records: u64,
     /// Files completed, pending or failed since the caller last drained them.
     settled: Settled,
+    /// The routed destination this writer's files hold, carried to uploads.
+    destination: String,
 }
 
 impl ArchiveWriter {
@@ -274,7 +278,16 @@ impl ArchiveWriter {
             held: OffsetSet::default(),
             held_records: 0,
             settled: Settled::default(),
+            destination: String::new(),
         }
+    }
+
+    /// Name the routed destination this writer's files hold, so a file that
+    /// has to be dead-lettered carries the same destination a batch does.
+    #[must_use]
+    pub fn with_destination(mut self, destination: impl Into<String>) -> Self {
+        self.destination = destination.into();
+        self
     }
 
     /// Hold `offsets` and `records` against the open file until it is durable.
@@ -312,6 +325,7 @@ impl ArchiveWriter {
                     upload,
                     offsets,
                     records,
+                    destination: self.destination.clone(),
                 });
                 Ok(())
             }

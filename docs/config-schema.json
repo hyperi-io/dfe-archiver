@@ -643,7 +643,7 @@
       "type": "object",
       "properties": {
         "codec": {
-          "description": "Compression codec: none, zstd, lz4, snappy, gzip",
+          "description": "Compression codec: none, zstd, lz4 (LZ4 frame format), snappy (snappy\nframing format), gzip. Each flush appends one frame or gzip member.",
           "type": "string",
           "default": "zstd"
         },
