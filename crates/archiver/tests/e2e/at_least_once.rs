@@ -615,12 +615,13 @@ fn oversize_record(id: u64) -> Vec<u8> {
     padded(id, 13_000_000)
 }
 
-/// A batch the store refused for good whose dead letter no DLQ backend can
-/// hold can never land, so its records are dropped with the reason and
-/// counted, the commit moves past them, and the loop runs on instead of
-/// restarting into the same refusal.
+/// A batch the store refused for good, over every DLQ backend's ceiling as a
+/// whole, is dead-lettered a record at a time: each record the DLQ can hold
+/// reaches it intact, only the record too large on its own is dropped and
+/// counted, the commit moves past all of them, and the loop runs on instead
+/// of restarting into the same refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_refused_batch_no_dlq_can_hold_is_dropped_and_the_loop_runs_on() {
+async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     init_logs();
     let Some(kafka) = common::acquire_kafka("dlq_never_holds").await else {
         return;
@@ -636,21 +637,25 @@ async fn a_refused_batch_no_dlq_can_hold_is_dropped_and_the_loop_runs_on() {
     let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
     // Past the 1024-byte object key limit, so every file's key is refused.
     config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
+    // Long enough that the small records wait for the oversize one, which
+    // flushes the buffer as one batch.
+    config.buffer.flush_age_secs = 10;
     dead_letter_to(&mut config, "dlq");
     let (manager, metrics) = metrics();
 
-    kafka.produce("events", &[oversize_record(0)]).await;
+    kafka.produce("events", &records(0..20)).await;
+    kafka.produce("events", &[oversize_record(20)]).await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
         async move { archiver.run().await }
     });
-    wait_until("the record was dropped", || async {
+    wait_until("the oversize record was dropped", || async {
         counter(&manager, "messages_dropped_total") >= 1
     })
     .await;
-    wait_until("the commit moved past the dropped record", || async {
-        kafka.committed(GROUP, "events") == Some(1)
+    wait_until("the commit moved past every record", || async {
+        kafka.committed(GROUP, "events") == Some(21)
     })
     .await;
     assert!(
@@ -659,9 +664,34 @@ async fn a_refused_batch_no_dlq_can_hold_is_dropped_and_the_loop_runs_on() {
     );
     stop(&archiver, running).await;
 
-    assert_eq!(counter(&manager, "messages_dropped_total"), 1);
-    assert_eq!(counter(&manager, "messages_dlq_total"), 0);
-    assert_eq!(kafka.records_in("dlq"), 0, "nothing reached the DLQ topic");
+    assert_eq!(
+        counter(&manager, "messages_dropped_total"),
+        1,
+        "only the record too large on its own is dropped"
+    );
+    assert_eq!(counter(&manager, "messages_dlq_total"), 20);
+    let mut dead: Vec<(u64, Vec<u8>)> = kafka
+        .read_all("dlq")
+        .iter()
+        .map(|bytes| {
+            let entry: scalo::dlq::DlqEntry = serde_json::from_slice(bytes).expect("a DLQ entry");
+            let id = ids(&[String::from_utf8(entry.payload.clone()).expect("utf-8")])[0];
+            (id, entry.payload)
+        })
+        .collect();
+    dead.sort();
+    assert_eq!(
+        dead.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        (0..20).collect::<Vec<_>>(),
+        "one dead letter per record the DLQ can hold"
+    );
+    for (id, payload) in &dead {
+        assert_eq!(payload, &record(*id), "record {id} reached the DLQ intact");
+    }
+    assert!(
+        minio.keys(BUCKET).await.is_empty(),
+        "nothing reached the store"
+    );
 }
 
 /// A batch that failed on local disk is never dropped, even when no DLQ

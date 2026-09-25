@@ -86,6 +86,7 @@ impl Default for TieredBufferConfig {
 struct HotBuffer {
     data: Vec<u8>,
     offsets: Vec<KafkaOffset>,
+    record_ends: Vec<usize>,
     record_count: usize,
     last_access: Instant,
     created_at: Instant,
@@ -96,6 +97,7 @@ impl HotBuffer {
         Self {
             data: Vec::with_capacity(1024 * 1024),
             offsets: Vec::with_capacity(1024),
+            record_ends: Vec::with_capacity(1024),
             record_count: 0,
             last_access: Instant::now(),
             created_at: Instant::now(),
@@ -106,19 +108,22 @@ impl HotBuffer {
         self.data.extend_from_slice(payload);
         self.data.push(b'\n');
         self.offsets.push(offset);
+        self.record_ends.push(self.data.len());
         self.record_count += 1;
         self.last_access = Instant::now();
     }
 
-    fn drain(&mut self) -> (Vec<u8>, Vec<KafkaOffset>, usize) {
+    fn drain(&mut self, destination: CompactString) -> StagedBatch {
         self.created_at = Instant::now();
-        let count = self.record_count;
+        let record_count = self.record_count;
         self.record_count = 0;
-        (
-            std::mem::take(&mut self.data),
-            std::mem::take(&mut self.offsets),
-            count,
-        )
+        StagedBatch {
+            destination,
+            data: std::mem::take(&mut self.data),
+            offsets: std::mem::take(&mut self.offsets),
+            record_ends: std::mem::take(&mut self.record_ends),
+            record_count,
+        }
     }
 
     fn size(&self) -> usize {
@@ -174,8 +179,29 @@ pub struct StagedBatch {
     /// written into completes
     pub offsets: Vec<KafkaOffset>,
 
+    /// Where each record ends in `data`, just past its newline, in the order
+    /// of `offsets`. A payload may itself hold a newline, so `data` alone
+    /// does not say where one record ends.
+    pub record_ends: Vec<usize>,
+
     /// Record count
     pub record_count: usize,
+}
+
+impl StagedBatch {
+    /// Each record as it arrived, without the newline the buffer appended,
+    /// in the order of `offsets`.
+    pub fn records(&self) -> impl Iterator<Item = &[u8]> {
+        let mut start = 0;
+        self.record_ends.iter().map(move |&end| {
+            let record = self
+                .data
+                .get(start..end.saturating_sub(1))
+                .unwrap_or_default();
+            start = end;
+            record
+        })
+    }
 }
 
 /// Tiered buffer manager
@@ -325,14 +351,8 @@ impl TieredBufferManager {
             self.stats
                 .current_hot_bytes
                 .fetch_sub(buffer.size(), Ordering::Relaxed);
-            let (data, offsets, record_count) = buffer.drain();
             self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-            batches_to_write.push(StagedBatch {
-                destination: evict_key,
-                data,
-                offsets,
-                record_count,
-            });
+            batches_to_write.push(buffer.drain(evict_key));
             self.stats
                 .hot_buffer_evictions
                 .fetch_add(1, Ordering::Relaxed);
@@ -377,17 +397,12 @@ impl TieredBufferManager {
                 "Hot buffer flush"
             );
             let flush_bytes = entry.size();
-            let (data, offsets, record_count) = entry.drain();
+            let batch = entry.drain(key);
             self.stats
                 .current_hot_bytes
                 .fetch_sub(flush_bytes, Ordering::Relaxed);
             self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-            batches_to_write.push(StagedBatch {
-                destination: key,
-                data,
-                offsets,
-                record_count,
-            });
+            batches_to_write.push(batch);
         }
 
         Ok(batches_to_write)
@@ -409,14 +424,8 @@ impl TieredBufferManager {
                     bytes = entry.size(),
                     "Flushing hot buffer"
                 );
-                let (data, offsets, record_count) = entry.drain();
                 self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-                batches.push(StagedBatch {
-                    destination: key.clone(),
-                    data,
-                    offsets,
-                    record_count,
-                });
+                batches.push(entry.drain(key.clone()));
             }
         }
 
@@ -438,14 +447,8 @@ impl TieredBufferManager {
                     bytes = entry.size(),
                     "Flushing aged hot buffer"
                 );
-                let (data, offsets, record_count) = entry.drain();
                 self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-                batches.push(StagedBatch {
-                    destination: key,
-                    data,
-                    offsets,
-                    record_count,
-                });
+                batches.push(entry.drain(key));
             }
         }
 
@@ -683,5 +686,26 @@ mod tests {
         let batches = manager.flush_all();
         assert_eq!(batches[0].data, b"\ndata\n");
         assert_eq!(batches[0].record_count, 2);
+    }
+
+    /// Each record comes back whole, one per offset, even when its payload
+    /// holds a newline of its own.
+    #[test]
+    fn records_split_on_record_boundaries_not_newlines() {
+        let (_spool, config) = spooled(10, 100_000);
+        let manager = TieredBufferManager::new(config).expect("create");
+        for (offset, payload) in (0i64..).zip([&b"one"[..], b"two\nlines", b"", b"four"]) {
+            manager
+                .push("dest", make_message(payload, "t", offset))
+                .expect("push");
+        }
+        let batches = manager.flush_all();
+        let records: Vec<&[u8]> = batches[0].records().collect();
+        assert_eq!(
+            records,
+            vec![&b"one"[..], b"two\nlines", b"", b"four"],
+            "one record per payload, embedded newline kept"
+        );
+        assert_eq!(records.len(), batches[0].offsets.len());
     }
 }

@@ -1590,6 +1590,43 @@ impl KafkaFixture {
         high
     }
 
+    /// Every record on partition 0 of `topic`, oldest first.
+    pub fn read_all(&self, topic: &str) -> Vec<Vec<u8>> {
+        use rdkafka::Message;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let end = self.records_in(topic);
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", "read-all-probe")
+            .set("enable.auto.commit", "false")
+            .set(
+                "fetch.message.max.bytes",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
+            .create()
+            .expect("kafka consumer");
+        let mut from = TopicPartitionList::new();
+        from.add_partition_offset(topic, 0, Offset::Beginning)
+            .expect("partition offset");
+        consumer.assign(&from).expect("assign");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut records = Vec::new();
+        while i64::try_from(records.len()).unwrap_or(i64::MAX) < end {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "read {} of {end} records from {topic}",
+                records.len()
+            );
+            if let Some(message) = consumer.poll(Duration::from_millis(500)) {
+                let message = message.unwrap_or_else(|e| panic!("read {topic}: {e}"));
+                records.push(message.payload().unwrap_or_default().to_vec());
+            }
+        }
+        records
+    }
+
     /// The offset `group` has committed on partition 0 of `topic`, or `None`
     /// when it has committed nothing there.
     pub fn committed(&self, group: &str, topic: &str) -> Option<i64> {

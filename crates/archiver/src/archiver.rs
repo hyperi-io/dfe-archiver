@@ -437,21 +437,63 @@ fn tokens_of(offsets: Vec<KafkaOffset>) -> Vec<KafkaToken> {
     offsets.into_iter().map(KafkaOffset::into_token).collect()
 }
 
+/// Publish `lag`, the records past this pod's read position, to the
+/// `dfe_archiver_kafka_lag` gauge and the composite's `kafka_lag` term.
+/// `None`, from the direct transport, leaves both as they were.
+fn publish_kafka_lag(lag: Option<i64>, metrics: &ArchiverMetrics, scaling: &ScalingPressure) {
+    let Some(lag) = lag else {
+        return;
+    };
+    let lag = u64::try_from(lag).unwrap_or(0);
+    metrics.set_kafka_lag(lag);
+    scaling.set_component("kafka_lag", lag as f64);
+}
+
+/// Dead letters split by whether a DLQ backend can hold them, each kept with
+/// its tag.
+struct Screened<T> {
+    writable: Vec<(DlqEntry, T)>,
+    refused: Vec<(DeadLetterReason, T)>,
+}
+
 /// Split `entries` into those a backend of `dlq` can hold, and the reasons no
 /// backend can ever hold the rest.
-fn screen_dead_letters(
-    dlq: &Dlq,
-    entries: Vec<DlqEntry>,
-) -> (Vec<DlqEntry>, Vec<DeadLetterReason>) {
+fn screen_dead_letters<T>(dlq: &Dlq, entries: Vec<(DlqEntry, T)>) -> Screened<T> {
     let mut writable = Vec::with_capacity(entries.len());
     let mut refused = Vec::new();
-    for entry in entries {
+    for (entry, tag) in entries {
         match dlq.refusal(&entry) {
-            Some(reason) => refused.push(reason),
-            None => writable.push(entry),
+            Some(reason) => refused.push((reason, tag)),
+            None => writable.push((entry, tag)),
         }
     }
-    (writable, refused)
+    Screened { writable, refused }
+}
+
+/// One DLQ entry per record of `batch`, each with its offset, or the offsets
+/// alone when the batch's records and offsets disagree.
+fn record_dead_letters(
+    batch: StagedBatch,
+    reason: &str,
+) -> std::result::Result<Vec<(DlqEntry, KafkaOffset)>, Vec<KafkaOffset>> {
+    let payloads: Vec<Vec<u8>> = batch.records().map(<[u8]>::to_vec).collect();
+    let StagedBatch {
+        destination,
+        offsets,
+        ..
+    } = batch;
+    if payloads.len() != offsets.len() {
+        return Err(offsets);
+    }
+    Ok(payloads
+        .into_iter()
+        .zip(offsets)
+        .map(|(payload, offset)| {
+            let entry = DlqEntry::new("dfe-archiver", reason, payload)
+                .with_destination(destination.as_str());
+            (entry, offset)
+        })
+        .collect())
 }
 
 /// What a completed archive file proves: a completion the object store
@@ -1139,13 +1181,7 @@ impl Archiver {
     /// read, so it leaves the component at whatever the engine last held
     /// rather than writing a false zero.
     fn push_kafka_lag_signal(&self) {
-        let Some(lag) = self.transport.position_lag() else {
-            return;
-        };
-        // position_lag() is >= 0 (clamped in the adapter).
-        let lag = u64::try_from(lag).unwrap_or(0);
-        self.metrics.set_kafka_lag(lag);
-        self.scaling.set_component("kafka_lag", lag as f64);
+        publish_kafka_lag(self.transport.position_lag(), &self.metrics, &self.scaling);
     }
 
     /// Drive the sink circuit-open scaling gate from a local write cycle's
@@ -1267,6 +1303,7 @@ impl Archiver {
             data,
             offsets,
             record_count,
+            ..
         } = batch;
         let offsets = if self.transport.holds_offsets() {
             offsets
@@ -1482,8 +1519,8 @@ impl Archiver {
     /// Call once [`run`](Self::run) has returned. The source closes first, so
     /// the Push listener stops answering new pushes while every push it already
     /// answered is received and written. On Kafka the consumer stops fetching
-    /// and its commit still lands. Uploads get 20 s: a file still uploading
-    /// then keeps its records unreleased, to be read again.
+    /// and its commit still lands. Uploads get `DRAIN_UPLOAD_LIMIT`: a file
+    /// still uploading then keeps its records unreleased, to be read again.
     #[instrument(skip(self))]
     pub async fn drain(&self) {
         if let Err(e) = self.transport.close().await {
@@ -1587,90 +1624,125 @@ impl Archiver {
         settled
     }
 
-    /// Dead-letter a batch no file took, and release its offsets: `Rejected`
-    /// once the DLQ confirms it holds the batch. A batch the store refused for
-    /// good is `Dropped` with the reason when the DLQ is off or no DLQ backend
-    /// can ever hold it. Every other outcome is `Errored`, which ends the loop
-    /// so a restart writes the batch again: a local failure can clear, and so
-    /// can a failed DLQ write.
+    /// Dead-letter a batch no file took, one entry per record, and release
+    /// each record's offset: `Rejected` once the DLQ confirms it holds the
+    /// record. When the store refused the batch for good, a record no DLQ
+    /// backend can ever hold is `Dropped` with the reason, and so is every
+    /// record with the DLQ off. Otherwise the whole batch is `Errored`, which
+    /// ends the loop so a restart writes it again: a local failure can clear,
+    /// and so can a failed DLQ write.
     async fn dead_letter(&self, batch: StagedBatch, error: &Error) {
-        let StagedBatch {
-            destination,
-            data,
-            offsets,
-            record_count,
-        } = batch;
-        let records = record_count as u64;
-        let status = if self.dlq.is_enabled() {
-            debug!(
-                destination = %destination,
-                data_bytes = data.len(),
-                error = %error,
-                "Sending failed batch to DLQ"
-            );
-            let entry = DlqEntry::new(
-                "dfe-archiver",
-                format!("storage_write_failed: {error}"),
-                data,
-            )
-            .with_destination(destination.as_str());
-            if let Some(reason) = self.dlq.refusal(&entry) {
-                if error.is_refused() {
-                    self.metrics.record_dropped(records);
-                    error!(
-                        records,
-                        destination = %destination,
-                        reason = %reason,
-                        error = %error,
-                        "Dropped records the store refused for good and the DLQ can never hold"
-                    );
-                    DeliveryStatus::Dropped
-                } else {
-                    error!(
-                        records,
-                        destination = %destination,
-                        reason = %reason,
-                        error = %error,
-                        "The DLQ can never hold a batch that failed locally; a restart writes it again"
-                    );
-                    DeliveryStatus::Errored
-                }
-            } else {
-                match self.dlq.write_confirmed(vec![entry]).await {
-                    Ok(()) => {
-                        self.metrics.record_dlq(records);
-                        scalo::logger::security::record_dlq(
-                            "storage_write_failed",
-                            &error.to_string(),
-                            Some(destination.as_str()),
-                        );
-                        DeliveryStatus::Rejected
-                    }
-                    Err(dlq_err) => {
-                        error!(
-                            error = %dlq_err,
-                            destination = %destination,
-                            records,
-                            "The DLQ could not take a batch no file took; a restart writes it again"
-                        );
-                        DeliveryStatus::Errored
-                    }
-                }
+        if !self.dlq.is_enabled() {
+            self.settle_without_dlq(batch, error).await;
+            return;
+        }
+        let records = batch.record_count as u64;
+        let destination = batch.destination.clone();
+        debug!(
+            destination = %destination,
+            data_bytes = batch.data.len(),
+            records,
+            error = %error,
+            "Sending failed batch to DLQ"
+        );
+        let entries = match record_dead_letters(batch, &format!("storage_write_failed: {error}")) {
+            Ok(entries) => entries,
+            Err(offsets) => {
+                // An offset with no record could never be released, and would hold the commit silently.
+                error!(
+                    records,
+                    offsets = offsets.len(),
+                    destination = %destination,
+                    "A batch's records and offsets disagree; a restart writes it again"
+                );
+                self.release(tokens_of(offsets), DeliveryStatus::Errored)
+                    .await;
+                return;
             }
-        } else if error.is_refused() {
-            self.metrics.record_dropped(records);
+        };
+        let Screened { writable, refused } = screen_dead_letters(&self.dlq, entries);
+        if let Some((why, _)) = refused.first()
+            && !error.is_refused()
+        {
             error!(
                 records,
+                too_large = refused.len(),
                 destination = %destination,
+                reason = %why,
+                error = %error,
+                "The DLQ can never hold a record of a batch that failed locally; a restart writes the batch again"
+            );
+            let all = writable
+                .into_iter()
+                .map(|(_, offset)| offset)
+                .chain(refused.into_iter().map(|(_, offset)| offset))
+                .collect();
+            self.release(tokens_of(all), DeliveryStatus::Errored).await;
+            return;
+        }
+
+        let (entries, written): (Vec<DlqEntry>, Vec<KafkaOffset>) = writable.into_iter().unzip();
+        let outcome = if entries.is_empty() {
+            Ok(())
+        } else {
+            self.dlq.write_confirmed(entries).await
+        };
+        if let Err(dlq_err) = outcome {
+            error!(
+                error = %dlq_err,
+                destination = %destination,
+                records,
+                "The DLQ could not take a batch no file took; a restart writes it again"
+            );
+            let all = written
+                .into_iter()
+                .chain(refused.into_iter().map(|(_, offset)| offset))
+                .collect();
+            self.release(tokens_of(all), DeliveryStatus::Errored).await;
+            return;
+        }
+        if !written.is_empty() {
+            self.metrics.record_dlq(written.len() as u64);
+            scalo::logger::security::record_dlq(
+                "storage_write_failed",
+                &error.to_string(),
+                Some(destination.as_str()),
+            );
+            self.release(tokens_of(written), DeliveryStatus::Rejected)
+                .await;
+        }
+        if let Some((why, _)) = refused.first() {
+            self.metrics.record_dropped(refused.len() as u64);
+            error!(
+                records = refused.len(),
+                destination = %destination,
+                reason = %why,
+                error = %error,
+                "Dropped records the store refused for good and the DLQ can never hold"
+            );
+            let dropped = refused.into_iter().map(|(_, offset)| offset).collect();
+            self.release(tokens_of(dropped), DeliveryStatus::Dropped)
+                .await;
+        }
+    }
+
+    /// Release a batch no file took while the DLQ is off: `Dropped` with the
+    /// reason when the store refused it for good, `Errored` otherwise.
+    async fn settle_without_dlq(&self, batch: StagedBatch, error: &Error) {
+        let status = if error.is_refused() {
+            self.metrics.record_dropped(batch.record_count as u64);
+            error!(
+                records = batch.record_count,
+                destination = %batch.destination,
                 reason = %error,
                 "Dropped records the store refused for good, with no DLQ to take them"
             );
             DeliveryStatus::Dropped
         } else {
-            trace!(destination = %destination, "DLQ disabled for a batch no file took");
+            trace!(destination = %batch.destination, "DLQ disabled for a batch no file took");
             DeliveryStatus::Errored
         };
-        self.release(tokens_of(offsets), status).await;
+        self.release(tokens_of(batch.offsets), status).await;
     }
 
     /// Route inbound-filter DLQ entries surfaced by the transport, then release
@@ -1697,15 +1769,17 @@ impl Archiver {
                 .into_iter()
                 .map(|entry| {
                     let destination = entry.key.as_deref().unwrap_or("filter").to_string();
-                    DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
-                        .with_destination(&destination)
+                    let dead_letter = DlqEntry::new("dfe-archiver", entry.reason, entry.payload)
+                        .with_destination(&destination);
+                    (dead_letter, ())
                 })
                 .collect();
-            let (writable, refused) = screen_dead_letters(&self.dlq, dead_letters);
+            let Screened { writable, refused } = screen_dead_letters(&self.dlq, dead_letters);
             let written = writable.len() as u64;
             let outcome = if writable.is_empty() {
                 Ok(())
             } else {
+                let writable = writable.into_iter().map(|(entry, ())| entry).collect();
                 self.dlq.write_confirmed(writable).await
             };
             if let Err(dlq_err) = outcome {
@@ -1715,7 +1789,7 @@ impl Archiver {
                 );
                 DeliveryStatus::Errored
             } else {
-                if let Some(reason) = refused.first() {
+                if let Some((reason, ())) = refused.first() {
                     self.metrics.record_dropped(refused.len() as u64);
                     error!(
                         records = refused.len(),
@@ -1769,9 +1843,9 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config, held_record_cap, record_files_opened,
-        record_rolls, record_routing_fallbacks, restart_required_changes, screen_dead_letters,
-        sink_confirmation, upload_retry_delay,
+        Screened, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, buffer_config, held_record_cap,
+        publish_kafka_lag, record_files_opened, record_rolls, record_routing_fallbacks,
+        restart_required_changes, screen_dead_letters, sink_confirmation, upload_retry_delay,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -1784,6 +1858,7 @@ mod tests {
     use dfe_archiver_io::Staging;
     use dfe_archiver_io::storage::create_backend;
     use scalo::dlq::{Dlq, DlqConfig, DlqEntry, DlqMode, FileDlqConfig, KafkaDlqConfig};
+    use scalo::scaling::{ScalingPressure, ScalingPressureConfig};
     use scalo::transport::{DeadLetterReason, SinkConfirmation};
     use std::path::Path;
     use std::sync::atomic::AtomicU64;
@@ -2108,26 +2183,86 @@ mod tests {
         let entry =
             |bytes: usize| DlqEntry::new("dfe-archiver", "storage_write_failed", vec![b'x'; bytes]);
 
-        let (writable, refused) =
-            screen_dead_letters(&dlq, vec![entry(100), entry(8192), entry(200)]);
+        let Screened { writable, refused } = screen_dead_letters(
+            &dlq,
+            vec![(entry(100), 0), (entry(8192), 1), (entry(200), 2)],
+        );
 
         assert_eq!(
-            writable.len(),
-            2,
-            "the entries under the ceiling are written"
+            writable.iter().map(|(_, tag)| *tag).collect::<Vec<_>>(),
+            vec![0, 2],
+            "the entries under the ceiling are written, each with its tag"
         );
         assert!(
             matches!(
                 refused.as_slice(),
-                [DeadLetterReason::TooLarge { bytes, limit }] if *limit == 4096 - 128 && bytes > limit
+                [(DeadLetterReason::TooLarge { bytes, limit }, 1)] if *limit == 4096 - 128 && bytes > limit
             ),
             "{refused:?}"
         );
+
+        // Ten records over the ceiling together, each well under it alone.
+        let whole = screen_dead_letters(&dlq, vec![(entry(10 * 1000), ())]);
+        assert_eq!(whole.refused.len(), 1, "the batch as one entry is refused");
+        let per_record = screen_dead_letters(&dlq, (0..10).map(|i| (entry(1000), i)).collect());
         assert_eq!(
-            screen_dead_letters(&Dlq::disabled(), vec![entry(8192)]).1,
-            vec![],
+            per_record.writable.len(),
+            10,
+            "every record fits on its own"
+        );
+        assert!(per_record.refused.is_empty(), "{:?}", per_record.refused);
+
+        assert!(
+            screen_dead_letters(&Dlq::disabled(), vec![(entry(8192), ())])
+                .refused
+                .is_empty(),
             "a disabled DLQ refuses nothing"
         );
         dlq.shutdown().await.expect("dlq shutdown");
+    }
+
+    /// Position lag reaches the `kafka_lag` term the composite registers, the
+    /// one KEDA scales on, and the direct transport's `None` leaves it alone.
+    #[test]
+    fn position_lag_drives_the_kafka_lag_scaling_term() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = ArchiverMetrics::register(&manager, "test");
+        let scaling = ScalingPressure::new(
+            ScalingPressureConfig::default(),
+            crate::scaling_components(),
+        );
+        let kafka_lag = |scaling: &ScalingPressure| {
+            scaling
+                .snapshot()
+                .components
+                .into_iter()
+                .find(|component| component.name == "kafka_lag")
+                .map(|component| component.raw_value)
+        };
+        assert_eq!(kafka_lag(&scaling), Some(0.0), "the term is registered");
+
+        publish_kafka_lag(Some(50_000), &metrics, &scaling);
+        assert_eq!(kafka_lag(&scaling), Some(50_000.0));
+        assert!(
+            scaling.calculate() > 0.0,
+            "the lag moves the composite KEDA reads"
+        );
+        assert!(
+            manager
+                .render()
+                .lines()
+                .any(|line| line == "archiver_kafka_lag 50000"),
+            "the gauge reads the same lag:\n{}",
+            manager.render()
+        );
+
+        publish_kafka_lag(None, &metrics, &scaling);
+        assert_eq!(
+            kafka_lag(&scaling),
+            Some(50_000.0),
+            "the direct transport leaves the term alone"
+        );
     }
 }
