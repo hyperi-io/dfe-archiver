@@ -294,7 +294,7 @@ needs a Docker daemon.
 # Unit, integration and object-store e2e tests
 cargo nextest run
 
-# Adds the Kafka, MinIO and GCS-credential tests, which need a live stack
+# Adds the Kafka, minio:// and GCS-credential tests, which need a live stack
 TEST_MODE=docker cargo nextest run -- --ignored
 
 # The same ignored tests against the remote dev stack
@@ -355,12 +355,11 @@ dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kaf
 |---------|----------------|
 | `hyperi-ci check` | The pre-push gate. `make check` is the same. |
 | `cargo nextest run` | Unit, integration and object-store e2e. Those are not `#[ignore]`d, so it starts Azurite, fake-gcs-server and LocalStack via testcontainers and needs a Docker daemon. |
-| `TEST_MODE=docker cargo nextest run -- --ignored` | Adds the Kafka, MinIO and GCS-credential tests, which need a live stack. `TEST_MODE=remote` runs them against the remote dev stack. |
-| `cargo deny check advisories` | Advisories and yanked crates. Run it by hand and read it. |
+| `TEST_MODE=docker cargo nextest run -- --ignored` | Adds the Kafka, `minio://` and GCS-credential tests, which need a live stack (`docker compose -f docker-compose.dev.yaml up -d`). `TEST_MODE=remote` runs them against the remote dev stack. |
+| `cargo deny check advisories` | Advisories and yanked crates. `quality.rust.audit` and `quality.rust.deny` are `blocking`, so a red advisory fails `hyperi-ci check` and CI too. |
 
-Green says less than it looks, three ways:
+Green says less than it looks, two ways:
 
-- `quality.rust.audit` and `quality.rust.deny` are `warn`, so red advisories leave the run green (#85).
 - the `default` nextest profile sets `retries = 0` deliberately, because hyperi-ci never selects `--profile ci`. A retry there hides a real intermittent. A test pins it.
 - the `push` trigger ignores `docs/**` and `**.md`, so a docs-only push runs nothing. `pull_request` has no such filter.
 
