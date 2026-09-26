@@ -93,6 +93,26 @@ pub trait StorageBackend: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Refuse an archive path that could name something outside its destination:
+/// an absolute path, or one with a `.` or `..` segment.
+///
+/// Every backend checks the same rule, so a path one destination refuses is
+/// refused by all of them, and a path one accepts is named alike by all of them.
+///
+/// # Errors
+/// [`crate::Error::Refused`], because the same path is refused on every retry.
+pub fn confine(path: &str) -> Result<()> {
+    let relative_step = path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..");
+    if path.starts_with('/') || relative_step {
+        return Err(crate::Error::refused(format!(
+            "{path} is not a path under the archive destination"
+        )));
+    }
+    Ok(())
+}
+
 /// Prove the archive sink answers, with one listing capped at a single entry.
 ///
 /// A bucket that does not exist, an endpoint nothing is listening on, or a
@@ -106,7 +126,7 @@ pub async fn probe_sink(backend: &dyn StorageBackend) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::Error;
@@ -164,6 +184,31 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "unreachable"
+        }
+    }
+
+    #[test]
+    fn a_path_that_steps_out_of_the_destination_is_refused() {
+        for path in [
+            "../x",
+            "a/../../x",
+            "a/..",
+            "./a",
+            "a/./b",
+            "/etc/passwd",
+            "..",
+        ] {
+            let err = confine(path).expect_err(path);
+            assert!(err.is_refused(), "{path}: {err:?}");
+        }
+        for path in [
+            "",
+            "events/2026/09",
+            "events/=2E=2E/a",
+            "a/...",
+            "a/.hidden",
+        ] {
+            confine(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         }
     }
 

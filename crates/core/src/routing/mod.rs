@@ -14,7 +14,57 @@ use crate::{Error, Result};
 use compact_str::CompactString;
 use depth::{MAX_PARSE_DEPTH, json_depth_within};
 use sonic_rs::JsonValueTrait;
+use std::borrow::Cow;
 use tracing::trace;
+
+/// The escape byte [`path_segment`] writes before two hex digits.
+const SEGMENT_ESCAPE: u8 = b'=';
+
+/// Upper-case hex digits, indexed by nibble.
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Whether [`path_segment`] passes `byte` through: the characters a Kafka topic
+/// name may hold, which neither a filesystem nor an object store treats as
+/// syntax or re-encodes.
+fn plain_segment_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+}
+
+/// A record-carried value as one path segment, named the same under a local
+/// destination and in every object store.
+///
+/// Letters, digits, `-`, `_` and `.` pass through, so a topic or a source
+/// identifier keeps its name. Every other byte is written `=XX`, its value in
+/// upper-case hex, `=` itself included, so two values never share a name and no
+/// value carries a separator, a NUL or a byte an object store would re-encode.
+/// The empty value is written `=`, and the dots of `.` and `..` are encoded, so
+/// no segment names the directory it sits in or the one above.
+///
+/// Borrowed exactly when the value is its own segment, so a caller holding
+/// the value owned can keep it.
+#[must_use]
+pub fn path_segment(value: &str) -> Cow<'_, str> {
+    match value {
+        "" => return Cow::Owned(String::from("=")),
+        "." => return Cow::Owned(String::from("=2E")),
+        ".." => return Cow::Owned(String::from("=2E=2E")),
+        _ => {}
+    }
+    if value.bytes().all(plain_segment_byte) {
+        return Cow::Borrowed(value);
+    }
+    let mut encoded = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        if plain_segment_byte(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push(char::from(SEGMENT_ESCAPE));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0F)]));
+        }
+    }
+    Cow::Owned(encoded)
+}
 
 /// Where a message is archived, and which configured expression fields the
 /// payload did not carry.
@@ -63,15 +113,23 @@ impl Router {
         match self.config.mode.as_str() {
             "expression" => self.route_by_expression(message),
             _ => Ok(Routed {
-                destination: Self::route_by_topic(message),
+                destination: Self::topic_destination(message),
                 fallback_fields: Vec::new(),
             }),
         }
     }
 
-    /// Route by Kafka topic name
-    fn route_by_topic(message: &KafkaMessage) -> CompactString {
-        message.topic.clone()
+    /// The destination named by the record's topic alone, the fallback for a
+    /// record expression routing cannot read.
+    ///
+    /// On the direct transport the topic is the sender's routing key, so it is
+    /// encoded as any other record-carried value is.
+    #[must_use]
+    pub fn topic_destination(message: &KafkaMessage) -> CompactString {
+        match path_segment(&message.topic) {
+            Cow::Borrowed(_) => message.topic.clone(),
+            Cow::Owned(encoded) => CompactString::from(encoded),
+        }
     }
 
     /// Route by JSON field expressions
@@ -86,12 +144,17 @@ impl Router {
             .map_err(|e| Error::Routing(format!("invalid JSON: {e}")))?;
 
         let mut segments = Vec::with_capacity(self.config.expression_fields.len() + 1);
-        segments.push(message.topic.to_string());
+        segments.push(path_segment(&message.topic).into_owned());
         let mut fallback_fields = Vec::new();
 
         for (index, field_path) in self.config.expression_fields.iter().enumerate() {
             let resolved = if let Some(value) = extract_field(&json, field_path) {
-                value
+                // Record-carried, so attacker-controlled: one encoded segment.
+                if let Cow::Owned(encoded) = path_segment(&value) {
+                    encoded
+                } else {
+                    value
+                }
             } else {
                 fallback_fields.push(index);
                 self.config.default_segment.clone()
@@ -295,6 +358,67 @@ mod tests {
         let outcome = router.route(&msg).expect("route");
         assert_eq!(outcome.destination.as_str(), "events/unknown/unknown");
         assert_eq!(outcome.fallback_fields, vec![0, 1]);
+    }
+
+    // ---- path segments ----
+
+    #[test]
+    fn a_plain_value_is_its_own_segment_without_allocating() {
+        for value in ["acme", "cisco_ios.log", "tenant-01", "8.0.0", ".hidden"] {
+            assert!(
+                matches!(path_segment(value), Cow::Borrowed(segment) if segment == value),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn separators_nul_and_the_escape_byte_are_hex_encoded() {
+        assert_eq!(path_segment("a/b"), "a=2Fb");
+        assert_eq!(path_segment("a\\b"), "a=5Cb");
+        assert_eq!(path_segment("nul\u{0}"), "nul=00");
+        assert_eq!(path_segment("/etc/passwd"), "=2Fetc=2Fpasswd");
+        assert_eq!(path_segment("../../x"), "..=2F..=2Fx");
+        assert_eq!(path_segment("a=b"), "a=3Db");
+        assert_eq!(path_segment("a b"), "a=20b");
+        assert_eq!(path_segment("caf\u{e9}"), "caf=C3=A9");
+    }
+
+    #[test]
+    fn no_value_encodes_to_an_empty_or_relative_segment() {
+        assert_eq!(path_segment(""), "=");
+        assert_eq!(path_segment("."), "=2E");
+        assert_eq!(path_segment(".."), "=2E=2E");
+        assert_eq!(path_segment("..."), "...");
+    }
+
+    #[test]
+    fn topic_routing_encodes_a_topic_carried_by_the_record() {
+        let router = Router::new(RoutingConfig {
+            mode: "topic".to_string(),
+            ..Default::default()
+        });
+        let outcome = router
+            .route(&make_message("../../etc", "{}"))
+            .expect("route by topic");
+        assert_eq!(outcome.destination.as_str(), "..=2F..=2Fetc");
+        assert_eq!(
+            Router::topic_destination(&make_message("events", "{}")).as_str(),
+            "events"
+        );
+    }
+
+    #[test]
+    fn expression_routing_encodes_every_field_value() {
+        let router = Router::new(RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: vec!["org_id".to_string(), "kind".to_string()],
+            default_segment: "unknown".to_string(),
+        });
+        let outcome = router
+            .route(&make_message("events", r#"{"org_id":"..","kind":"a/b"}"#))
+            .expect("route");
+        assert_eq!(outcome.destination.as_str(), "events/=2E=2E/a=2Fb");
     }
 
     // ---- nesting depth ----

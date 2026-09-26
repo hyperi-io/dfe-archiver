@@ -1131,7 +1131,7 @@ impl Archiver {
                 }
                 scalo::logger::security::input_validation_failure("routing", &e.to_string(), None);
                 Some(dfe_archiver_core::routing::Routed {
-                    destination: msg.topic.clone(),
+                    destination: Router::topic_destination(msg),
                     fallback_fields: Vec::new(),
                 })
             }

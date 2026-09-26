@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use dfe_archiver_core::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConfig, S3Config};
-use dfe_archiver_core::storage::{Closed, PendingUpload, StorageBackend};
+use dfe_archiver_core::storage::{Closed, PendingUpload, StorageBackend, confine};
 use dfe_archiver_core::{Error, Result};
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
@@ -140,8 +140,10 @@ impl FileBackend {
         }
     }
 
-    fn full_path(&self, path: &str) -> PathBuf {
-        self.base_path.join(path)
+    /// `path` under the base, refused when it could name anything outside it.
+    fn full_path(&self, path: &str) -> Result<PathBuf> {
+        confine(path)?;
+        Ok(self.base_path.join(path))
     }
 }
 
@@ -159,10 +161,20 @@ async fn sync_dir(dir: &Path) -> std::io::Result<()> {
 #[async_trait]
 impl StorageBackend for FileBackend {
     async fn create(&self, path: &str) -> Result<()> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
+        let refuse_name = |e: std::io::Error| {
+            if e.kind() == std::io::ErrorKind::InvalidFilename {
+                // Too long a name is the same refusal on every retry.
+                Error::refused_with(format!("{path} cannot be named on this filesystem"), e)
+            } else {
+                Error::Io(e)
+            }
+        };
 
         if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(refuse_name)?;
         }
 
         OpenOptions::new()
@@ -174,7 +186,7 @@ impl StorageBackend for FileBackend {
                 std::io::ErrorKind::AlreadyExists => Error::AlreadyExists {
                     path: path.to_string(),
                 },
-                _ => Error::Io(e),
+                _ => refuse_name(e),
             })?;
         debug!(path = %full_path.display(), "Created file");
 
@@ -182,7 +194,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -202,7 +214,7 @@ impl StorageBackend for FileBackend {
     /// path, because `create` may have made any of them and a directory entry
     /// is durable only once its parent is synced.
     async fn close(&self, path: &str) -> Result<Closed> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         tokio::fs::File::open(&full_path).await?.sync_all().await?;
         for dir in Path::new(path).ancestors().skip(1) {
             sync_dir(&self.base_path.join(dir)).await?;
@@ -214,7 +226,9 @@ impl StorageBackend for FileBackend {
     /// Removes the partial file, whose records are read again or dropped, so
     /// no half-written line is left in the archive.
     async fn abort(&self, path: &str) {
-        let full_path = self.full_path(path);
+        let Ok(full_path) = self.full_path(path) else {
+            return;
+        };
         if let Err(e) = tokio::fs::remove_file(&full_path).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -223,18 +237,18 @@ impl StorageBackend for FileBackend {
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         Ok(full_path.exists())
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full_path = self.full_path(path);
+        let full_path = self.full_path(path)?;
         tokio::fs::remove_file(&full_path).await?;
         Ok(())
     }
 
     async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
-        let search_dir = self.full_path(prefix);
+        let search_dir = self.full_path(prefix)?;
         let base = &self.base_path;
         let mut results = Vec::new();
 
@@ -669,6 +683,7 @@ impl StorageBackend for ObjectStoreBackend {
     /// Stages the file locally. The key is refused here when the store would
     /// refuse it, before any record is written into the file.
     async fn create(&self, path: &str) -> Result<()> {
+        confine(path)?;
         let object_path = self.object_path(path);
         if object_path.as_ref().len() > MAX_OBJECT_KEY_BYTES {
             return Err(Error::refused(format!(
@@ -936,7 +951,7 @@ fn parse_bucket_prefix(path: &str) -> (&str, &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -1347,6 +1362,112 @@ mod tests {
         let err = backend.create(&long).await.expect_err("too long");
         assert!(err.is_refused(), "{err:?}");
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// Paths that step out of the destination, refused by both backends alike,
+    /// before anything is created.
+    const ESCAPING: [&str; 5] = [
+        "../escape.jsonl",
+        "events/../../escape.jsonl",
+        "/etc/escape.jsonl",
+        "./events/a.jsonl",
+        "events/./a.jsonl",
+    ];
+
+    #[tokio::test]
+    async fn the_file_backend_refuses_a_path_outside_its_base() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("archive");
+        let backend = FileBackend::new(&base);
+
+        for path in ESCAPING {
+            let err = backend.create(path).await.expect_err(path);
+            assert!(err.is_refused(), "{path}: {err:?}");
+            assert!(backend.append(path, b"x").await.is_err(), "{path}");
+            assert!(backend.close(path).await.is_err(), "{path}");
+        }
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).expect("dir").count(),
+            0,
+            "nothing was created anywhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_object_store_backend_refuses_the_same_paths() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+
+        for path in ESCAPING {
+            let err = backend.create(path).await.expect_err(path);
+            assert!(err.is_refused(), "{path}: {err:?}");
+        }
+        assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// A name longer than the filesystem allows is refused for good, so the
+    /// batch goes to the DLQ rather than retrying the same name for ever.
+    #[tokio::test]
+    async fn a_name_the_filesystem_cannot_hold_is_refused() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let backend = FileBackend::new(temp_dir.path());
+        let long = format!("events/{}.jsonl", "n".repeat(300));
+
+        let err = backend.create(&long).await.expect_err("too long a name");
+        assert!(err.is_refused(), "{err:?}");
+    }
+
+    /// A routed segment names the local file and the object alike: the object
+    /// store keeps every byte `path_segment` writes as it is, so a destination
+    /// reads the same under `file://` and in a bucket.
+    #[tokio::test]
+    async fn a_routed_segment_names_the_file_and_the_object_alike() {
+        use dfe_archiver_core::routing::path_segment;
+
+        let values = [
+            "..",
+            ".",
+            "",
+            "a/b",
+            "a\\b",
+            "nul\u{0}",
+            "=3D",
+            "{x}",
+            "a%2Fb",
+            "caf\u{e9}",
+            "q?#|*",
+        ];
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+        let local = TempDir::new().expect("create temp dir");
+        let file_backend = FileBackend::new(local.path());
+
+        for value in values {
+            let segment = path_segment(value);
+            assert_eq!(
+                ObjectPath::from(segment.as_ref()).as_ref(),
+                segment.as_ref(),
+                "{value:?}: the object store re-encodes {segment:?}"
+            );
+            let path = format!("events/{segment}/a.jsonl");
+            backend.create(&path).await.expect("stage");
+            backend.append(&path, b"x\n").await.expect("append");
+            let Closed::Pending(upload) = backend.close(&path).await.expect("close") else {
+                unreachable!("an object-store file is staged");
+            };
+            upload.attempt().await.expect("upload");
+            store
+                .head(&ObjectPath::from(format!("archive/{path}").as_str()))
+                .await
+                .unwrap_or_else(|e| panic!("{value:?}: no object at archive/{path}: {e}"));
+
+            file_backend.create(&path).await.expect("create");
+            file_backend.close(&path).await.expect("close");
+            assert!(
+                local.path().join(&path).is_file(),
+                "{value:?}: no file at {path}"
+            );
+        }
     }
 
     /// An abandoned file leaves no local copy and no staged bytes behind.

@@ -26,5 +26,7 @@ mod archive;
 mod config;
 #[path = "integration/test_runner_config.rs"]
 mod test_runner_config;
+#[path = "integration/traversal.rs"]
+mod traversal;
 #[path = "integration/workspace_manifests.rs"]
 mod workspace_manifests;
