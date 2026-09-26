@@ -61,10 +61,9 @@ build:
     features:
       - "jemalloc"
 
-# Publishing (on release)
-publish:
+# Releasing
+release:
   enabled: true
-  target: both
   binaries: both
   container:
     enabled: true
