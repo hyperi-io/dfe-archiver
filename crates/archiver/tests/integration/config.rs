@@ -55,7 +55,7 @@ fn env_example_assignments() -> Vec<(String, String)> {
 /// 3. `.env.example` starts the binary. It says `cp .env.example .env`, and
 ///    dotenvy loads that file before config resolves, so every name in it is a
 ///    live override.
-/// 4. `ARCHIVER_SPOOL_DIR` moves the tier-2 spool. It is the deployment's only
+/// 4. `ARCHIVER_SPOOL_DIR` moves the spool. It is the deployment's only
 ///    way off the default path, and the image is the only place that path
 ///    exists, so a name that reaches nothing is a boot failure in a container.
 #[test]

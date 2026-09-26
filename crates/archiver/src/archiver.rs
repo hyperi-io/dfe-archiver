@@ -451,7 +451,6 @@ fn settle_unreadable(offsets: OffsetSet, records: u64, path: &str, error: &Error
 struct LogSpamGuards {
     recv_error_last: AtomicU64,
     route_error_count: AtomicU64,
-    backpressure_active: AtomicBool,
     /// Set while a local write keeps failing and its batch is held.
     write_failing: AtomicBool,
     /// Input-validation security events, one a refused record.
@@ -481,8 +480,6 @@ fn sampled_reason(counter: &AtomicU64, rate: u64, reason: &str) -> Option<String
 struct RoutedBatch {
     /// Batches the buffer closed, for the writers.
     staged: Vec<StagedBatch>,
-    /// Set when the buffer refused a push, so the caller pauses.
-    backpressure: bool,
     /// Records nested past the parse depth, which never reach a buffer.
     too_deep: Vec<KafkaMessage>,
 }
@@ -591,10 +588,9 @@ pub struct Archiver {
 ///
 /// `Archiver::new` snapshots the config into `startup_config` and builds the
 /// transport, router, buffer, DLQ and writers from it, so only
-/// `kafka.batch_size` and `buffer.backpressure_pause_secs` are re-read while
-/// the process runs. Everything else keeps its startup value until a restart,
-/// and the reloader must say so rather than report a reload that was applied to
-/// nothing.
+/// `kafka.batch_size` is re-read while the process runs. Everything else keeps
+/// its startup value until a restart, and the reloader must say so rather than
+/// report a reload that was applied to nothing.
 #[must_use]
 pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
     let mut changed = Vec::new();
@@ -617,11 +613,7 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if old.archive != new.archive {
         changed.push("archive");
     }
-
-    // Same treatment for the one buffer field the backpressure pause re-reads.
-    let mut buffer = new.buffer.clone();
-    buffer.backpressure_pause_secs = old.buffer.backpressure_pause_secs;
-    if old.buffer != buffer {
+    if old.buffer != new.buffer {
         changed.push("buffer");
     }
 
@@ -706,6 +698,22 @@ fn record_routing_fallbacks(
             );
         }
     }
+}
+
+/// Buffer `message` for `destination`, and count the buffer an LRU eviction
+/// flushed to make room for it in `hot_buffer_evictions_total`.
+fn buffer_message(
+    buffer: &TieredBufferManager,
+    metrics: &ArchiverMetrics,
+    destination: &str,
+    message: KafkaMessage,
+) -> Vec<StagedBatch> {
+    let evictions = buffer.evictions();
+    let staged = buffer.push(destination, message);
+    if buffer.evictions() > evictions {
+        metrics.record_eviction();
+    }
+    staged
 }
 
 /// The bytes received records lease on the memory guard: their payloads.
@@ -960,9 +968,7 @@ fn buffer_config(
         max_hot_bytes: usize::try_from(hot_bytes_cap).unwrap_or(usize::MAX),
         hot_buffer_age_secs: config.buffer.flush_age_secs,
         spool_dir: config.buffer.spool_dir.clone().into(),
-        max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-        min_free_disk_bytes: 1024 * 1024 * 1024,  // 1GB
-        spool_compression: true,
+        min_free_disk_bytes: 1024 * 1024 * 1024,
     }
 }
 
@@ -1292,14 +1298,9 @@ impl Archiver {
         // per-batch throughput, so nothing is set here.
         self.memory_guard.add_bytes(received_bytes(&messages));
 
-        // Phase 1: route + buffer accumulate (returns staged batches, a
-        // backpressure flag set when the buffer rejects a push, and the records
-        // routing refused).
-        let RoutedBatch {
-            staged,
-            backpressure,
-            too_deep,
-        } = self.route_batch(messages);
+        // Phase 1: route + buffer accumulate (returns staged batches and the
+        // records routing refused).
+        let RoutedBatch { staged, too_deep } = self.route_batch(messages);
         self.dead_letter_too_deep(too_deep).await;
 
         // Phase 2: write into each destination's open file. A roll completes
@@ -1312,15 +1313,6 @@ impl Archiver {
         // Phase 3: release the offsets of durable files -- the at-least-once
         // release point.
         self.release_settled(settled).await;
-
-        if backpressure {
-            let pause_secs = self
-                .shared_config
-                .with(|c| c.buffer.backpressure_pause_secs);
-            tokio::time::sleep(Duration::from_secs(pause_secs)).await;
-        } else if log_state_change(&self.log_guards.backpressure_active, false) {
-            info!("Backpressure cleared -- normal processing resumed");
-        }
 
         self.update_pipeline_metrics();
     }
@@ -1382,10 +1374,8 @@ impl Archiver {
 
     /// Phase 1: parallel route + sequential buffer push.
     ///
-    /// Returns the staged batches (including any aged buffers picked up
-    /// while we're here), a `backpressure` flag -- set if the buffer
-    /// rejected a push, in which case aged-flush is skipped and the caller
-    /// is expected to pause -- and the records nested too deep to route.
+    /// Returns the staged batches, including any aged buffers picked up while
+    /// here, and the records nested too deep to route.
     fn route_batch(&self, messages: Vec<dfe_archiver_core::KafkaMessage>) -> RoutedBatch {
         // Phase 1a: Parallel route computation. `Router::route` is pure
         // (`&self, &KafkaMessage`) so par_iter is sound. Expression-routed
@@ -1395,7 +1385,6 @@ impl Archiver {
 
         // Phase 1b: Sequential buffer push (mutable buffer state).
         let mut all_staged: Vec<StagedBatch> = Vec::new();
-        let mut backpressure = false;
         let mut too_deep = Vec::new();
         for (message, routed) in messages.into_iter().zip(route_results) {
             let Some(routed) = routed else {
@@ -1421,48 +1410,33 @@ impl Archiver {
                 "Routed message"
             );
 
-            match self.buffer.push(&destination, message) {
-                Ok(staged_batches) => {
-                    for batch in &staged_batches {
-                        debug!(
-                            destination = %batch.destination,
-                            records = batch.record_count,
-                            bytes = batch.data.len(),
-                            trigger = "size_or_eviction",
-                            "Buffer staged batch"
-                        );
-                    }
-                    all_staged.extend(staged_batches);
-                }
-                Err(e) => {
-                    if log_state_change(&self.log_guards.backpressure_active, true) {
-                        warn!(error = %e, "Buffer push failed -- backpressure active");
-                    }
-                    self.metrics.record_disk_pressure();
-                    backpressure = true;
-                    break;
-                }
+            let staged_batches = buffer_message(&self.buffer, &self.metrics, &destination, message);
+            for batch in &staged_batches {
+                debug!(
+                    destination = %batch.destination,
+                    records = batch.record_count,
+                    bytes = batch.data.len(),
+                    trigger = "size_or_eviction",
+                    "Buffer staged batch"
+                );
             }
+            all_staged.extend(staged_batches);
         }
 
         // Picking up aged batches here keeps them moving even when no fresh
-        // batch is closing. Skipped under backpressure so we don't pile more
-        // I/O onto an already-saturated downstream.
-        if !backpressure {
-            let aged = self.buffer.flush_aged();
-            if !aged.is_empty() {
-                debug!(
-                    count = aged.len(),
-                    total_bytes = aged.iter().map(|b| b.data.len()).sum::<usize>(),
-                    "Flushing aged batches in process_messages"
-                );
-            }
-            all_staged.extend(aged);
+        // batch is closing.
+        let aged = self.buffer.flush_aged();
+        if !aged.is_empty() {
+            debug!(
+                count = aged.len(),
+                total_bytes = aged.iter().map(|b| b.data.len()).sum::<usize>(),
+                "Flushing aged batches in process_messages"
+            );
         }
+        all_staged.extend(aged);
 
         RoutedBatch {
             staged: all_staged,
-            backpressure,
             too_deep,
         }
     }
@@ -1729,7 +1703,6 @@ impl Archiver {
         let stats = self.buffer.stats();
         self.metrics
             .set_hot_buffer_stats(stats.current_hot_buffers, stats.current_hot_bytes);
-        self.metrics.set_spool_bytes(stats.current_spool_bytes);
         self.metrics.set_uploads(
             self.uploads.lock().len(),
             self.staging.bytes().load(Ordering::Relaxed),
@@ -2533,11 +2506,11 @@ impl Archiver {
 mod tests {
     use super::{
         RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader,
-        WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, dead_letter_refused_file,
-        held_record_cap, leased_bytes, publish_kafka_lag, received_bytes, record_files_opened,
-        record_rolls, record_routing_fallbacks, restart_required_changes, retry_delay,
-        sampled_reason, screen_dead_letters, sink_confirmation, upload_retry_delay, upload_slots,
-        upload_until_settled,
+        WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, buffer_message,
+        dead_letter_refused_file, held_record_cap, leased_bytes, publish_kafka_lag, received_bytes,
+        record_files_opened, record_rolls, record_routing_fallbacks, restart_required_changes,
+        retry_delay, sampled_reason, screen_dead_letters, sink_confirmation, upload_retry_delay,
+        upload_slots, upload_until_settled,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -2758,11 +2731,7 @@ mod tests {
 
         let mut batches = Vec::new();
         for (n, message) in messages.into_iter().enumerate() {
-            batches.extend(
-                buffer
-                    .push(&format!("dest-{}", n % 3), message)
-                    .expect("push"),
-            );
+            batches.extend(buffer.push(&format!("dest-{}", n % 3), message));
         }
         batches.extend(buffer.flush_all());
         assert!(batches.len() > 3, "several batches flushed");
@@ -2793,7 +2762,7 @@ mod tests {
                 .expect("buffer");
         for offset in 0.. {
             let message = KafkaMessage::for_test(vec![b'x'; RECORD - 1], "events", 0, offset);
-            if let Some(batch) = buffer.push("dest", message).expect("push").pop() {
+            if let Some(batch) = buffer.push("dest", message).pop() {
                 return batch;
             }
         }
@@ -3339,6 +3308,45 @@ mod tests {
         );
     }
 
+    /// A record for a destination past the 64 that buffer at once flushes the
+    /// least recently used buffer, and that eviction is counted once.
+    #[test]
+    fn an_lru_eviction_moves_hot_buffer_evictions_total() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = ArchiverMetrics::register(&manager, "test");
+        let spool = tempfile::TempDir::new().expect("spool");
+        let mut config = Config::default();
+        config.buffer.spool_dir = spool.path().display().to_string();
+        let buffer =
+            dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config, GIB))
+                .expect("buffer");
+
+        let mut evicted = Vec::new();
+        for offset in 0..65 {
+            let message = KafkaMessage::for_test(b"x".to_vec(), "events", 0, offset);
+            evicted.extend(buffer_message(
+                &buffer,
+                &metrics,
+                &format!("dest-{offset}"),
+                message,
+            ));
+        }
+        let again = KafkaMessage::for_test(b"x".to_vec(), "events", 0, 65);
+        evicted.extend(buffer_message(&buffer, &metrics, "dest-64", again));
+
+        assert_eq!(evicted.len(), 1, "the 65th destination evicts one buffer");
+        assert_eq!(evicted[0].destination.as_str(), "dest-0");
+        let rendered = manager.render();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == "archiver_hot_buffer_evictions_total 1"),
+            "one eviction, and none for a destination already buffering:\n{rendered}"
+        );
+    }
+
     /// Both halves of a `write_record` can roll, so the close counter is
     /// drained rather than returned -- returning one dropped the other.
     #[tokio::test]
@@ -3394,13 +3402,12 @@ mod tests {
         assert_eq!(restart_required_changes(&old, &new), vec!["archive"]);
     }
 
-    /// The two fields the running pipeline re-reads are reported as applied.
+    /// The one field the running pipeline re-reads is reported as applied.
     #[test]
     fn test_hot_reloaded_fields_are_not_restart_required() {
         let old = Config::default();
         let mut new = old.clone();
         new.kafka.batch_size = old.kafka.batch_size + 1;
-        new.buffer.backpressure_pause_secs = old.buffer.backpressure_pause_secs + 1;
 
         assert!(restart_required_changes(&old, &new).is_empty());
     }

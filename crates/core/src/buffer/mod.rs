@@ -6,10 +6,8 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-mod manager;
 mod tiered;
 
-pub use manager::BufferManager;
 pub use tiered::{
     BufferStatsSnapshot, DEFAULT_SPOOL_DIR, StagedBatch, TieredBufferConfig, TieredBufferManager,
 };

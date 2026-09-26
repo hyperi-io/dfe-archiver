@@ -27,15 +27,14 @@ pub use scalo::dlq::DlqConfig;
 ///
 /// ## Hot-reload behavior
 ///
-/// **Hot-reloaded**, because the pipeline re-reads them from the shared config:
+/// **Hot-reloaded**, because the pipeline re-reads it from the shared config:
 /// - `kafka.batch_size` -- once per receive
-/// - `buffer.backpressure_pause_secs` -- on each backpressure pause
 ///
 /// **Requires pod restart** -- everything else. `Archiver` snapshots the config
 /// at construction into `startup_config`, so a reload of `transport`,
-/// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
-/// the `buffer.*` flush thresholds is accepted and validated but does not reach
-/// the running pipeline. `restart_required_changes` names those sections, and
+/// `kafka.*`, `grpc.*`, `archive.*`, `buffer.*`, `routing.*`, `compression.*`
+/// or `dlq.*` is accepted and validated but does not reach the running
+/// pipeline. `restart_required_changes` names those sections, and
 /// the reloader warns instead of reporting a reload.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -477,11 +476,6 @@ pub struct BufferConfig {
     /// destination has no uploads, so this does not apply to it.
     pub writer_parallelism: usize,
 
-    /// How long to pause Kafka consumption after a backpressure trigger.
-    /// Lower values cycle faster but burn more CPU when downstream is slow;
-    /// higher values let buffers drain but increase tail latency.
-    pub backpressure_pause_secs: u64,
-
     /// Directory holding `uploads/`, where object-store files are staged until
     /// the store takes them, created at startup. Absolute because a relative
     /// path resolves under the container WORKDIR, which appuser cannot write.
@@ -495,7 +489,6 @@ impl Default for BufferConfig {
             flush_age_secs: 60,
             flush_records: 100_000,
             writer_parallelism: 2,
-            backpressure_pause_secs: 5,
             spool_dir: DEFAULT_SPOOL_DIR.to_string(),
         }
     }

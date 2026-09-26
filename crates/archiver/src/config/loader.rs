@@ -246,6 +246,22 @@ mod tests {
         validate_config(&config).expect("default config should be valid");
     }
 
+    /// A key the archiver no longer reads is ignored, so a config file that
+    /// still carries one loads with the rest of its section applied.
+    #[test]
+    fn a_key_the_archiver_does_not_read_still_loads() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "buffer:\n  backpressure_pause_secs: 5\n  flush_bytes: 4096\n",
+        )
+        .expect("write config");
+
+        let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
+        assert_eq!(config.buffer.flush_bytes, 4096);
+    }
+
     #[test]
     fn test_default_dlq_routes_common_to_standard_topic() {
         let config = Config::default();

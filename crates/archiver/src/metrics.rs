@@ -7,9 +7,7 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use metrics::{counter, gauge, histogram};
-use scalo::metrics::groups::{
-    AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics,
-};
+use scalo::metrics::groups::{AppMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics};
 use scalo::metrics::{FlushTrigger, MetricsManager, ServiceMetrics, TransportKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -114,7 +112,7 @@ impl RemovalReason {
 ///
 /// Layer 1: `ServiceMetrics` (platform `dfe_*` metrics)
 /// Layer 2: Group structs (`AppMetrics`, `BufferMetrics`, `ConsumerMetrics`,
-///          `SinkMetrics`, `BackpressureMetrics`)
+///          `SinkMetrics`)
 /// Layer 3: Archiver-specific metrics (compression, archive roll, etc.)
 pub struct ArchiverMetrics {
     /// Standard platform metrics (None in tests without a metrics exporter)
@@ -127,7 +125,6 @@ pub struct ArchiverMetrics {
     pub buffer: Option<BufferMetrics>,
     pub consumer: Option<ConsumerMetrics>,
     pub sink: Option<SinkMetrics>,
-    pub backpressure: Option<BackpressureMetrics>,
 
     // EPS (events per second) rate tracking.
     // parking_lot::Mutex used for poison-free locking (Instant::elapsed cannot panic,
@@ -145,7 +142,6 @@ impl Default for ArchiverMetrics {
             buffer: None,
             consumer: None,
             sink: None,
-            backpressure: None,
             eps_counter: AtomicU64::new(0),
             eps_last_update: parking_lot::Mutex::new(Instant::now()),
         }
@@ -163,7 +159,6 @@ impl ArchiverMetrics {
         let buffer = BufferMetrics::new(manager);
         let consumer = ConsumerMetrics::new(manager);
         let sink = SinkMetrics::new(manager);
-        let backpressure = BackpressureMetrics::new(manager);
 
         // Layer 3: Archiver-specific metrics
         // Existing metrics (kept for backwards compatibility)
@@ -177,10 +172,6 @@ impl ArchiverMetrics {
         let _ = manager.counter("files_closed_total", "Total archive files closed (rolled)");
         let _ = manager.counter("flush_operations_total", "Total flush operations");
         let _ = manager.counter("archive_errors_total", "Total archive errors");
-        let _ = manager.counter(
-            "disk_pressure_events_total",
-            "Total disk pressure backpressure events",
-        );
 
         let _ = manager.gauge(
             "kafka_lag",
@@ -203,7 +194,7 @@ impl ArchiverMetrics {
         );
         let _ = manager.counter(
             "hot_buffer_evictions_total",
-            "LRU hot buffer eviction events",
+            "Hot buffers flushed early because a record for another destination needed their slot",
         );
         let _ = manager.gauge(
             "compression_ratio",
@@ -260,7 +251,6 @@ impl ArchiverMetrics {
             buffer: Some(buffer),
             consumer: Some(consumer),
             sink: Some(sink),
-            backpressure: Some(backpressure),
             eps_counter: AtomicU64::new(0),
             eps_last_update: parking_lot::Mutex::new(Instant::now()),
         }
@@ -506,34 +496,12 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Record disk pressure event
-    pub fn record_disk_pressure(&self) {
-        counter!("disk_pressure_events_total").increment(1);
-        if let Some(ref bp) = self.backpressure {
-            bp.record_event();
-        }
-    }
-
-    /// Record backpressure pause duration
-    pub fn record_backpressure_duration(&self, duration_secs: f64) {
-        if let Some(ref bp) = self.backpressure {
-            bp.record_duration(duration_secs);
-        }
-    }
-
     /// Update hot buffer stats
     pub fn set_hot_buffer_stats(&self, count: usize, bytes: usize) {
         gauge!("hot_buffers_active").set(count as f64);
         gauge!("hot_buffers_bytes").set(bytes as f64);
         if let Some(ref buffer) = self.buffer {
             buffer.set_buffer(bytes, count);
-        }
-    }
-
-    /// Update spool size
-    pub fn set_spool_bytes(&self, bytes: u64) {
-        if let Some(ref dfe) = self.dfe {
-            dfe.spool_bytes(bytes as f64);
         }
     }
 
@@ -897,10 +865,7 @@ mod tests {
         m.record_error();
         m.record_sink_error("file");
         m.record_sink_duration("file", 0.005);
-        m.record_disk_pressure();
-        m.record_backpressure_duration(0.1);
         m.set_hot_buffer_stats(10, 8192);
-        m.set_spool_bytes(0);
         m.record_batch_size(1024);
         m.record_recv_duration(0.05);
         m.record_commit(1);

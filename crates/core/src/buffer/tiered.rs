@@ -12,22 +12,12 @@ use compact_str::CompactString;
 use dashmap::DashMap;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use scalo::logger::helpers::log_state_change;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
-/// Per-instance log-spam guards for disk pressure conditions.
-/// Live on `TieredBufferManager` (not as module statics) so state does not
-/// leak across nextest test runs that share a process.
-#[derive(Default)]
-struct LogSpamGuards {
-    spool_full: AtomicBool,
-    disk_low: AtomicBool,
-}
-
-/// Default tier 2 spool directory, and the path the image pre-creates for
+/// Default spool directory, and the path the image pre-creates for
 /// `appuser`. A relative default resolves under the root-owned WORKDIR.
 pub const DEFAULT_SPOOL_DIR: &str = "/var/spool/dfe/archiver";
 
@@ -52,17 +42,11 @@ pub struct TieredBufferConfig {
     /// Flush age for hot buffers (seconds)
     pub hot_buffer_age_secs: u64,
 
-    /// Staging spool directory
+    /// Spool directory, created at construction.
     pub spool_dir: PathBuf,
 
-    /// Maximum spool size in bytes (disk protection)
-    pub max_spool_bytes: u64,
-
-    /// Minimum free disk space to maintain (bytes)
+    /// Free space the spool volume must have at construction (bytes).
     pub min_free_disk_bytes: u64,
-
-    /// Enable compression for spooled data
-    pub spool_compression: bool,
 }
 
 impl Default for TieredBufferConfig {
@@ -74,9 +58,7 @@ impl Default for TieredBufferConfig {
             max_hot_bytes: usize::MAX,
             hot_buffer_age_secs: 30,
             spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
-            max_spool_bytes: 10 * 1024 * 1024 * 1024,
             min_free_disk_bytes: 1024 * 1024 * 1024,
-            spool_compression: true,
         }
     }
 }
@@ -212,21 +194,15 @@ pub struct TieredBufferManager {
     hot_buffers: DashMap<CompactString, HotBuffer>,
     lru: Mutex<LruTracker>,
     stats: BufferStats,
-    log_guards: LogSpamGuards,
 }
 
 /// Buffer statistics
 #[derive(Default)]
 pub struct BufferStats {
-    pub messages_buffered: AtomicU64,
-    pub hot_buffer_hits: AtomicU64,
+    /// Buffers holding records that an LRU eviction flushed to make room.
     pub hot_buffer_evictions: AtomicU64,
-    pub staging_writes: AtomicU64,
-    pub archive_writes: AtomicU64,
     pub current_hot_buffers: AtomicUsize,
     pub current_hot_bytes: AtomicUsize,
-    pub current_spool_bytes: AtomicU64,
-    pub disk_pressure_events: AtomicU64,
 }
 
 /// Check available disk space on the volume containing the given path
@@ -250,7 +226,6 @@ impl TieredBufferManager {
 
         info!(
             spool_dir = %config.spool_dir.display(),
-            max_spool_bytes = config.max_spool_bytes,
             min_free_disk = config.min_free_disk_bytes,
             available_disk = available,
             "Tiered buffer manager initialized"
@@ -261,73 +236,23 @@ impl TieredBufferManager {
             hot_buffers: DashMap::with_capacity(config.max_hot_buffers),
             config,
             stats: BufferStats::default(),
-            log_guards: LogSpamGuards::default(),
         })
     }
 
-    /// Check if we have enough disk space for a spool write
-    pub fn check_disk_space(&self, write_size: u64) -> Result<()> {
-        let current_spool = self.stats.current_spool_bytes.load(Ordering::Relaxed);
-        if current_spool + write_size > self.config.max_spool_bytes {
-            self.stats
-                .disk_pressure_events
-                .fetch_add(1, Ordering::Relaxed);
-            if log_state_change(&self.log_guards.spool_full, true) {
-                warn!(
-                    current_spool,
-                    write_size,
-                    max = self.config.max_spool_bytes,
-                    "Spool size limit reached — backpressure"
-                );
-            }
-            return Err(Error::storage(format!(
-                "spool full: {} + {} > {} bytes",
-                current_spool, write_size, self.config.max_spool_bytes
-            )));
-        }
-
-        let available = get_available_disk_space(&self.config.spool_dir).unwrap_or(0);
-        if available < self.config.min_free_disk_bytes + write_size {
-            self.stats
-                .disk_pressure_events
-                .fetch_add(1, Ordering::Relaxed);
-            if log_state_change(&self.log_guards.disk_low, true) {
-                warn!(
-                    available,
-                    write_size,
-                    min_free = self.config.min_free_disk_bytes,
-                    "Disk space low — backpressure"
-                );
-            }
-            return Err(Error::storage(format!(
-                "disk full: {} available, need {} + {} reserved",
-                available, write_size, self.config.min_free_disk_bytes
-            )));
-        }
-
-        Ok(())
+    /// Buffers holding records that an LRU eviction has flushed, since
+    /// construction.
+    #[must_use]
+    pub fn evictions(&self) -> u64 {
+        self.stats.hot_buffer_evictions.load(Ordering::Relaxed)
     }
 
-    /// Record bytes written to spool (for tracking)
-    pub fn record_spool_write(&self, bytes: u64) {
-        self.stats
-            .current_spool_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Record bytes consumed from spool (for tracking)
-    pub fn record_spool_drain(&self, bytes: u64) {
-        self.stats
-            .current_spool_bytes
-            .fetch_sub(bytes, Ordering::Relaxed);
-    }
-
-    /// Buffer a message for a destination
-    pub fn push(&self, destination: &str, message: KafkaMessage) -> Result<Vec<StagedBatch>> {
+    /// Buffer a message for a destination, and return the batches it closed:
+    /// its own buffer at a flush threshold, one an LRU eviction flushed, and
+    /// the largest ones past the shared cap.
+    #[must_use]
+    pub fn push(&self, destination: &str, message: KafkaMessage) -> Vec<StagedBatch> {
         let key = CompactString::from(destination);
         let (payload, offset) = message.into_parts();
-
-        self.stats.messages_buffered.fetch_add(1, Ordering::Relaxed);
 
         let mut batches_to_write = Vec::new();
 
@@ -352,7 +277,6 @@ impl TieredBufferManager {
                 self.stats
                     .current_hot_bytes
                     .fetch_sub(buffer.size(), Ordering::Relaxed);
-                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
                 batches_to_write.push(buffer.drain(evict_key));
                 self.stats
                     .hot_buffer_evictions
@@ -373,7 +297,6 @@ impl TieredBufferManager {
         self.stats
             .current_hot_bytes
             .fetch_add(payload_size, Ordering::Relaxed);
-        self.stats.hot_buffer_hits.fetch_add(1, Ordering::Relaxed);
 
         trace!(
             destination = %key,
@@ -405,14 +328,13 @@ impl TieredBufferManager {
             self.stats
                 .current_hot_bytes
                 .fetch_sub(flush_bytes, Ordering::Relaxed);
-            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
             batches_to_write.push(batch);
         }
         // The cap walks every buffer, so this destination's entry is released first.
         drop(entry);
         self.flush_largest_past_cap(&mut batches_to_write);
 
-        Ok(batches_to_write)
+        batches_to_write
     }
 
     /// Flush the largest hot buffers until those left hold no more than
@@ -442,7 +364,6 @@ impl TieredBufferManager {
             self.stats
                 .current_hot_bytes
                 .fetch_sub(bytes, Ordering::Relaxed);
-            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -465,7 +386,6 @@ impl TieredBufferManager {
                 self.stats
                     .current_hot_bytes
                     .fetch_sub(entry.size(), Ordering::Relaxed);
-                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
                 batches.push(entry.drain(key.clone()));
             }
         }
@@ -491,7 +411,6 @@ impl TieredBufferManager {
                 self.stats
                     .current_hot_bytes
                     .fetch_sub(entry.size(), Ordering::Relaxed);
-                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
                 batches.push(entry.drain(key));
             }
         }
@@ -502,21 +421,9 @@ impl TieredBufferManager {
     /// Get current stats snapshot
     pub fn stats(&self) -> BufferStatsSnapshot {
         BufferStatsSnapshot {
-            messages_buffered: self.stats.messages_buffered.load(Ordering::Relaxed),
-            hot_buffer_hits: self.stats.hot_buffer_hits.load(Ordering::Relaxed),
-            hot_buffer_evictions: self.stats.hot_buffer_evictions.load(Ordering::Relaxed),
-            staging_writes: self.stats.staging_writes.load(Ordering::Relaxed),
-            archive_writes: self.stats.archive_writes.load(Ordering::Relaxed),
             current_hot_buffers: self.stats.current_hot_buffers.load(Ordering::Relaxed),
             current_hot_bytes: self.stats.current_hot_bytes.load(Ordering::Relaxed),
-            current_spool_bytes: self.stats.current_spool_bytes.load(Ordering::Relaxed),
-            disk_pressure_events: self.stats.disk_pressure_events.load(Ordering::Relaxed),
         }
-    }
-
-    /// Get disk protection config for visibility
-    pub fn disk_protection_config(&self) -> (u64, u64) {
-        (self.config.max_spool_bytes, self.config.min_free_disk_bytes)
     }
 
     /// Bytes the hot buffers hold, summed buffer by buffer rather than read
@@ -530,15 +437,8 @@ impl TieredBufferManager {
 /// Snapshot of buffer statistics
 #[derive(Debug, Clone)]
 pub struct BufferStatsSnapshot {
-    pub messages_buffered: u64,
-    pub hot_buffer_hits: u64,
-    pub hot_buffer_evictions: u64,
-    pub staging_writes: u64,
-    pub archive_writes: u64,
     pub current_hot_buffers: usize,
     pub current_hot_bytes: usize,
-    pub current_spool_bytes: u64,
-    pub disk_pressure_events: u64,
 }
 
 #[cfg(test)]
@@ -575,21 +475,29 @@ mod tests {
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
-        let batches = manager
-            .push("dest1", make_message(b"msg1", "topic", 0))
-            .expect("push");
+        let batches = manager.push("dest1", make_message(b"msg1", "topic", 0));
         assert!(batches.is_empty(), "no eviction yet");
 
-        let batches = manager
-            .push("dest2", make_message(b"msg2", "topic", 1))
-            .expect("push");
+        let batches = manager.push("dest2", make_message(b"msg2", "topic", 1));
         assert!(batches.is_empty(), "no eviction yet");
 
-        let batches = manager
-            .push("dest3", make_message(b"msg3", "topic", 2))
-            .expect("push");
+        assert_eq!(manager.evictions(), 0);
+
+        let batches = manager.push("dest3", make_message(b"msg3", "topic", 2));
         assert_eq!(batches.len(), 1, "should evict one");
         assert_eq!(batches[0].destination.as_str(), "dest1");
+        assert_eq!(manager.evictions(), 1, "the eviction is counted");
+    }
+
+    /// An evicted buffer that already flushed holds nothing, so its eviction
+    /// flushes nothing and is not counted.
+    #[test]
+    fn an_eviction_of_an_empty_buffer_is_not_counted() {
+        let (_spool, config) = spooled(1, 1);
+        let manager = TieredBufferManager::new(config).expect("create");
+        assert_eq!(manager.push("a", make_message(b"x", "t", 0)).len(), 1);
+        assert_eq!(manager.push("b", make_message(b"y", "t", 1)).len(), 1);
+        assert_eq!(manager.evictions(), 0);
     }
 
     #[test]
@@ -598,12 +506,10 @@ mod tests {
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
-        let batches = manager
-            .push(
-                "dest1",
-                make_message(b"this is a longer message", "topic", 0),
-            )
-            .expect("push");
+        let batches = manager.push(
+            "dest1",
+            make_message(b"this is a longer message", "topic", 0),
+        );
 
         assert_eq!(batches.len(), 1, "should flush");
         assert_eq!(batches[0].destination.as_str(), "dest1");
@@ -615,15 +521,13 @@ mod tests {
 
         let manager = TieredBufferManager::new(config).expect("create manager");
 
-        manager
-            .push("dest1", make_message(b"msg1", "topic", 0))
-            .expect("push");
-        manager
-            .push("dest2", make_message(b"msg2", "topic", 1))
-            .expect("push");
-        manager
-            .push("dest3", make_message(b"msg3", "topic", 2))
-            .expect("push");
+        for (offset, destination) in (0..).zip(["dest1", "dest2", "dest3"]) {
+            assert!(
+                manager
+                    .push(destination, make_message(b"msg", "topic", offset))
+                    .is_empty()
+            );
+        }
 
         let batches = manager.flush_all();
         assert_eq!(batches.len(), 3, "should flush all");
@@ -633,11 +537,15 @@ mod tests {
     fn test_lru_access_order() {
         let (_spool, config) = spooled(3, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
-        manager.push("a", make_message(b"1", "t", 0)).expect("push");
-        manager.push("b", make_message(b"2", "t", 1)).expect("push");
-        manager.push("c", make_message(b"3", "t", 2)).expect("push");
-        manager.push("a", make_message(b"4", "t", 3)).expect("push"); // touch "a"
-        let batches = manager.push("d", make_message(b"5", "t", 4)).expect("push");
+        // The second "a" touches it, so "b" is the least recently used.
+        for (offset, destination) in (0..).zip(["a", "b", "c", "a"]) {
+            assert!(
+                manager
+                    .push(destination, make_message(b"1", "t", offset))
+                    .is_empty()
+            );
+        }
+        let batches = manager.push("d", make_message(b"5", "t", 4));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].destination.as_str(), "b"); // "b" evicted, not "a"
     }
@@ -646,15 +554,13 @@ mod tests {
     fn test_lru_repeated_access_no_eviction() {
         let (_spool, config) = spooled(2, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
-        manager.push("a", make_message(b"1", "t", 0)).expect("push");
-        manager.push("b", make_message(b"2", "t", 1)).expect("push");
+        assert!(manager.push("a", make_message(b"1", "t", 0)).is_empty());
+        assert!(manager.push("b", make_message(b"2", "t", 1)).is_empty());
         for i in 2..100 {
-            let batches = manager
-                .push(
-                    if i % 2 == 0 { "a" } else { "b" },
-                    make_message(b"x", "t", i),
-                )
-                .expect("push");
+            let batches = manager.push(
+                if i % 2 == 0 { "a" } else { "b" },
+                make_message(b"x", "t", i),
+            );
             assert!(batches.is_empty(), "no eviction for existing keys at i={i}");
         }
     }
@@ -663,15 +569,13 @@ mod tests {
     fn test_direct_append_ndjson_format() {
         let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
-        manager
-            .push("dest", make_message(b"line1", "t", 0))
-            .expect("push");
-        manager
-            .push("dest", make_message(b"line2", "t", 1))
-            .expect("push");
-        manager
-            .push("dest", make_message(b"line3", "t", 2))
-            .expect("push");
+        for (offset, line) in (0..).zip([&b"line1"[..], b"line2", b"line3"]) {
+            assert!(
+                manager
+                    .push("dest", make_message(line, "t", offset))
+                    .is_empty()
+            );
+        }
         let batches = manager.flush_all();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].record_count, 3);
@@ -683,9 +587,11 @@ mod tests {
         let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         for i in 0..5 {
-            manager
-                .push("dest", make_message(b"msg", "topic", i))
-                .expect("push");
+            assert!(
+                manager
+                    .push("dest", make_message(b"msg", "topic", i))
+                    .is_empty()
+            );
         }
         let batches = manager.flush_all();
         assert_eq!(batches[0].offsets.len(), 5);
@@ -702,13 +608,9 @@ mod tests {
     fn test_size_flush_triggers_at_buffer_limit() {
         let (_spool, config) = spooled(10, 20);
         let manager = TieredBufferManager::new(config).expect("create");
-        let batches = manager
-            .push("dest", make_message(b"fifteen_bytes!!", "t", 0))
-            .expect("push");
+        let batches = manager.push("dest", make_message(b"fifteen_bytes!!", "t", 0));
         assert!(batches.is_empty(), "should not flush yet");
-        let batches = manager
-            .push("dest", make_message(b"more!", "t", 1))
-            .expect("push");
+        let batches = manager.push("dest", make_message(b"more!", "t", 1));
         assert_eq!(batches.len(), 1, "should flush on size trigger");
         assert_eq!(batches[0].record_count, 2);
     }
@@ -717,12 +619,12 @@ mod tests {
     fn test_empty_payload_handling() {
         let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
-        manager
-            .push("dest", make_message(b"", "t", 0))
-            .expect("push");
-        manager
-            .push("dest", make_message(b"data", "t", 1))
-            .expect("push");
+        assert!(manager.push("dest", make_message(b"", "t", 0)).is_empty());
+        assert!(
+            manager
+                .push("dest", make_message(b"data", "t", 1))
+                .is_empty()
+        );
         let batches = manager.flush_all();
         assert_eq!(batches[0].data, b"\ndata\n");
         assert_eq!(batches[0].record_count, 2);
@@ -744,11 +646,7 @@ mod tests {
         for offset in 0..RECORDS {
             let destination = format!("dest-{}", offset % 64);
             let payload = vec![b'x'; RECORD - 1];
-            batches.extend(
-                manager
-                    .push(&destination, make_message(&payload, "t", offset))
-                    .expect("push"),
-            );
+            batches.extend(manager.push(&destination, make_message(&payload, "t", offset)));
             let held = manager.held_bytes();
             most_held = most_held.max(held);
             assert!(held <= CAP, "{held} bytes held after offset {offset}");
@@ -785,14 +683,10 @@ mod tests {
         let manager = TieredBufferManager::new(config).expect("create");
 
         for offset in 0..3 {
-            let flushed = manager
-                .push("large", make_message(b"123456789", "t", offset))
-                .expect("push");
+            let flushed = manager.push("large", make_message(b"123456789", "t", offset));
             assert!(flushed.is_empty());
         }
-        let flushed = manager
-            .push("small", make_message(b"123456789", "t", 3))
-            .expect("push past the cap");
+        let flushed = manager.push("small", make_message(b"123456789", "t", 3));
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].destination.as_str(), "large");
         assert_eq!(flushed[0].record_count, 3);
@@ -810,26 +704,32 @@ mod tests {
         let (_spool, mut config) = spooled(10, 1024 * 1024);
         config.hot_buffer_age_secs = 0;
         let manager = TieredBufferManager::new(config).expect("create");
-        manager
-            .push("dest", make_message(b"aged", "t", 0))
-            .expect("push");
+        let pushed = manager.push("dest", make_message(b"aged", "t", 0));
 
         let aged = manager.flush_aged();
-        assert!(!aged.is_empty() || manager.held_bytes() == 0);
+        assert_eq!(
+            pushed.len() + aged.len(),
+            1,
+            "the record flushes once, at the push or by age"
+        );
         assert_eq!(manager.stats().current_hot_bytes, manager.held_bytes());
     }
 
     /// No more than `max_hot_buffers` destinations buffer at once, and the
-    /// buffer count follows the evictions.
+    /// buffer count and the eviction count follow the evictions.
     #[test]
     fn no_more_than_max_hot_buffers_destinations_buffer_at_once() {
         let (_spool, config) = spooled(64, 1024 * 1024);
         let manager = TieredBufferManager::new(config).expect("create");
-        for offset in 0..100 {
-            manager
-                .push(&format!("dest-{offset}"), make_message(b"x", "t", offset))
-                .expect("push");
-        }
+        let evicted: usize = (0..100)
+            .map(|offset| {
+                manager
+                    .push(&format!("dest-{offset}"), make_message(b"x", "t", offset))
+                    .len()
+            })
+            .sum();
+        assert_eq!(evicted, 36);
+        assert_eq!(manager.evictions(), 36);
         assert_eq!(manager.hot_buffers.len(), 64);
         assert_eq!(manager.stats().current_hot_buffers, 64);
     }
@@ -841,9 +741,11 @@ mod tests {
         let (_spool, config) = spooled(10, 100_000);
         let manager = TieredBufferManager::new(config).expect("create");
         for (offset, payload) in (0i64..).zip([&b"one"[..], b"two\nlines", b"", b"four"]) {
-            manager
-                .push("dest", make_message(payload, "t", offset))
-                .expect("push");
+            assert!(
+                manager
+                    .push("dest", make_message(payload, "t", offset))
+                    .is_empty()
+            );
         }
         let batches = manager.flush_all();
         let records: Vec<&[u8]> = batches[0].records().collect();
