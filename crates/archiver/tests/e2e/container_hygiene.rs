@@ -14,7 +14,7 @@
 //! pin the scheme so it cannot drift back to testcontainers' defaults.
 //!
 //! Note what is deliberately NOT in scope: the dev-stack containers in
-//! `docker-compose.dev.yaml` (`archiver-minio`, `archiver-minio-init`). Those
+//! `docker-compose.dev.yaml` (`archiver-redpanda`, `archiver-s3`). Those
 //! belong to the developer who ran `docker compose up` and are correctly named
 //! for that. The convention covers containers a TEST starts.
 
