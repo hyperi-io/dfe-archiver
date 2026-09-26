@@ -202,7 +202,7 @@ impl Staging {
     }
 
     /// Move a staged file and its manifest into the quarantine directory for
-    /// an operator, or remove them when it is at [`QUARANTINE_BYTES_CAP`].
+    /// an operator, or remove them when it is at its 1 GiB cap.
     #[must_use]
     pub fn quarantine(&self, local: &Path) -> Quarantined {
         let manifest = with_suffix(local, MANIFEST_SUFFIX);
