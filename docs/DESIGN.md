@@ -552,6 +552,10 @@ routing:
   default_segment: "unknown"
 ```
 
+### Nesting Depth
+
+Expression routing scans each record for its nesting depth before it parses it, because sonic-rs recurses once per level with no limit and about 20,000 levels overflow a 2 MiB worker stack. A record nested past 64 levels is never parsed: it goes to the DLQ as it arrived, one entry under its topic with the reason `payload nesting exceeds the maximum parse depth of 64`, and its offset is released `Rejected`. With the DLQ off, as on the direct transport, or when no DLQ backend can hold it, the record is dropped and counted in `messages_dropped_total`. Topic routing parses nothing, so it archives every record.
+
 ---
 
 ## Compression
@@ -811,7 +815,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_messages_received_total` | Messages received from Kafka |
 | `dfe_archiver_messages_archived_total` | Records in archive files the store confirmed |
 | `dfe_archiver_messages_written_total` | Records written into an open archive file, before the store confirms it |
-| `dfe_archiver_messages_dropped_total` | Records dropped because the store refused their object, or the DLQ their entry, for good |
+| `dfe_archiver_messages_dropped_total` | Records dropped because the store refused their object, the DLQ their entry, or routing their nesting depth, for good |
 | `dfe_archiver_messages_dlq_total` | Messages sent to DLQ |
 | `dfe_archiver_bytes_written_total` | Uncompressed bytes written |
 | `dfe_archiver_bytes_compressed_total` | Compressed bytes written |
