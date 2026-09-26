@@ -75,6 +75,11 @@ pub enum Error {
     #[error("routing error: {0}")]
     Routing(String),
 
+    /// The record nests deeper than routing will parse, so the same bytes are
+    /// refused every time. The message is the reason its dead letter carries.
+    #[error("payload nesting exceeds the maximum parse depth of {max}")]
+    TooDeep { max: usize },
+
     /// Runtime error
     #[error("runtime error: {0}")]
     Runtime(String),
@@ -174,6 +179,7 @@ impl Error {
             // Data - DLQ
             Self::Serialization(_)
             | Self::Routing(_)
+            | Self::TooDeep { .. }
             | Self::Compression(_)
             | Self::Refused { .. } => ErrorCategory::Data,
 
@@ -229,6 +235,12 @@ mod tests {
             format!("{e}"),
             "20 records were neither archived nor dead-lettered and hold the commit below them"
         );
+
+        let e = Error::TooDeep { max: 64 };
+        assert_eq!(
+            format!("{e}"),
+            "payload nesting exceeds the maximum parse depth of 64"
+        );
     }
 
     #[test]
@@ -261,6 +273,8 @@ mod tests {
             Error::Routing("no field".into()).category(),
             ErrorCategory::Data
         );
+        assert_eq!(Error::TooDeep { max: 64 }.category(), ErrorCategory::Data);
+        assert!(!Error::TooDeep { max: 64 }.is_retryable());
         assert_eq!(
             Error::Compression("corrupt".into()).category(),
             ErrorCategory::Data

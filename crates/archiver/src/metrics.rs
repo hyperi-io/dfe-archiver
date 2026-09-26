@@ -174,7 +174,7 @@ impl ArchiverMetrics {
         );
         let _ = manager.counter(
             "messages_dropped_total",
-            "Records dropped because the store refused their object, or the DLQ their entry, for good",
+            "Records dropped because the store refused their object, the DLQ their entry, or routing their nesting depth, for good",
         );
         let _ = manager.gauge(
             "uploads_pending",
@@ -244,8 +244,8 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Record records dropped because the store refused their object, or the
-    /// DLQ their entry, for good.
+    /// Record records dropped because the store refused their object, the DLQ
+    /// their entry, or routing their nesting depth, for good.
     pub fn record_dropped(&self, count: u64) {
         counter!("messages_dropped_total").increment(count);
     }

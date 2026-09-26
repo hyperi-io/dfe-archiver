@@ -32,14 +32,15 @@ use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
 use dfe_archiver_core::config::{ArchiveConfig, HELD_OFFSET_BYTES};
 use dfe_archiver_core::routing::Router;
+use dfe_archiver_core::routing::depth::MAX_PARSE_DEPTH;
 use dfe_archiver_core::storage::{PendingUpload, probe_sink};
-use dfe_archiver_core::types::{KafkaOffset, OffsetSet};
+use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
 use dfe_archiver_io::{KafkaStatsEmitter, ReceivedBatch, SourceTransport, Staging};
 use lru::LruCache;
 use rayon::prelude::*;
-use scalo::dlq::{Dlq, DlqEntry};
+use scalo::dlq::{Dlq, DlqEntry, DlqSource};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use scalo::memory::MemoryGuard;
 use scalo::metrics::FlushTrigger;
@@ -414,6 +415,16 @@ struct LogSpamGuards {
     recv_error_last: AtomicU64,
     route_error_count: AtomicU64,
     backpressure_active: AtomicBool,
+}
+
+/// What routing one received block produced.
+struct RoutedBatch {
+    /// Batches the buffer closed, for the writers.
+    staged: Vec<StagedBatch>,
+    /// Set when the buffer refused a push, so the caller pauses.
+    backpressure: bool,
+    /// Records nested past the parse depth, which never reach a buffer.
+    too_deep: Vec<KafkaMessage>,
 }
 
 /// How one staged batch's write ended.
@@ -1060,9 +1071,15 @@ impl Archiver {
         let batch_bytes: u64 = messages.iter().map(|m| m.payload.len() as u64).sum();
         self.memory_guard.add_bytes(batch_bytes);
 
-        // Phase 1: route + buffer accumulate (returns staged batches and a
-        // backpressure flag set when the buffer rejects a push).
-        let (staged, backpressure) = self.route_batch(messages);
+        // Phase 1: route + buffer accumulate (returns staged batches, a
+        // backpressure flag set when the buffer rejects a push, and the records
+        // routing refused).
+        let RoutedBatch {
+            staged,
+            backpressure,
+            too_deep,
+        } = self.route_batch(messages);
+        self.dead_letter_too_deep(too_deep).await;
 
         // Phase 2: write into each destination's open file. A roll completes
         // the previous file, which settles its offsets or hands them to its
@@ -1087,51 +1104,62 @@ impl Archiver {
         self.update_pipeline_metrics();
     }
 
+    /// Where one record goes, or `None` for a record refused before the
+    /// routing parse for its nesting depth. Any other routing failure falls
+    /// back to the record's topic.
+    fn route_one(
+        &self,
+        msg: &dfe_archiver_core::KafkaMessage,
+    ) -> Option<dfe_archiver_core::routing::Routed> {
+        match self.router.route(msg) {
+            Ok(routed) => Some(routed),
+            Err(e @ Error::TooDeep { .. }) => {
+                scalo::logger::security::input_validation_failure("routing", &e.to_string(), None);
+                None
+            }
+            Err(e) => {
+                self.metrics.record_routing_error();
+                if log_sampled(&self.log_guards.route_error_count, 1000) {
+                    warn!(
+                        error = %e,
+                        total = self
+                            .log_guards
+                            .route_error_count
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        "Routing failed, using topic (sampled 1/1000)"
+                    );
+                }
+                scalo::logger::security::input_validation_failure("routing", &e.to_string(), None);
+                Some(dfe_archiver_core::routing::Routed {
+                    destination: msg.topic.clone(),
+                    fallback_fields: Vec::new(),
+                })
+            }
+        }
+    }
+
     /// Phase 1: parallel route + sequential buffer push.
     ///
     /// Returns the staged batches (including any aged buffers picked up
-    /// while we're here) and a `backpressure` flag -- set if the buffer
+    /// while we're here), a `backpressure` flag -- set if the buffer
     /// rejected a push, in which case aged-flush is skipped and the caller
-    /// is expected to pause.
-    fn route_batch(
-        &self,
-        messages: Vec<dfe_archiver_core::KafkaMessage>,
-    ) -> (Vec<StagedBatch>, bool) {
+    /// is expected to pause -- and the records nested too deep to route.
+    fn route_batch(&self, messages: Vec<dfe_archiver_core::KafkaMessage>) -> RoutedBatch {
         // Phase 1a: Parallel route computation. `Router::route` is pure
         // (`&self, &KafkaMessage`) so par_iter is sound. Expression-routed
         // configs do a sonic-rs JSON parse per message here.
-        let route_results: Vec<dfe_archiver_core::routing::Routed> = messages
-            .par_iter()
-            .map(|msg| {
-                self.router.route(msg).unwrap_or_else(|e| {
-                    self.metrics.record_routing_error();
-                    if log_sampled(&self.log_guards.route_error_count, 1000) {
-                        warn!(
-                            error = %e,
-                            total = self
-                                .log_guards
-                                .route_error_count
-                                .load(std::sync::atomic::Ordering::Relaxed),
-                            "Routing failed, using topic (sampled 1/1000)"
-                        );
-                    }
-                    scalo::logger::security::input_validation_failure(
-                        "routing",
-                        &e.to_string(),
-                        None,
-                    );
-                    dfe_archiver_core::routing::Routed {
-                        destination: msg.topic.clone(),
-                        fallback_fields: Vec::new(),
-                    }
-                })
-            })
-            .collect();
+        let route_results: Vec<Option<dfe_archiver_core::routing::Routed>> =
+            messages.par_iter().map(|msg| self.route_one(msg)).collect();
 
         // Phase 1b: Sequential buffer push (mutable buffer state).
         let mut all_staged: Vec<StagedBatch> = Vec::new();
         let mut backpressure = false;
+        let mut too_deep = Vec::new();
         for (message, routed) in messages.into_iter().zip(route_results) {
+            let Some(routed) = routed else {
+                too_deep.push(message);
+                continue;
+            };
             let dfe_archiver_core::routing::Routed {
                 destination,
                 fallback_fields,
@@ -1190,7 +1218,11 @@ impl Archiver {
             all_staged.extend(aged);
         }
 
-        (all_staged, backpressure)
+        RoutedBatch {
+            staged: all_staged,
+            backpressure,
+            too_deep,
+        }
     }
 
     /// Phase 2: write staged batches concurrently, one task per destination
@@ -1944,6 +1976,92 @@ impl Archiver {
             DeliveryStatus::Errored
         };
         self.release(tokens_of(batch.offsets), status).await;
+    }
+
+    /// Dead-letter the records routing refused for nesting past
+    /// [`MAX_PARSE_DEPTH`], one entry each under its topic.
+    ///
+    /// The same bytes are refused on every attempt, so a record is released
+    /// `Rejected` once the DLQ confirms it, and `Dropped`, counted, with the
+    /// DLQ off or when no DLQ backend can hold it. A DLQ write that fails
+    /// releases them `Errored`, which ends the loop so a restart refuses them
+    /// again.
+    async fn dead_letter_too_deep(&self, records: Vec<KafkaMessage>) {
+        if records.is_empty() {
+            return;
+        }
+        let count = records.len();
+        let reason = Error::TooDeep {
+            max: MAX_PARSE_DEPTH,
+        }
+        .to_string();
+        // The records leave memory whether the DLQ takes them or not.
+        self.memory_guard
+            .release(records.iter().map(|m| m.payload.len() as u64).sum());
+
+        if !self.dlq.is_enabled() {
+            self.metrics.record_dropped(count as u64);
+            error!(
+                records = count,
+                reason = %reason,
+                "Dropped records nested too deep to route, with no DLQ to take them"
+            );
+            let offsets = records.iter().map(KafkaOffset::from).collect();
+            self.release(tokens_of(offsets), DeliveryStatus::Dropped)
+                .await;
+            return;
+        }
+
+        let entries = records
+            .into_iter()
+            .map(|message| {
+                let source =
+                    DlqSource::kafka(message.topic.as_str(), message.partition, message.offset);
+                let destination = message.topic.to_string();
+                let (payload, offset) = message.into_parts();
+                let entry = DlqEntry::new("dfe-archiver", reason.as_str(), payload)
+                    .with_destination(destination)
+                    .with_source(source);
+                (entry, offset)
+            })
+            .collect();
+        let Screened { writable, refused } = screen_dead_letters(&self.dlq, entries);
+        let (entries, written): (Vec<DlqEntry>, Vec<KafkaOffset>) = writable.into_iter().unzip();
+        let outcome = if entries.is_empty() {
+            Ok(())
+        } else {
+            self.dlq.write_confirmed(entries).await
+        };
+        if let Err(dlq_err) = outcome {
+            error!(
+                error = %dlq_err,
+                records = count,
+                "The DLQ could not take records nested too deep to route; a restart refuses them again"
+            );
+            let all = written
+                .into_iter()
+                .chain(refused.into_iter().map(|(_, offset)| offset))
+                .collect();
+            self.release(tokens_of(all), DeliveryStatus::Errored).await;
+            return;
+        }
+        if !written.is_empty() {
+            self.metrics.record_dlq(written.len() as u64);
+            scalo::logger::security::record_dlq("routing", &reason, None);
+            self.release(tokens_of(written), DeliveryStatus::Rejected)
+                .await;
+        }
+        if let Some((why, _)) = refused.first() {
+            self.metrics.record_dropped(refused.len() as u64);
+            error!(
+                records = refused.len(),
+                reason = %why,
+                "Dropped records nested too deep to route that the DLQ can never hold"
+            );
+            let dropped = refused.into_iter().map(|(_, offset)| offset).collect();
+            self.release(tokens_of(dropped), DeliveryStatus::Dropped)
+                .await;
+        }
     }
 
     /// Route inbound-filter DLQ entries surfaced by the transport, then release

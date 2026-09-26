@@ -974,3 +974,164 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
         "only the pushes the listener answered are archived"
     );
 }
+
+/// The reason every depth refusal carries into the DLQ.
+const TOO_DEEP: &str = "payload nesting exceeds the maximum parse depth of 64";
+
+fn nested_array(depth: usize) -> Vec<u8> {
+    format!("{}1{}", "[".repeat(depth), "]".repeat(depth)).into_bytes()
+}
+
+fn nested_object(depth: usize) -> Vec<u8> {
+    format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth)).into_bytes()
+}
+
+/// Records nested far past the parse depth, each of which overflows a 2 MiB
+/// worker stack if expression routing parses it.
+fn too_deep_records() -> Vec<Vec<u8>> {
+    vec![nested_object(20_000), nested_array(100_000)]
+}
+
+/// A record nested past the parse depth is dead-lettered as it arrived, under
+/// its topic, while the records around it are archived: the commit moves past
+/// all of them and the loop keeps running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deeply_nested_record_is_dead_lettered_and_the_rest_are_archived() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("too_deep").await else {
+        return;
+    };
+    let Some(minio) = common::acquire_minio("too_deep").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+    kafka.create_topic("events", &[]).await;
+    kafka.create_topic("dlq", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    // Expression routing is the mode that parses each record.
+    config.routing.mode = "expression".to_string();
+    config.archive.roll_interval_secs = Some(2);
+    dead_letter_to(&mut config, "dlq");
+    let (manager, metrics) = metrics();
+
+    let deep = too_deep_records();
+    kafka.produce("events", &records(0..10)).await;
+    kafka.produce("events", &deep).await;
+    kafka.produce("events", &records(10..20)).await;
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the commit moved past every record", || async {
+        kafka.committed(GROUP, "events") == Some(22)
+    })
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a deeply nested record ended the loop"
+    );
+    stop(&archiver, running).await;
+
+    assert_eq!(counter(&manager, "messages_dlq_total"), 2);
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+    assert_eq!(
+        ids(&minio.lines(BUCKET).await),
+        (0..20).collect::<Vec<_>>(),
+        "every record around the deep ones is archived, once"
+    );
+    let mut dead: Vec<Vec<u8>> = kafka
+        .read_all("dlq")
+        .iter()
+        .map(|bytes| {
+            let entry: scalo::dlq::DlqEntry = serde_json::from_slice(bytes).expect("a DLQ entry");
+            assert_eq!(entry.reason, TOO_DEEP);
+            assert_eq!(entry.destination.as_deref(), Some("events"));
+            let source = entry
+                .source
+                .expect("a dead letter names where it came from");
+            assert_eq!(source.topic.as_deref(), Some("events"));
+            entry.payload
+        })
+        .collect();
+    dead.sort();
+    let mut want = deep;
+    want.sort();
+    assert!(
+        dead == want,
+        "each deep record reaches the DLQ as it arrived"
+    );
+}
+
+/// With no DLQ, as on the direct transport, a record nested past the parse
+/// depth is dropped and counted, and the records around it are archived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deeply_nested_record_with_no_dlq_is_dropped_and_the_rest_are_archived() {
+    init_logs();
+    let Some(minio) = common::acquire_minio("too_deep_no_dlq").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let port = common::free_low_port(&[]);
+    let mut config = archive_to(&minio, spool.path());
+    config.transport = TRANSPORT_GRPC.to_string();
+    config.grpc.listen = Some(format!("127.0.0.1:{port}"));
+    config.routing.mode = "expression".to_string();
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    let sender = GrpcTransport::new(&GrpcConfig {
+        endpoint: Some(format!("http://127.0.0.1:{port}")),
+        ..GrpcConfig::default()
+    })
+    .await
+    .expect("sender");
+    let push = |payload: Vec<u8>| {
+        let sender = &sender;
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while !matches!(
+                sender.send("traffic", payload.clone().into()).await,
+                SendResult::Ok
+            ) {
+                assert!(Instant::now() < deadline, "the listener never took a push");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    push(record(0)).await;
+    for payload in too_deep_records() {
+        push(payload).await;
+    }
+    push(record(1)).await;
+
+    wait_until("both deep records were dropped", || async {
+        counter(&manager, "messages_dropped_total") >= 2
+    })
+    .await;
+    wait_until("both records around them were written", || async {
+        counter(&manager, "messages_written_total") >= 2
+    })
+    .await;
+    assert!(
+        !running.is_finished(),
+        "a deeply nested record ended the loop"
+    );
+    stop(&archiver, running).await;
+
+    assert_eq!(counter(&manager, "messages_dropped_total"), 2);
+    assert_eq!(counter(&manager, "messages_dlq_total"), 0);
+    assert_eq!(
+        ids(&minio.lines(BUCKET).await),
+        vec![0, 1],
+        "the records around the deep ones are archived"
+    );
+}

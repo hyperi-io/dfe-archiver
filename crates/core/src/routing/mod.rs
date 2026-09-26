@@ -6,10 +6,13 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+pub mod depth;
+
 use crate::config::RoutingConfig;
 use crate::types::KafkaMessage;
 use crate::{Error, Result};
 use compact_str::CompactString;
+use depth::{MAX_PARSE_DEPTH, json_depth_within};
 use sonic_rs::JsonValueTrait;
 use tracing::trace;
 
@@ -50,6 +53,12 @@ impl Router {
     }
 
     /// Route message to destination path
+    ///
+    /// # Errors
+    ///
+    /// In expression mode, [`Error::TooDeep`] for a payload nested past
+    /// [`MAX_PARSE_DEPTH`], which is never parsed, and [`Error::Routing`] for
+    /// one that is not JSON.
     pub fn route(&self, message: &KafkaMessage) -> Result<Routed> {
         match self.config.mode.as_str() {
             "expression" => self.route_by_expression(message),
@@ -67,6 +76,12 @@ impl Router {
 
     /// Route by JSON field expressions
     fn route_by_expression(&self, message: &KafkaMessage) -> Result<Routed> {
+        // sonic-rs recurses per level with no limit, so a deep record would overflow the stack.
+        if !json_depth_within(&message.payload, MAX_PARSE_DEPTH) {
+            return Err(Error::TooDeep {
+                max: MAX_PARSE_DEPTH,
+            });
+        }
         let json: sonic_rs::Value = sonic_rs::from_slice(&message.payload)
             .map_err(|e| Error::Routing(format!("invalid JSON: {e}")))?;
 
@@ -280,5 +295,96 @@ mod tests {
         let outcome = router.route(&msg).expect("route");
         assert_eq!(outcome.destination.as_str(), "events/unknown/unknown");
         assert_eq!(outcome.fallback_fields, vec![0, 1]);
+    }
+
+    // ---- nesting depth ----
+
+    /// The stack a Tokio or rayon worker thread gets by default.
+    const WORKER_STACK: usize = 2 * 1024 * 1024;
+
+    /// A stack that holds 64 levels of `sonic_rs::Value` parsing, whose frames
+    /// are far larger in a debug build than in release.
+    const BOUND_STACK: usize = if cfg!(debug_assertions) {
+        16 * 1024 * 1024
+    } else {
+        WORKER_STACK
+    };
+
+    /// Run `test` on a thread with `stack` bytes of stack, and fail unless it returns.
+    fn on_stack(stack: usize, test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(test)
+            .expect("spawn the routing thread")
+            .join()
+            .expect("the routing thread must return");
+    }
+
+    fn nested_array(depth: usize) -> String {
+        format!("{}1{}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn nested_object(depth: usize) -> String {
+        format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth))
+    }
+
+    fn router_in(mode: &str) -> Router {
+        Router::new(RoutingConfig {
+            mode: mode.to_string(),
+            expression_fields: vec!["org_id".to_string()],
+            default_segment: "unknown".to_string(),
+        })
+    }
+
+    #[test]
+    fn a_deeply_nested_record_is_refused_without_parsing_it() {
+        on_stack(WORKER_STACK, || {
+            let expression = router_in("expression");
+            let topic = router_in("topic");
+            for depth in [20_000, 100_000] {
+                let deep = [
+                    nested_array(depth),
+                    nested_object(depth),
+                    // A deep sibling ahead of the routing field.
+                    format!(r#"{{"sibling":{},"org_id":"acme"}}"#, nested_array(depth)),
+                ];
+                for payload in deep {
+                    let message = make_message("events", &payload);
+                    let refused = expression
+                        .route(&message)
+                        .expect_err("a record past the bound must be refused");
+                    assert!(
+                        matches!(refused, Error::TooDeep { max: 64 }),
+                        "depth {depth}: {refused}"
+                    );
+                    assert_eq!(
+                        refused.to_string(),
+                        "payload nesting exceeds the maximum parse depth of 64"
+                    );
+                    // Topic routing never parses, so it has nothing to refuse.
+                    let routed = topic.route(&message).expect("route by topic");
+                    assert_eq!(routed.destination.as_str(), "events");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn the_bound_is_64_levels() {
+        on_stack(BOUND_STACK, || {
+            let router = router_in("expression");
+            // The object around the routing field is the first level.
+            let at = format!(r#"{{"org_id":"acme","n":{}}}"#, nested_array(63));
+            let over = format!(r#"{{"org_id":"acme","n":{}}}"#, nested_array(64));
+
+            let outcome = router
+                .route(&make_message("events", &at))
+                .expect("64 levels are parsed and routed");
+            assert_eq!(outcome.destination.as_str(), "events/acme");
+            let refused = router
+                .route(&make_message("events", &over))
+                .expect_err("65 levels are refused");
+            assert!(matches!(refused, Error::TooDeep { max: 64 }), "{refused}");
+        });
     }
 }
