@@ -20,7 +20,7 @@ use dfe_archiver::compression::create_compressor;
 use dfe_archiver::config::{ArchiveConfig, Config, SharedConfig, TRANSPORT_GRPC};
 use dfe_archiver::io::create_backend;
 use dfe_archiver::metrics::ArchiverMetrics;
-use scalo::memory::{MemoryGuard, MemoryGuardConfig};
+use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use scalo::metrics::{MetricsConfig, MetricsManager};
 use scalo::transport::{GrpcConfig, GrpcTransport, SendResult, TransportSender};
 use scalo::{AckHeldSource, SelfRegulationConfig};
@@ -1083,8 +1083,13 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
     config.grpc.listen = Some(format!("127.0.0.1:{port}"));
     let (manager, metrics) = metrics();
 
+    // Reservations only, so the host's memory use cannot hold the latch above
+    // its resume threshold once the brake lifts.
     let governor = SelfRegulationConfig::default()
-        .build(Arc::new(MemoryGuard::new(MemoryGuardConfig::default())))
+        .build(Arc::new(MemoryGuard::with_usage_source(
+            MemoryGuardConfig::default(),
+            UsageSource::Reservations,
+        )))
         .expect("self-regulation is on by default");
     // A hard source that holds intake while it reads its cap.
     let brake = Arc::new(AtomicU64::new(0));
