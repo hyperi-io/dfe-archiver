@@ -482,7 +482,8 @@ pub struct BufferConfig {
     /// higher values let buffers drain but increase tail latency.
     pub backpressure_pause_secs: u64,
 
-    /// Tier 2 spool directory, created at startup. Absolute because a relative
+    /// Directory holding `uploads/`, where object-store files are staged until
+    /// the store takes them, created at startup. Absolute because a relative
     /// path resolves under the container WORKDIR, which appuser cannot write.
     pub spool_dir: String,
 }
@@ -658,7 +659,7 @@ impl Config {
     }
 
     /// Where archives are written, how they are rolled and compressed, where
-    /// the tier-2 spool lives, plus the metrics address and the S3 credentials
+    /// they are staged, plus the metrics address and the S3 credentials
     /// the same operator supplies.
     fn apply_archive_env(&mut self) {
         if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {

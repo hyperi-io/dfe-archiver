@@ -22,8 +22,8 @@ contract).
 - **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
 - **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete
-- **Memory-capped**: Tiered buffering with configurable limits
-- **Disk protection**: Backpressure when spool exceeds limits or disk space is low
+- **Memory-capped**: every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first
+- **Disk-bounded**: intake pauses as staged uploads near 8 GiB, and a full disk holds intake rather than dropping records
 
 ## Architecture
 
@@ -46,11 +46,13 @@ Handles high destination cardinality (e.g., 10,000+ orgs) without exhausting mem
 
 ```mermaid
 flowchart TB
-    R["incoming records"] --> T1["Tier 1: hot buffers<br/>64 destinations x 1MB = 64MB"]
-    T1 -->|LRU eviction| T2["Tier 2: disk spool<br/>bounded by max_spool_bytes (10GB default)"]
-    T2 -->|batch flush| AW["Archive writers<br/>8 concurrent, semaphore-controlled"]
-    T2 -. spool over limit or low disk .-> BP["Backpressure<br/>pause Kafka consume"]
+    R["incoming records"] --> HB["Hot buffers, in memory<br/>64 destinations at once<br/>a quarter of the memory limit together"]
+    HB -->|"flush_bytes, flush_records, age,<br/>LRU eviction or the cap"| AW["Archive writers<br/>one per destination, up to max_writers (1024)"]
+    AW -->|file closes| ST["Local file synced, or staged file uploaded<br/>writer_parallelism uploads at once"]
+    ST -. held records or staged bytes near their caps .-> BP["Intake pauses<br/>Kafka partitions paused"]
 ```
+
+Nothing spools to disk ahead of the writers: the only local files are the archive files, and the staged copies of object-store files until the store takes them.
 
 ## Quick Start
 
@@ -228,19 +230,21 @@ archive:
 
 On `kafka`, a record's offset is committed only once the archive file holding it is durable: the store confirmed the upload, or the local file and its directories synced to disk. An object-store file is written to `<buffer.spool_dir>/uploads` and uploaded whole when it rolls -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first -- so the store is never on the write path. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
 
-A failed upload keeps the staged file and its held offsets, and retries in the background with exponential backoff and jitter, from 0.5 s up to 60 s between attempts, until the store takes it. Each attempt is a fresh upload, so an outage of any length costs disk and consumer lag, never records. Intake pauses (the Kafka partitions, through the self-regulation gate) as held records near a quarter of the memory limit at 32 bytes each, or staged files near 8 GiB. A store outage becomes consumer lag, not memory or disk growth. A refusal the store gives for the object itself -- a key past the 1024-byte limit, an entity too large -- is permanent. The file's records then go to the DLQ, each as its own entry, and only with the DLQ off, or for a record too large for any DLQ backend, are they dropped, counted in `messages_dropped_total` with the reason logged. `messages_archived_total` counts records when the store confirms their file, `messages_written_total` when they go into an open file.
+A failed upload keeps the staged file and its held offsets, and retries in the background with exponential backoff and jitter, from 0.5 s up to 60 s between attempts, until the store takes it. Each attempt is a fresh upload, and a failed one is aborted so it leaves no parts in the store. An outage of any length costs disk and consumer lag, never records. A staged copy that cannot be read back is moved to `<buffer.spool_dir>/uploads/quarantine` and its records are read again after a restart. Intake pauses (the Kafka partitions, through the self-regulation gate) as held records near a quarter of the memory limit at 32 bytes each, or staged files near 8 GiB. A store outage becomes consumer lag, not memory or disk growth. A refusal the store gives for the object itself -- a key past the 1024-byte limit, an entity too large -- is permanent. The file's records then go to the DLQ, each as its own entry, and only with the DLQ off, or for a record too large for any DLQ backend, are they dropped, counted in `messages_dropped_total` with the reason logged. `messages_archived_total` counts records when the store confirms their file, `messages_written_total` when they go into an open file.
 
 Each held record costs about 32 bytes of memory until its file is durable. So while offsets are held an unset `roll_interval_secs` is 300 rather than 3600: at 10k records/s that is 96 MB instead of 1.15 GB. A configured value always wins, and one above 900 logs a startup warning.
 
-If the archiver is killed, every record not yet in a durable file is read again after the restart: up to one roll interval of intake plus whatever was still uploading, as duplicates, never as loss. The restart clears the staged files the killed process left, since their records are read again.
+If the archiver is killed, every record not yet in a durable file is read again after the restart: up to one roll interval of intake plus whatever was still uploading, as duplicates, never as loss. The restart removes the staged files the killed process left, since their records are read again.
 
-A batch no file takes goes to the DLQ one record per entry, and only a write the DLQ confirms releases a record's offset. When the store refused the batch for good, a record is dropped with its reason, counted in `messages_dropped_total`, if the DLQ is off or the record alone is too large for any DLQ backend once base64 grows it by a third. Every other batch -- a local disk failure, or a DLQ write that fails -- holds the commit below it, and nothing reads it again while the process runs, so the archiver drains and exits non-zero and the restart reads it again. A disk that stays broken therefore restarts the pod repeatedly rather than losing records.
+A local write that fails in a way that can clear -- a full or failing disk -- is held and retried with backoff and jitter, its batch and offsets kept, and the archiver receives nothing more until it lands. A disk that stays broken shows as consumer lag, not lost records. Once shutdown begins, a write still failing gets 10 s, then its records are left for the restart to read again.
 
-Expression routing never parses a record nested past 64 levels, because sonic-rs recurses once per level with no limit and about 20,000 levels overflow a 2 MiB worker stack. The record goes to the DLQ as it arrived, under its topic, with the reason `payload nesting exceeds the maximum parse depth of 64`, and with the DLQ off it is dropped and counted in `messages_dropped_total`.
+A batch refused for good -- by the store, or by the codec -- goes to the DLQ one record per entry, and only a write the DLQ confirms releases a record's offset. A record is dropped with its reason, counted in `messages_dropped_total`, if the DLQ is off or the record alone is too large for any DLQ backend once base64 grows it by a third. A DLQ write that fails, or a file that cannot complete, holds the commit below it, and nothing reads it again while the process runs, so the archiver drains and exits non-zero and the restart reads it again.
 
-`kafka.acknowledgements.enabled: false` commits at receipt instead, so a kill loses what the open files and buffers held.
+Expression routing never parses a record nested past 64 levels, because sonic-rs recurses once per level with no limit and about 20,000 levels overflow a 2 MiB worker stack. The record goes to the DLQ as it arrived, under its topic, with the reason `payload nesting exceeds the maximum parse depth of 64`, and with the DLQ off it is dropped and counted in `messages_dropped_total{reason="too_deep"}`.
 
-On `grpc` the listener answers each push once its records are queued: a record is released only when its file is durable, long after any sender's deadline. So the archive copy on the direct path is at-most-once -- a kill loses what the queue, the open files and the pending uploads held. A graceful stop still writes every record it answered: the listener closes first, its queue is drained into the files, then the files complete and upload. The drain gives uploads 20 s. A file still uploading then is lost on `grpc`, and read again after the restart on `kafka`.
+`kafka.acknowledgements.enabled: false` commits at receipt instead, so a kill loses what the open files and buffers held. A record there that is written nowhere -- its file could not complete, or the DLQ could not take it -- is counted in `messages_dropped_total{reason="unreplayable"}`, and so is one on `grpc`.
+
+On `grpc` the listener answers each push once its records are queued: a record is released only when its file is durable, long after any sender's deadline. So the archive copy on the direct path is at-most-once -- a kill loses what the queue and the open files held. A graceful stop still writes every record it answered: the listener closes first, its queue is drained into the files, then the files complete and upload. The drain gives uploads 20 s. A file still uploading then keeps its staged copy: the restart uploads it on `grpc` or with acknowledgements off, and removes it on `kafka`, where its records are read again. A staged file no process completed is moved to quarantine rather than uploaded.
 
 Every file name carries a component unique to the writer, so two replicas writing one destination in one window never complete an upload onto the same key.
 
@@ -248,12 +252,14 @@ Every file name carries a component unique to the writer, so two replicas writin
 
 ## Disk Protection
 
-The archiver protects against disk exhaustion:
+The only files on local disk are archive files: a local destination's open files, and under `<buffer.spool_dir>/uploads` each object-store file until the store takes it.
 
-- `max_spool_bytes`: Hard limit on spool size (default 10GB)
-- `min_free_disk_bytes`: Minimum free space to maintain (default 1GB)
+- The archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume.
+- Intake pauses as staged bytes near 8 GiB, under the spool volume's 10 GiB `emptyDir` limit, so a store outage becomes consumer lag.
+- The quarantine directory holds at most 1 GiB. A file past it is removed and counted in `staged_files_removed_total{reason="quarantine_full"}`.
+- A local write that fails on a full disk is held and retried, never dropped.
 
-When limits are exceeded, `push()` returns an error (backpressure), causing Kafka consumption to pause until space is freed.
+Neither limit is configured. `staged_bytes` and `uploads_pending` show the disk in use.
 
 ## Metrics
 
@@ -263,7 +269,9 @@ Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers
 
 **Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend), `BackpressureMetrics`.
 
-**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`.
+**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `writer_evictions_total`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`, `routing_fallback_total{field}`, `kafka_commit_errors_total`.
+
+**Archiver delivery** (`dfe_archiver_*`): `messages_written_total`, `messages_archived_total`, `messages_dlq_total`, `messages_dropped_total{reason}` (`refused`, `dlq_too_large`, `too_deep`, `unreplayable`), `uploads_pending`, `staged_bytes`, `staged_files_recovered_total`, `staged_files_quarantined_total{reason}`, `staged_files_removed_total{reason}`, and `pipeline_delivery_guarantee{guarantee, reason}`.
 
 **rdkafka stats** (`rdkafka_*`): `broker_rtt_avg_seconds{broker}`, `topic_partition_consumer_lag{topic,partition}`, `consumer_rebalance_count` - collected via sidecar `StatsContext` consumer.
 

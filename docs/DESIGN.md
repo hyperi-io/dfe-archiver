@@ -62,10 +62,10 @@ Configuration is in `.hyperi-ci.yaml`.
 
 ```text
 Push to any branch
-  → CI workflow: Detect → Quality (fmt, clippy, audit) → Test (with coverage)
+  -> CI workflow: Detect -> Quality (fmt, clippy, audit) -> Test (with coverage)
 
 GitHub Release created (via semantic-release)
-  → Publish workflow: Detect → Build (x86_64 + aarch64) → Publish
+  -> Publish workflow: Detect -> Build (x86_64 + aarch64) -> Publish
 ```
 
 ### Build Targets
@@ -130,7 +130,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 - **PB/s scale throughput** - optimized hot path, SIMD JSON parsing
 - **High destination cardinality** - supports 10,000+ concurrent destinations via tiered buffering
 - **At-least-once delivery** - Kafka offsets committed only after successful archive write
-- **Memory efficiency** - bounded memory usage with disk spillover
+- **Bounded memory** - every destination's buffer together takes at most a quarter of the memory limit
 - **Pluggable compression** - zstd (default), lz4, snappy, gzip
 
 ### Tech Stack
@@ -150,79 +150,51 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 ## Architecture
 
 ```text
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                     DFE ARCHIVER                        │
-                    └─────────────────────────────────────────────────────────┘
-                                              │
-┌──────────────┐    ┌─────────────────────────▼───────────────────────────────┐
-│              │    │                                                          │
-│    KAFKA     │───▶│  Kafka Transport (scalo)                                    │
-│   (Strimzi/  │    │  - Batch consumption (10K messages)                      │
-│   AutoMQ)    │    │  - SASL/TLS authentication                              │
-│              │    │  - Consumer group coordination                          │
-└──────────────┘    │  - Offset tracking via KafkaToken                       │
-                    │                                                          │
-                    └─────────────────────────▼───────────────────────────────┘
-                                              │
-                    ┌─────────────────────────▼────────────────────────────────────┐
-                    │  Router                                                      │
-                    │  - Topic-based routing                                       │
-                    │  - Expression-based routing (default, JSON field extraction) │
-                    │    e.g., route by org_id, event_type                         │
-                    └─────────────────────────▼────────────────────────────────────┘
-                                              │
-                    ┌─────────────────────────▼───────────────────────────────┐
-                    │  Tiered Buffer Manager                                   │
-                    │                                                          │
-                    │  ┌────────────────────────────────────────────────┐     │
-                    │  │ Tier 1: Hot Buffers (memory, LRU bounded)      │     │
-                    │  │ - 64 destinations × 1MB = 64MB max             │     │
-                    │  │ - Fast path for active destinations            │     │
-                    │  └──────────────────────┬─────────────────────────┘     │
-                    │                         │ LRU eviction                   │
-                    │  ┌──────────────────────▼─────────────────────────┐     │
-                    │  │ Tier 2: Disk Spool (bounded, compressed)       │     │
-                    │  │ - Unlimited destinations                       │     │
-                    │  │ - Max 10GB default                             │     │
-                    │  │ - Segment-based (yaque)                        │     │
-                    │  └──────────────────────┬─────────────────────────┘     │
-                    │                         │ batch flush                    │
-                    └─────────────────────────▼───────────────────────────────┘
-                                              │
-                    ┌─────────────────────────▼───────────────────────────────┐
-                    │  Archive Writers (semaphore-controlled pool)            │
-                    │  - 8 concurrent writers (default)                        │
-                    │  - Bounded file handle usage                             │
-                    │  - One active file per destination                       │
-                    │                                                          │
-                    │  ┌────────────────────────────────────────────────┐     │
-                    │  │ Compressor                                     │     │
-                    │  │ - zstd (default, level 3)                      │     │
-                    │  │ - lz4, snappy, gzip options                    │     │
-                    │  └────────────────────────────────────────────────┘     │
-                    │                                                          │
-                    │  ┌────────────────────────────────────────────────┐     │
-                    │  │ Rolling Policy                                 │     │
-                    │  │ - By final compressed file size (1GB default)  │     │
-                    │  │ - By time (default 300 s or 1 hour)            │     │
-                    │  └────────────────────────────────────────────────┘     │
-                    │                                                          │
-                    └─────────────────────────▼───────────────────────────────┘
-                                              │
-                    ┌─────────────────────────▼───────────────────────────────┐
-                    │  Storage Backend (object_store)                         │
-                    │  - File system                                           │
-                    │  - MinIO / S3                                            │
-                    │  - Google Cloud Storage                                  │
-                    │  - Azure Blob Storage                                    │
-                    └─────────────────────────────────────────────────────────┘
-                                              │
-                                              ▼
-                    ┌─────────────────────────────────────────────────────────┐
-                    │  Kafka Offset Commit                                    │
-                    │  - Only after CONFIRMED storage write                   │
-                    │  - At-least-once delivery guarantee                     │
-                    └─────────────────────────────────────────────────────────┘
++------------------------------------+    +------------------------------------+
+| Kafka consumer group (scalo)       |    | scalo Push listener (grpc)         |
+| - batches of kafka.batch_size, 10K |    | - one push per call                |
+| - tracks every offset it hands out |    | - answered once queued             |
++------------------------------------+    +------------------------------------+
+                  |                                         |
+                  +--------------------+--------------------+
+                                       v
++------------------------------------------------------------------------------+
+| Router                                                                       |
+| - topic, or JSON fields (default: expression on org_id)                      |
+| - depth scan before every parse: past 64 levels the record goes to the DLQ   |
+| - every segment encoded, so no value names another directory                 |
++------------------------------------------------------------------------------+
+                                       |
+                                       v
++------------------------------------------------------------------------------+
+| Hot buffers, one per destination, in memory                                  |
+| - at most 64 at once: a record for another flushes the least recently used   |
+| - each flushes at flush_bytes, flush_records or flush_age_secs               |
+| - all together at most a quarter of the memory limit, largest flushed first  |
++------------------------------------------------------------------------------+
+                                       |
+                                       v
++------------------------------------------------------------------------------+
+| Archive writers, one per destination                                         |
+| - up to archive.max_writers (1024), past which the least recent one closes   |
+| - each flush appends one compressed frame (zstd by default)                  |
+| - a failed append is cut back and retried, its batch and offsets held        |
+| - a file rolls at roll_size_bytes compressed, or roll_interval_secs          |
++------------------------------------------------------------------------------+
+                                       |  file closes
+                                       v
++------------------------------------------------------------------------------+
+| Local path: the file and its directories synced to disk                      |
+| Object store: staged under <buffer.spool_dir>/uploads, uploaded whole in the |
+| background, buffer.writer_parallelism uploads at once, retried until taken   |
++------------------------------------------------------------------------------+
+                                       |  file durable
+                                       v
++------------------------------------------------------------------------------+
+| Release                                                                      |
+| - kafka: each partition commits up to its lowest offset not yet released     |
+| - grpc: nothing to release, as the push was answered at enqueue              |
++------------------------------------------------------------------------------+
 ```
 
 ---
@@ -283,10 +255,10 @@ brokers, a codec or routing mode that does not exist.
 
 1. **Ingest**: Batch receive from the configured transport (10K messages default)
 2. **Routing**: Determine destination based on topic or JSON expression
-3. **Buffering**: Buffer in hot memory tier, spill to disk if LRU evicted
-4. **Flush Triggers**: Size (64MB), records (100K), or age (60s)
-5. **Compression**: Compress batch with configured codec
-6. **Storage Write**: Write compressed data to storage backend
+3. **Buffering**: Buffer per destination in memory. A buffer the LRU evicts flushes into its file
+4. **Flush Triggers**: Size (`flush_bytes`, 1 MiB), records (100K), age (60s), or the shared cap on every buffer together
+5. **Compression**: Compress the flushed batch with the configured codec
+6. **File Write**: Append it to the destination's open file, local or staged. A staged file uploads in the background once it closes
 7. **Release**: Commit offsets once the file holding their records is complete (a no-op on `grpc`)
 
 ### Critical Path Optimizations
@@ -296,7 +268,7 @@ brokers, a codec or routing mode that does not exist.
 - **Lock-free atomics** for counters and stats
 - **DashMap** for concurrent buffer access
 - **CompactString** for destination keys (24-byte inline storage)
-- **Semaphore-controlled** writer pool to bound resources
+- **One writer per destination**, capped at `archive.max_writers`, and a semaphore bounding uploads at `buffer.writer_parallelism`
 
 ---
 
@@ -304,48 +276,42 @@ brokers, a codec or routing mode that does not exist.
 
 ### Problem Statement
 
-With expression-based routing (e.g., by `org_id`), you could have 10,000+ unique destinations. Naive approach:
+With expression-based routing (e.g., by `org_id`), you could have 10,000+ unique destinations. A fixed buffer per destination multiplies: 10,000 destinations x 64 MB is 640 GB.
 
-```
-10,000 destinations × 64MB buffer = 640GB memory (not feasible)
-```
-
-### Solution: Two-Tier Architecture
+### Solution: a ceiling per destination and a cap on all of them
 
 ```text
-Tier 1: Hot Buffers (64 destinations × 1MB = 64MB memory)
-    ↓ LRU eviction
-Tier 2: Disk Spool (bounded by max_spool_bytes, default 10GB)
-    ↓ batch flush
-Archive Writers (8 concurrent, semaphore-controlled)
+Hot buffers (memory): at most 64 at once, a quarter of the memory limit together
+    | flush at flush_bytes, flush_records, flush_age_secs, LRU eviction or the cap
+    v
+Archive writers: one per destination, up to archive.max_writers (1024)
 ```
 
-### Tier 1: Hot Buffers
+Nothing spills to disk ahead of the writers. The only files on local disk are the archive files themselves: the open file on a local path, or the staged copy of an object-store file.
 
-- **Purpose**: Fast path for active destinations
-- **Capacity**: 64 buffers x 1MB each = 64MB max memory
-- **Eviction**: LRU when capacity exceeded
-- **Flush Triggers**: Size (1MB), age (30s)
+### Hot buffers
 
-### Tier 2: Disk Spool
+- **Count**: at most 64 destinations buffer at once. A record for another flushes the least recently used buffer into its file first.
+- **Per destination**: a buffer flushes at `flush_bytes` plus one record, at `flush_records`, or at `flush_age_secs`, whichever comes first.
+- **All together**: at most a quarter of the memory guard's limit. Past it the largest buffers flush first, so `flush_bytes` is a ceiling per destination, never multiplied by the destination count.
+- **Allocation**: a buffer allocates nothing until a record arrives, and hands its memory to the batch when it flushes. The cap counts bytes buffered, and a growing buffer's allocation can run to twice that.
 
-- **Purpose**: Handle overflow from hot buffers
-- **Implementation**: Segment-based queue (yaque)
-- **Capacity**: Bounded by `max_spool_bytes` (default 10GB)
-- **Reclamation**: Segments deleted when fully consumed
-- **Compression**: Optional zstd compression
+### Archive writers
+
+One writer per destination, up to `archive.max_writers` (1024). Past it the least recently used writer is closed in the background, and its file completes as on a roll. A writer holds no write buffer between flushes: 1024 writers that have each flushed once held 1.2 MB between them, measured with jemalloc, where a 1 MiB buffer kept per writer held 1 GiB.
 
 ### Buffer Configuration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_hot_buffers` | 64 | Maximum Tier 1 buffers |
-| `hot_buffer_size` | 1 MiB | Size at which a destination's buffer flushes into its file (`buffer.flush_bytes` / `ARCHIVER_FLUSH_BYTES`); each buffer holds up to this plus one record in memory |
-| `hot_buffer_age_secs` | 60 | Age at which a buffer flushes whatever its size (`buffer.flush_age_secs`) |
-| `spool_dir` | `/var/spool/dfe/archiver` | Tier 2 spool directory (`buffer.spool_dir` / `ARCHIVER_SPOOL_DIR`) |
-| `hot_buffer_records` | 100,000 | Record count at which a destination's buffer flushes, whatever its size (`buffer.flush_records`) |
-| `max_spool_bytes` | 10GB | Spool size limit (disk protection) |
-| `min_free_disk_bytes` | 1GB | Reserved disk space |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `buffer.flush_bytes` / `ARCHIVER_FLUSH_BYTES` | 1 MiB | Size at which a destination's buffer flushes into its file. Each buffer holds up to this plus one record |
+| `buffer.flush_records` | 100,000 | Record count at which a destination's buffer flushes, whatever its size |
+| `buffer.flush_age_secs` / `ARCHIVER_FLUSH_INTERVAL_SECS` | 60 | Age at which a buffer flushes whatever its size |
+| `buffer.writer_parallelism` | 2 | Object-store uploads at once, each holding four parts of `archive.multipart_chunk_size` |
+| `buffer.spool_dir` / `ARCHIVER_SPOOL_DIR` | `/var/spool/dfe/archiver` | Parent of the staging directory, `uploads/` |
+| `archive.max_writers` | 1024 | Open archive writers, one per destination |
+
+The 64-buffer count and the quarter share are fixed, not configured.
 
 ---
 
@@ -353,15 +319,15 @@ Archive Writers (8 concurrent, semaphore-controlled)
 
 ### Guarantee
 
-On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload or a store outage of any length costs duplicates or consumer lag. Only a refusal the store gives for the object itself can drop records, when no DLQ can take them, and they are counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
+On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a kill, a failed upload, a failing local disk or a store outage of any length costs duplicates or consumer lag. Only a record refused for good -- by the store for its object, by the codec, or by routing for its nesting depth -- can be dropped, when no DLQ can take it, and it is counted. On `grpc` the archive copy is at-most-once (see [Inbound transport](#inbound-transport)).
 
 ### Implementation
 
 ```text
 1. Receive a batch, and the armed consumer records every offset it hands out
 2. Buffer per destination
-3. Write each staged batch into the destination's open file, and hold its
-   offsets on that file
+3. Write each flushed batch into the destination's open file, retrying a
+   write that can clear, and hold its offsets on that file
 4. The file closes (roll, age close, eviction or shutdown): a local file is
    synced, an object-store file is handed to an upload task
 5. The upload task retries until the store takes the file
@@ -369,7 +335,7 @@ On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a ki
    its lowest offset not yet released
 ```
 
-An object-store file is written to local staging, `<buffer.spool_dir>/uploads`, and uploaded whole once it closes. The loop never waits on the store: step 5 runs in a background task, which the loop collects each cycle. A failed upload keeps the staged file and its held offsets and retries with exponential backoff and jitter, from 0.5 s up to 60 s between attempts. Every attempt is a fresh multipart upload from the staged copy, so it signs its requests afresh however long the store has been down. On a local path, step 4 syncs the file, and every directory above it up to the destination, to disk.
+An object-store file is written to local staging, `<buffer.spool_dir>/uploads`, and uploaded whole once it closes. The loop never waits on the store: step 5 runs in a background task, which the loop collects each cycle. A failed upload keeps the staged file and its held offsets and retries with exponential backoff and jitter, from 0.5 s up to 60 s between attempts. Every attempt is a fresh multipart upload from the staged copy, so it signs its requests afresh however long the store has been down, and a failed attempt aborts its upload so no parts are left in the store. A staged copy that cannot be read back -- missing, unreadable by permission, shorter than the bytes staged -- is moved to `<buffer.spool_dir>/uploads/quarantine` and its offsets are released `Errored`, because no retry can read it. Any other read error, EIO included, is retried. On a local path, step 4 syncs the file, and every directory above it up to the destination, to disk.
 
 Holding costs memory for as long as a file is not durable: about 32 bytes a record, scalo's offset tracking plus the writer's own eight. At 10k records/s that is 96 MB over a 300 s roll and 1.15 GB over an hour. So while offsets are held an unset `roll_interval_secs` defaults to 300 rather than 3600. A configured value always wins, and one above 900 logs a startup warning with the cost.
 
@@ -377,32 +343,49 @@ While uploads fail, held records and staged files grow, so both are pressure sou
 
 Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. A file refused at upload is read back a block at a time, each block one flush decompressed on its own, and its records go to the DLQ one entry per line, with the routed destination a batch carries. A payload is written as it arrived with a newline after it, so a payload holding a newline of its own spans lines: when a file holds more lines than records, each block goes to the DLQ whole, as one entry saying so, and no record, text or binary, is split across entries. The file's offsets are released `Rejected` once the DLQ confirms them, and a record too large for any DLQ backend is counted dropped. A file that cannot be read back, or a DLQ write that fails, is released `Errored`, so a restart writes the records again. With the DLQ off the records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
 
-A batch no file takes goes to the DLQ through scalo's confirming write, one entry per record, and only a write the DLQ confirms releases a record's offset, `Rejected`. The buffer records where each record ends, because a payload may hold a newline of its own. First `Dlq::refusal` measures each entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the record. When the store refused the batch for good, a record no backend can ever hold is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same pair of refusals, and the rest of the batch still goes to the DLQ. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
+A batch refused for good as it is written -- by the store, or by the codec -- goes to the DLQ through scalo's confirming write, one entry per record, and only a write the DLQ confirms releases a record's offset, `Rejected`. The buffer records where each record ends, because a payload may hold a newline of its own. First `Dlq::refusal` measures each entry against every backend's ceiling: the Kafka producer's `message.max.bytes`, scalo's 16 MiB, against an entry whose base64 payload is a third larger than the record. A record no backend can ever hold is released `Dropped` without a write, counted in `messages_dropped_total` with the reason logged, so a restart never meets the same pair of refusals, and the rest of the batch still goes to the DLQ. A broker or topic ceiling below the producer's is not seen there, and fails the write instead.
 
-With the DLQ off, a batch the store refused for good is released `Dropped` with its reason. Every other batch is released `Errored`: a failed DLQ write can clear, and so can a local disk failure, whose staged files the restart clears. The offsets of a file whose local write or sync failed are `Errored` too. A disk that stays broken restarts the pod repeatedly, which is visible, rather than losing records. Nothing reads an `Errored` span again short of a restart or rebalance, and scalo's consumer has no seek back to the commit floor, so the loop ends with `Error::Withheld`: the process drains, exits non-zero, and the restart reads again from the committed offset.
+With the DLQ off, a refused batch is released `Dropped` with its reason. A failed DLQ write is released `Errored`, because it can clear.
+
+A local write that fails in a way that can clear -- a full or failing disk, staging that cannot be created -- is never dead-lettered. The failed append is cut back to the file's last whole block, and the batch and its offsets are held while the write is retried with backoff and jitter, from 0.1 s up to 5 s between attempts. The loop receives nothing until the write lands, so nothing later is read or committed past it, and a disk that stays broken shows as consumer lag and one warning rather than lost records. Once shutdown begins, a write still failing gets 10 s more, then its batch is released `Errored`. A file that cannot be cut back, or cannot complete -- its sync or its staging failed -- is given up, and its offsets are `Errored` too.
+
+Nothing reads an `Errored` span again short of a restart or rebalance, and scalo's consumer has no seek back to the commit floor, so the loop ends with `Error::Withheld`: the process drains, exits non-zero, and the restart reads again from the committed offset. A source that cannot deliver the records again -- `grpc`, or `kafka` with acknowledgements off -- has already let them go, so they are counted in `messages_dropped_total{reason="unreplayable"}` instead.
 
 Inbound-filter dead letters are screened too. One no DLQ backend can hold is dropped and counted, because the filter routed it out of the archive by policy and no restart can land it. A failed DLQ write for the rest is `Errored`.
 
 `kafka.acknowledgements.enabled: false` commits each batch at receipt instead.
 
+Every dropped record is counted in `messages_dropped_total` under one `reason`: `refused` (the store or the codec, with the DLQ off), `dlq_too_large`, `too_deep` (with the DLQ off) or `unreplayable`.
+
 ### Failure Scenarios
 
 | Failure Point | Outcome | Data Status |
 |---------------|---------|-------------|
-| Before the file is durable | Restart re-reads every record the file held, and clears the staged files | Duplicates, up to one roll interval plus pending uploads |
-| Upload fails | File and offsets kept, upload retried, intake paused near the caps | Delayed, never lost |
+| Kill before the file is durable | Restart re-reads every record the file held, and removes the staged files it left | Duplicates, up to one roll interval plus pending uploads |
+| Upload fails | File and offsets kept, upload aborted and retried, intake paused near the caps | Delayed, never lost |
+| Staged copy cannot be read back | File quarantined, offsets released `Errored`, the process exits and restarts | Duplicates |
 | Store refuses the object for good, DLQ confirms | Records read back into the DLQ, offsets released | Records are in the DLQ |
 | Store refuses the object for good, DLQ off | Offsets released `Dropped`, counted, reason logged | Dropped |
-| Local write or sync fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
-| Write fails, DLQ confirms | Offsets released | Record is in the DLQ |
-| Store refuses for good, no DLQ backend can hold one record | That record's offset released `Dropped`, counted, reason logged; the rest go to the DLQ | That record dropped |
-| Local write fails, no DLQ backend can hold one record | The batch's offsets released `Errored`, the process exits and restarts | Duplicates |
-| Write fails, DLQ write fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
+| Local write fails in a way that can clear | Append cut back, batch and offsets held, write retried, intake held | Delayed, never lost |
+| Local write still failing 10 s into shutdown | Offsets released `Errored`, the restart reads them again | Duplicates |
+| Local file cannot complete or be cut back | Offsets released `Errored`, the process exits and restarts | Duplicates |
+| Codec refuses a batch, DLQ confirms | Offsets released `Rejected` | Records are in the DLQ |
+| Refused for good, no DLQ backend can hold one record | That record's offset released `Dropped`, counted, reason logged. The rest go to the DLQ | That record dropped |
+| Refused for good, DLQ write fails | Offsets released `Errored`, the process exits and restarts | Duplicates |
 | After the commit | Clean | Archived once |
 
 ### Shutdown
 
-The run loop stops first. The drain then closes the source -- the Push listener stops answering, the Kafka consumer stops fetching and can still commit -- and receives until the source reports it is empty, so every push already answered is written. Buffers flush into their files, evicted writers finish closing, every open file completes, and the uploads get 20 s. A file still uploading then keeps its offsets unreleased, to be read again after the restart.
+The run loop stops first. The drain then closes the source -- the Push listener stops answering, the Kafka consumer stops fetching and can still commit -- and receives until the source reports it is empty, so every push already answered is written. Buffers flush into their files, evicted writers finish closing, every open file completes, and the uploads get 20 s. A file still uploading then keeps its offsets unreleased and its staged copy on disk.
+
+### Restart
+
+A completed staged file carries a manifest beside it, `<name>.part.json`, with its object path and the length of each block. At startup the staging directory is settled before anything new is staged:
+
+- **`kafka` with acknowledgements on**: every staged file is removed, because its records are read again from the committed offset.
+- **`grpc`, or acknowledgements off**: nothing delivers those records again. A file whose manifest matches its size is uploaded. One never completed, or whose manifest cannot be read, is moved to `<buffer.spool_dir>/uploads/quarantine` for an operator.
+
+Quarantine holds at most 1 GiB, which with the 8 GiB staging cap stays under the spool volume's 10 GiB limit. A file past it is removed. Each outcome is counted: `staged_files_recovered_total`, `staged_files_quarantined_total{reason}` and `staged_files_removed_total{reason}`.
 
 ### Object keys
 
@@ -461,59 +444,39 @@ The writer appends `-<seq>-<writer id>`, the extension and the codec suffix to t
 
 ## Disk Protection
 
-### Problem
+### What is on local disk
 
-Unbounded disk spool can exhaust disk space, causing system-wide failures.
-
-### Solution: Backpressure
-
-When disk limits are reached, `push()` returns an error, pausing Kafka consumption until space is freed.
+Only archive files: the open file of a local destination, and under `<buffer.spool_dir>/uploads` the staged copy of each object-store file until the store takes it, with the quarantine beside them. Nothing spools ahead of the writers.
 
 ### Protection Mechanisms
 
-1. **Spool Size Limit** (`max_spool_bytes`, default 10GB)
-   - Tracks current spool size
-   - Returns error if write would exceed limit
-
-2. **Free Disk Space** (`min_free_disk_bytes`, default 1GB)
-   - Checks actual filesystem free space (via `fs2` crate)
-   - Returns error if write would drop below threshold
-
-### Backpressure Flow
-
-```text
-push() called
-    ↓
-Check spool size < max_spool_bytes?
-    ↓ NO → Return Error → Kafka consumption pauses
-    ↓ YES
-Check free disk > min_free_disk_bytes?
-    ↓ NO → Return Error → Kafka consumption pauses
-    ↓ YES
-Proceed with spool write
-```
+1. **Free space at startup**: the archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume, read through the `fs2` crate.
+2. **Staged bytes**: a pressure source on the self-regulation latch, read against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit past which kubelet evicts the pod. Intake pauses at the latch's `pause_above`, so a store outage turns into consumer lag rather than disk growth.
+3. **Quarantine**: at most 1 GiB. A file past it is removed and counted.
+4. **A full disk**: a local write that fails is held and retried, never dropped, and the loop receives nothing until it lands. See [At-Least-Once Delivery](#at-least-once-delivery).
 
 ### Metrics
 
-- `dfe_archiver_disk_pressure_events_total` - Count of backpressure events
-- `dfe_archiver_spool_bytes` - Current spool size
+- `dfe_archiver_staged_bytes` - Bytes staged and not yet uploaded
+- `dfe_archiver_uploads_pending` - Staged files the store has not yet confirmed
+- `dfe_archiver_staged_files_quarantined_total{reason}` and `dfe_archiver_staged_files_removed_total{reason}` - Staged files moved aside or removed
 
 ---
 
 ## Routing
 
-### Topic-Based (Default)
+### Topic-Based
 
 Messages routed by Kafka topic name:
 
 ```
-Topic: events → Destination: events/
-Topic: logs → Destination: logs/
+Topic: events -> Destination: events/
+Topic: logs -> Destination: logs/
 ```
 
-### Expression-Based
+### Expression-Based (Default)
 
-Route by JSON field values for multi-tenant scenarios:
+Route by JSON field values for multi-tenant scenarios. The default is one field, `org_id`:
 
 ```yaml
 routing:
@@ -551,6 +514,10 @@ Missing fields use configurable default:
 routing:
   default_segment: "unknown"
 ```
+
+### Segment Encoding
+
+Every segment -- the topic and each field value -- is encoded before it becomes part of a path, so a value never names another directory. Letters, digits, `-`, `_` and `.` pass through. Every other byte is written `=XX`, its value in upper-case hex, `=` itself included, so `a/b` becomes `a=2Fb` and two values never share a name. The empty value is written `=`, and `.` and `..` become `=2E` and `=2E=2E`. Every backend also refuses an absolute path, or one with a `.` or `..` segment, as refused for good.
 
 ### Nesting Depth
 
@@ -604,7 +571,7 @@ A file is synced to disk, with the directories above it, before its offsets are 
 
 ### AWS S3
 
-All cloud backends use `ObjectStoreBackend`, which writes each file to local staging and uploads it whole once it closes, as a multipart upload via the `object_store` crate's `WriteMultipart`. Parts are `multipart_chunk_size` (default 8MB), four in flight per upload and `buffer.writer_parallelism` uploads at once (default 2), so upload memory stays near 64 MB by default whatever the file size.
+All cloud backends use `ObjectStoreBackend`, which writes each file to local staging and uploads it whole once it closes, as one multipart upload through the `object_store` crate: each part is read from the staged copy while the parts before it upload. Parts are `multipart_chunk_size` (default 8MB), four in flight per upload and `buffer.writer_parallelism` uploads at once (default 2), so upload memory stays near 64 MB by default whatever the file size. A failed attempt aborts its multipart upload. An abort that fails itself is logged, and the parts stay until the bucket's lifecycle rule for incomplete uploads removes them.
 
 Credentials are resolved via `AmazonS3Builder::from_env()`, then config-level
 overrides are applied on top. This means standard AWS environment variables and
@@ -704,14 +671,14 @@ archive:
 
 ### Multipart Upload Configuration
 
-All cloud backends stream data via multipart uploads with configurable chunk size:
+All cloud backends upload a closed file's staged copy as one multipart upload, with configurable chunk size:
 
 | Parameter | Default | Minimum | Description |
 |---|---|---|---|
 | `multipart_chunk_size` | 8MB | 5MB | Size of each upload part |
 
 The 5MB minimum is enforced by S3's multipart upload API. Larger chunk sizes
-reduce the number of HTTP requests but increase memory per active file.
+reduce the number of HTTP requests but increase memory per upload, four chunks each.
 
 ---
 
@@ -812,18 +779,26 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 
 | Metric | Description |
 |--------|-------------|
-| `dfe_archiver_messages_received_total` | Messages received from Kafka |
+| `dfe_archiver_messages_received_total` | Messages received from the transport |
 | `dfe_archiver_messages_archived_total` | Records in archive files the store confirmed |
 | `dfe_archiver_messages_written_total` | Records written into an open archive file, before the store confirms it |
-| `dfe_archiver_messages_dropped_total` | Records dropped because the store refused their object, the DLQ their entry, or routing their nesting depth, for good |
+| `dfe_archiver_messages_dropped_total{reason}` | Records dropped for good: `refused` (the store or the codec, with the DLQ off), `dlq_too_large`, `too_deep` (with the DLQ off), `unreplayable` (written nowhere, on `grpc` or with acknowledgements off) |
 | `dfe_archiver_messages_dlq_total` | Messages sent to DLQ |
 | `dfe_archiver_bytes_written_total` | Uncompressed bytes written |
 | `dfe_archiver_bytes_compressed_total` | Compressed bytes written |
 | `dfe_archiver_files_created_total` | Archive files created |
 | `dfe_archiver_files_closed_total` | Archive files closed (rolled) |
+| `dfe_archiver_archive_roll_total{trigger}` | Archive files rolled, by trigger |
+| `dfe_archiver_writer_evictions_total` | Writers closed because `archive.max_writers` was reached |
 | `dfe_archiver_flush_operations_total` | Flush operations |
-| `dfe_archiver_archive_errors_total` | Archive errors |
-| `dfe_archiver_disk_pressure_events_total` | Disk pressure backpressure events |
+| `dfe_archiver_archive_errors_total` | Archive errors, each failed attempt counted |
+| `dfe_archiver_kafka_commit_errors_total` | Offset releases the transport failed |
+| `dfe_archiver_routing_errors_total` | Records routing failed on, archived under their topic |
+| `dfe_archiver_routing_fallback_total{field}` | Expression-routing fields a record did not carry, by field path |
+| `dfe_archiver_staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
+| `dfe_archiver_staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt`, `no_store` |
+| `dfe_archiver_staged_files_removed_total{reason}` | Staged files removed at startup: `replayed`, `quarantine_full` |
+| `dfe_archiver_disk_pressure_events_total` | Registered and never incremented: a buffer push cannot fail |
 
 ### Gauges
 
@@ -835,7 +810,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `pipeline_delivery_guarantee{guarantee,reason}` | 1 for the delivery guarantee in force |
 | `dfe_archiver_hot_buffers_active` | Active hot buffers |
 | `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
-| `dfe_archiver_spool_bytes` | Current spool size |
+| `dfe_archiver_spool_bytes` | Always 0: nothing spools ahead of the writers. `staged_bytes` is the disk in use |
 | `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
 | `dfe_archiver_staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
 

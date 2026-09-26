@@ -606,7 +606,7 @@
           "default": 5
         },
         "spool_dir": {
-          "description": "Tier 2 spool directory, created at startup. Absolute because a relative\npath resolves under the container WORKDIR, which appuser cannot write.",
+          "description": "Directory holding `uploads/`, where object-store files are staged until\nthe store takes them, created at startup. Absolute because a relative\npath resolves under the container WORKDIR, which appuser cannot write.",
           "type": "string",
           "default": "/var/spool/dfe/archiver"
         }

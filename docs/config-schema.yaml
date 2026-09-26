@@ -564,7 +564,8 @@ $defs:
         default: 5
       spool_dir:
         description: |-
-          Tier 2 spool directory, created at startup. Absolute because a relative
+          Directory holding `uploads/`, where object-store files are staged until
+          the store takes them, created at startup. Absolute because a relative
           path resolves under the container WORKDIR, which appuser cannot write.
         type: string
         default: /var/spool/dfe/archiver
