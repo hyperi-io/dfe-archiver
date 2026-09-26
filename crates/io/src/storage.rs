@@ -1031,7 +1031,13 @@ impl StorageBackend for ObjectStoreBackend {
         let staged = open.get_mut(path).ok_or_else(|| {
             Error::storage(format!("{}: no staged file for {path}", self.backend_name))
         })?;
-        staged.file.write_all(data).await.map_err(|e| {
+        // tokio hands a write to a blocking task and reports its error on the
+        // next operation, so the flush makes this append's result its own.
+        let written = match staged.file.write_all(data).await {
+            Ok(()) => staged.file.flush().await,
+            Err(e) => Err(e),
+        };
+        written.map_err(|e| {
             Error::storage_with(
                 format!("staging {path} at {} failed", staged.local.display()),
                 e,
