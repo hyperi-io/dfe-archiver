@@ -736,7 +736,10 @@ async fn a_local_write_failure_holds_the_batch_until_the_disk_recovers() {
         counter(&manager, "archive_errors_total") >= 3
     })
     .await;
-    assert!(!running.is_finished(), "a failing local write ended the loop");
+    assert!(
+        !running.is_finished(),
+        "a failing local write ended the loop"
+    );
     assert_eq!(
         kafka.committed(GROUP, "events"),
         None,
@@ -859,7 +862,10 @@ async fn a_local_write_failure_on_the_direct_transport_holds_until_the_disk_reco
         counter(&manager, "archive_errors_total") >= 3
     })
     .await;
-    assert!(!running.is_finished(), "a failing local write ended the loop");
+    assert!(
+        !running.is_finished(),
+        "a failing local write ended the loop"
+    );
     assert_eq!(counter(&manager, "messages_dropped_total"), 0);
 
     unblock_archive(dir.path());

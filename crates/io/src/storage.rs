@@ -256,10 +256,7 @@ impl Staging {
         static PROCESS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         // RandomState is seeded from the OS, so a restarted PID 1 still names its files apart.
         let process = PROCESS.get_or_init(|| {
-            std::hash::BuildHasher::hash_one(
-                &std::hash::RandomState::new(),
-                std::process::id(),
-            )
+            std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), std::process::id())
         });
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         self.dir
@@ -845,14 +842,13 @@ impl StagedUpload {
             .put_multipart(&self.object_path)
             .await
             .map_err(|e| store_error(self.backend_name, "multipart init", &self.path, e))?;
-        let uploaded = match self.stream_parts(file, upload.as_mut()).await {
-            Ok(()) => upload
-                .complete()
-                .await
-                .map(|_| ())
-                .map_err(|e| store_error(self.backend_name, "multipart complete", &self.path, e)),
-            Err(e) => Err(e),
-        };
+        let uploaded =
+            match self.stream_parts(file, upload.as_mut()).await {
+                Ok(()) => upload.complete().await.map(|_| ()).map_err(|e| {
+                    store_error(self.backend_name, "multipart complete", &self.path, e)
+                }),
+                Err(e) => Err(e),
+            };
         if uploaded.is_err()
             && let Err(e) = upload.abort().await
         {
@@ -1921,17 +1917,17 @@ mod tests {
     /// holding `complete` and one never completed holding `incomplete`.
     async fn leave_staged(staging: &Staging, complete: &[&[u8]], incomplete: &[u8]) {
         let (_store, backend) = in_memory(staging);
-        backend.create("events/complete.jsonl").await.expect("create");
+        backend
+            .create("events/complete.jsonl")
+            .await
+            .expect("create");
         for block in complete {
             backend
                 .append("events/complete.jsonl", block)
                 .await
                 .expect("append");
         }
-        let Closed::Pending(upload) = backend
-            .close("events/complete.jsonl")
-            .await
-            .expect("close")
+        let Closed::Pending(upload) = backend.close("events/complete.jsonl").await.expect("close")
         else {
             unreachable!("an object-store file is staged");
         };
@@ -1987,7 +1983,10 @@ mod tests {
 
         let (store, backend) = in_memory(&staging);
         let upload = backend.adopt(file).expect("adopted");
-        assert_eq!(upload.block(1).await.expect("block"), Some(b"two\n".to_vec()));
+        assert_eq!(
+            upload.block(1).await.expect("block"),
+            Some(b"two\n".to_vec())
+        );
         upload.attempt().await.expect("upload");
         let object = store
             .get(&ObjectPath::from("archive/events/complete.jsonl"))
@@ -2003,7 +2002,10 @@ mod tests {
             .map(|entry| entry.expect("entry").path())
             .filter(|path| path.is_file())
             .collect();
-        assert!(left.is_empty(), "the copy and its manifest are removed: {left:?}");
+        assert!(
+            left.is_empty(),
+            "the copy and its manifest are removed: {left:?}"
+        );
     }
 
     /// A manifest that cannot be read, or that disagrees with its file, says
@@ -2172,7 +2174,10 @@ mod tests {
         for (name, damage) in [("gone", 0usize), ("short", 3)] {
             let path = format!("events/{name}.jsonl");
             backend.create(&path).await.expect("create");
-            backend.append(&path, b"0123456789\n").await.expect("append");
+            backend
+                .append(&path, b"0123456789\n")
+                .await
+                .expect("append");
             let Closed::Pending(upload) = backend.close(&path).await.expect("close") else {
                 unreachable!("an object-store file is staged");
             };
