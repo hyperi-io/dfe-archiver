@@ -15,6 +15,100 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+/// Why records were dropped: the `reason` label of `messages_dropped_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropReason {
+    /// The store or the writer refused them for good, with no DLQ to take them.
+    Refused,
+    /// No DLQ backend can hold their dead letter.
+    DlqTooLarge,
+    /// Nested past the parse depth, with no DLQ to take them.
+    TooDeep,
+    /// Written nowhere, on a source that cannot deliver them again.
+    Unreplayable,
+}
+
+impl DropReason {
+    /// Every reason, each pre-registered at zero so a dashboard sees the set.
+    pub const ALL: [Self; 4] = [
+        Self::Refused,
+        Self::DlqTooLarge,
+        Self::TooDeep,
+        Self::Unreplayable,
+    ];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::DlqTooLarge => "dlq_too_large",
+            Self::TooDeep => "too_deep",
+            Self::Unreplayable => "unreplayable",
+        }
+    }
+}
+
+/// Why a staged file was moved aside: the `reason` label of
+/// `staged_files_quarantined_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuarantineReason {
+    /// Its local copy could not be read back for its upload.
+    Unreadable,
+    /// Left open by a process that stopped before completing it.
+    Incomplete,
+    /// Its manifest could not be read, so where it belongs is unknown.
+    Corrupt,
+    /// No backend of this destination can take it.
+    NoStore,
+}
+
+impl QuarantineReason {
+    /// Every reason, each pre-registered at zero.
+    pub const ALL: [Self; 4] = [
+        Self::Unreadable,
+        Self::Incomplete,
+        Self::Corrupt,
+        Self::NoStore,
+    ];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Incomplete => "incomplete",
+            Self::Corrupt => "corrupt",
+            Self::NoStore => "no_store",
+        }
+    }
+}
+
+/// Why a staged file found at startup was removed: the `reason` label of
+/// `staged_files_removed_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalReason {
+    /// The source delivers its records again, because their offsets were never
+    /// committed.
+    Replayed,
+    /// The quarantine directory was at its size cap.
+    QuarantineFull,
+}
+
+impl RemovalReason {
+    /// Every reason, each pre-registered at zero.
+    pub const ALL: [Self; 2] = [Self::Replayed, Self::QuarantineFull];
+
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replayed => "replayed",
+            Self::QuarantineFull => "quarantine_full",
+        }
+    }
+}
+
 /// Archiver metrics -- combines scalo metric groups with
 /// archiver-specific counters/gauges/histograms.
 ///
@@ -172,10 +266,15 @@ impl ArchiverMetrics {
             "messages_written_total",
             "Records written into an open archive file, before the store confirms it",
         );
-        let _ = manager.counter(
+        let _ = manager.counter_with_labels(
             "messages_dropped_total",
-            "Records dropped because the store refused their object, the DLQ their entry, or routing their nesting depth, for good",
+            "Records dropped for good, by reason: refused by the store or the writer, too large for every DLQ backend, nested too deep, or written nowhere on a source that cannot deliver them again",
+            &["reason"],
+            "custom",
         );
+        for reason in DropReason::ALL {
+            counter!("messages_dropped_total", "reason" => reason.as_str()).increment(0);
+        }
         let _ = manager.gauge(
             "uploads_pending",
             "Archive files staged locally and not yet confirmed by the store",
@@ -184,6 +283,28 @@ impl ArchiverMetrics {
             "staged_bytes",
             "Bytes of archive files staged locally and not yet uploaded",
         );
+        let _ = manager.counter(
+            "staged_files_recovered_total",
+            "Complete staged files a previous process left, uploaded by this one",
+        );
+        let _ = manager.counter_with_labels(
+            "staged_files_quarantined_total",
+            "Staged files moved to the quarantine directory instead of uploaded, by reason",
+            &["reason"],
+            "custom",
+        );
+        for reason in QuarantineReason::ALL {
+            counter!("staged_files_quarantined_total", "reason" => reason.as_str()).increment(0);
+        }
+        let _ = manager.counter_with_labels(
+            "staged_files_removed_total",
+            "Staged files a previous process left, removed at startup, by reason",
+            &["reason"],
+            "custom",
+        );
+        for reason in RemovalReason::ALL {
+            counter!("staged_files_removed_total", "reason" => reason.as_str()).increment(0);
+        }
     }
 
     // -- Layer 1: ServiceMetrics pass-throughs ------------------------
@@ -244,10 +365,24 @@ impl ArchiverMetrics {
         }
     }
 
-    /// Record records dropped because the store refused their object, the DLQ
-    /// their entry, or routing their nesting depth, for good.
-    pub fn record_dropped(&self, count: u64) {
-        counter!("messages_dropped_total").increment(count);
+    /// Record records dropped for good, and why.
+    pub fn record_dropped(&self, count: u64, reason: DropReason) {
+        counter!("messages_dropped_total", "reason" => reason.as_str()).increment(count);
+    }
+
+    /// Record staged files a previous process left, queued for upload.
+    pub fn record_staged_recovered(&self, count: u64) {
+        counter!("staged_files_recovered_total").increment(count);
+    }
+
+    /// Record staged files moved to quarantine, and why.
+    pub fn record_staged_quarantined(&self, count: u64, reason: QuarantineReason) {
+        counter!("staged_files_quarantined_total", "reason" => reason.as_str()).increment(count);
+    }
+
+    /// Record staged files removed at startup, and why.
+    pub fn record_staged_removed(&self, count: u64, reason: RemovalReason) {
+        counter!("staged_files_removed_total", "reason" => reason.as_str()).increment(count);
     }
 
     /// Publish the files waiting for their upload and the bytes they stage.
@@ -506,7 +641,7 @@ pub fn init_metrics(manager: &mut MetricsManager, commit: &str) -> Arc<ArchiverM
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -612,6 +747,50 @@ mod tests {
             registered().record_bytes_written(4096);
         });
         assert_eq!(hits, 4096, "4096 bytes written read as 4096");
+    }
+
+    /// A drop is counted under its reason, every reason is on the page from the
+    /// start, and the manifest names the label.
+    #[test]
+    fn a_drop_is_counted_under_its_reason() {
+        let manager =
+            MetricsManager::with_config(scalo::metrics::MetricsConfig::offline("archiver"));
+        let metrics = ArchiverMetrics::register(&manager, "abc");
+
+        metrics.record_dropped(3, DropReason::Unreplayable);
+        metrics.record_staged_quarantined(1, QuarantineReason::Incomplete);
+
+        let rendered = manager.render();
+        let has = |line: &str| rendered.lines().any(|l| l == line);
+        assert!(
+            has(r#"archiver_messages_dropped_total{reason="unreplayable"} 3"#),
+            "{rendered}"
+        );
+        for reason in DropReason::ALL {
+            if reason != DropReason::Unreplayable {
+                let line = format!(
+                    r#"archiver_messages_dropped_total{{reason="{}"}} 0"#,
+                    reason.as_str()
+                );
+                assert!(has(&line), "{line} missing:\n{rendered}");
+            }
+        }
+        assert!(
+            has(r#"archiver_staged_files_quarantined_total{reason="incomplete"} 1"#),
+            "{rendered}"
+        );
+
+        let manifest = manager.registry().manifest();
+        for name in [
+            "archiver_messages_dropped_total",
+            "archiver_staged_files_quarantined_total",
+            "archiver_staged_files_removed_total",
+        ] {
+            let Some(descriptor) = manifest.metrics.iter().find(|m| m.name == name) else {
+                panic!("{name} is not in the manifest");
+            };
+            assert_eq!(descriptor.labels, vec!["reason".to_string()], "{name}");
+        }
     }
 
     /// Verify `ArchiverMetrics::default()` doesn't panic (test-mode with no exporter)

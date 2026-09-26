@@ -8,14 +8,14 @@
 
 use async_trait::async_trait;
 use dfe_archiver_core::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConfig, S3Config};
-use dfe_archiver_core::storage::{Closed, PendingUpload, StorageBackend, confine};
+use dfe_archiver_core::storage::{Closed, PendingUpload, RecoveredFile, StorageBackend, confine};
 use dfe_archiver_core::{Error, Result};
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use object_store::{MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,10 +35,90 @@ const UPLOAD_PART_CONCURRENCY: usize = 4;
 /// The longest object key S3, GCS and Azure accept, in bytes.
 const MAX_OBJECT_KEY_BYTES: usize = 1024;
 
+/// The directory under staging where files that are not uploaded are moved.
+const QUARANTINE_DIR: &str = "quarantine";
+
+/// Bytes the quarantine directory may hold. With the 8 GiB staging cap it
+/// stays under the spool volume's 10 GiB limit, past which kubelet evicts the
+/// pod and the volume with it.
+const QUARANTINE_BYTES_CAP: u64 = 1024 * 1024 * 1024;
+
+/// The extension of a staged file.
+const STAGED_EXTENSION: &str = "part";
+
+/// Added to a staged file's name for its manifest, written once it is complete.
+const MANIFEST_SUFFIX: &str = ".json";
+
+/// Added to a manifest's name while it is written, so a manifest is whole or
+/// absent.
+const MANIFEST_TEMP_SUFFIX: &str = ".tmp";
+
+/// What a complete staged file needs to be uploaded by another process.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StagedManifest {
+    /// The file's path under the destination.
+    path: String,
+    /// The length of each block appended, in order.
+    blocks: Vec<u64>,
+}
+
+/// `local` with `suffix` added to its file name.
+fn with_suffix(local: &Path, suffix: &str) -> PathBuf {
+    let mut name = local.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Write `manifest` beside the staged file `local`, whole or not at all.
+async fn write_manifest(local: &Path, manifest: &StagedManifest) -> std::io::Result<()> {
+    let body = serde_json::to_vec(manifest).map_err(std::io::Error::other)?;
+    let path = with_suffix(local, MANIFEST_SUFFIX);
+    let temp = with_suffix(&path, MANIFEST_TEMP_SUFFIX);
+    tokio::fs::write(&temp, body).await?;
+    tokio::fs::rename(&temp, &path).await
+}
+
+/// The manifest of the staged file `local`: `None` when it has none, which is
+/// a file its process never completed.
+fn read_manifest(local: &Path) -> Option<std::io::Result<StagedManifest>> {
+    match std::fs::read(with_suffix(local, MANIFEST_SUFFIX)) {
+        Ok(body) => Some(serde_json::from_slice(&body).map_err(std::io::Error::other)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// What opening staging found that a previous process left.
+#[derive(Debug, Default)]
+pub struct Recovery {
+    /// Complete files to upload.
+    pub complete: Vec<RecoveredFile>,
+    /// Files removed because the source delivers their records again.
+    pub replayed: u64,
+    /// Files never completed, moved to quarantine.
+    pub incomplete: u64,
+    /// Files whose manifest could not be read, moved to quarantine.
+    pub corrupt: u64,
+    /// Files removed because the quarantine directory was at its cap.
+    pub quarantine_full: u64,
+}
+
+/// Where [`Staging::quarantine`] put a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quarantined {
+    /// Moved into the quarantine directory.
+    Moved,
+    /// Removed, because the quarantine directory was at its cap.
+    Full,
+    /// There was no file to move.
+    Gone,
+}
+
 /// Local disk where object-store files are written before they upload.
 ///
 /// A file stays here until the store confirms it, so an outage of any length
-/// costs disk rather than records.
+/// costs disk rather than records. A completed file carries a manifest, so a
+/// restart can upload what a stopped process left.
 #[derive(Clone, Debug)]
 pub struct Staging {
     dir: PathBuf,
@@ -46,33 +126,115 @@ pub struct Staging {
 }
 
 impl Staging {
-    /// Stage under `dir`, removing what a previous process left there: those
-    /// files' offsets were never committed, so their records are read again.
+    /// Stage under `dir`. What a previous process left there stays until
+    /// [`recover`](Self::recover) decides its fate.
     ///
     /// # Errors
-    /// Returns an error when the directory cannot be created or cleared.
+    /// Returns an error when the directory cannot be created.
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        let mut removed = 0usize;
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_file() {
-                std::fs::remove_file(&path)?;
-                removed += 1;
-            }
-        }
-        if removed > 0 {
-            info!(
-                dir = %dir.display(),
-                removed,
-                "Removed staged files a previous process never uploaded; their records are read again"
-            );
-        }
         Ok(Self {
             dir,
             bytes: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Settle what a previous process left in staging, before anything new is
+    /// staged.
+    ///
+    /// With `replayed`, the source delivers those files' records again because
+    /// their offsets were never committed, so the files are removed. Otherwise
+    /// nothing delivers them again: a complete file is returned to upload, and
+    /// one never completed, or whose manifest cannot be read, is quarantined.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be read.
+    pub fn recover(&self, replayed: bool) -> Result<Recovery> {
+        let mut recovery = Recovery::default();
+        let mut staged = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == STAGED_EXTENSION) {
+                staged.push(path);
+            } else if path.to_string_lossy().ends_with(MANIFEST_TEMP_SUFFIX) {
+                // A manifest never finished: its file is incomplete, and handled as one.
+                remove_quietly(&path);
+            }
+        }
+        for local in staged {
+            let manifest = read_manifest(&local);
+            if replayed {
+                remove_quietly(&local);
+                remove_quietly(&with_suffix(&local, MANIFEST_SUFFIX));
+                recovery.replayed += 1;
+                continue;
+            }
+            let size = std::fs::metadata(&local).map_or(0, |meta| meta.len());
+            match manifest {
+                Some(Ok(manifest)) if manifest.blocks.iter().sum::<u64>() == size => {
+                    self.bytes.fetch_add(size, Ordering::Relaxed);
+                    recovery.complete.push(RecoveredFile {
+                        local,
+                        path: manifest.path,
+                        size,
+                        blocks: manifest.blocks,
+                    });
+                }
+                Some(_) => {
+                    recovery.corrupt += 1;
+                    if self.quarantine(&local) == Quarantined::Full {
+                        recovery.quarantine_full += 1;
+                    }
+                }
+                None => {
+                    recovery.incomplete += 1;
+                    if self.quarantine(&local) == Quarantined::Full {
+                        recovery.quarantine_full += 1;
+                    }
+                }
+            }
+        }
+        Ok(recovery)
+    }
+
+    /// Move a staged file and its manifest into the quarantine directory for
+    /// an operator, or remove them when it is at [`QUARANTINE_BYTES_CAP`].
+    #[must_use]
+    pub fn quarantine(&self, local: &Path) -> Quarantined {
+        let manifest = with_suffix(local, MANIFEST_SUFFIX);
+        let Ok(size) = std::fs::metadata(local).map(|meta| meta.len()) else {
+            remove_quietly(&manifest);
+            return Quarantined::Gone;
+        };
+        let dir = self.dir.join(QUARANTINE_DIR);
+        let held = dir_bytes(&dir);
+        let moved = held.saturating_add(size) <= QUARANTINE_BYTES_CAP
+            && std::fs::create_dir_all(&dir).is_ok()
+            && local
+                .file_name()
+                .is_some_and(|name| std::fs::rename(local, dir.join(name)).is_ok());
+        if !moved {
+            remove_quietly(local);
+            remove_quietly(&manifest);
+            warn!(
+                local = %local.display(),
+                quarantine_bytes = held,
+                cap = QUARANTINE_BYTES_CAP,
+                "The quarantine directory is full or cannot take a staged file, so it is removed"
+            );
+            return Quarantined::Full;
+        }
+        if let Some(name) = manifest.file_name()
+            && manifest.exists()
+            && let Err(e) = std::fs::rename(&manifest, dir.join(name))
+        {
+            warn!(manifest = %manifest.display(), error = %e, "Could not quarantine a staged file's manifest");
+        }
+        Quarantined::Moved
     }
 
     /// Bytes staged and not yet uploaded or discarded.
@@ -87,12 +249,42 @@ impl Staging {
         &self.dir
     }
 
-    /// A local file name no other staged file shares.
+    /// A local file name no other staged file shares, this process's or a
+    /// previous one's whose files are still here.
     fn next_file(&self) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        static PROCESS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        // RandomState is seeded from the OS, so a restarted PID 1 still names its files apart.
+        let process = PROCESS.get_or_init(|| {
+            std::hash::BuildHasher::hash_one(
+                &std::hash::RandomState::new(),
+                std::process::id(),
+            )
+        });
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        self.dir.join(format!("{}-{n}.part", std::process::id()))
+        self.dir
+            .join(format!("{process:016x}-{n}.{STAGED_EXTENSION}"))
     }
+}
+
+/// Remove `path`, which may already be gone.
+fn remove_quietly(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(path = %path.display(), error = %e, "Could not remove a staged file");
+    }
+}
+
+/// The bytes of the files directly in `dir`, or 0 when it does not exist.
+fn dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .filter(std::fs::Metadata::is_file)
+            .map(|meta| meta.len())
+            .sum()
+    })
 }
 
 /// Classify an object store error: refused for good when the same object can
@@ -207,6 +399,13 @@ impl StorageBackend for FileBackend {
 
         trace!(path = %full_path.display(), bytes = data.len(), "Appended to file");
 
+        Ok(())
+    }
+
+    async fn truncate(&self, path: &str, len: u64) -> Result<()> {
+        let full_path = self.full_path(path)?;
+        let file = OpenOptions::new().write(true).open(&full_path).await?;
+        file.set_len(len).await?;
         Ok(())
     }
 
@@ -546,6 +745,32 @@ fn parse_sas_pairs(sas: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Whether a failure reading a staged copy is one no retry changes: the copy
+/// is gone, not ours to read, or shorter than what was written.
+fn unreadable_for_good(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::InvalidData
+            | std::io::ErrorKind::IsADirectory
+    )
+}
+
+/// Read from `file` until `buf` is full or the file ends, returning the bytes
+/// read, so every part but the last is the full chunk size a store requires.
+async fn fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]).await? {
+            0 => break,
+            read => filled += read,
+        }
+    }
+    Ok(filled)
+}
+
 /// A file staged for an object store, uploaded whole on each attempt.
 struct StagedUpload {
     store: Arc<dyn ObjectStore>,
@@ -557,70 +782,134 @@ struct StagedUpload {
     blocks: Vec<u64>,
     chunk_size: usize,
     backend_name: &'static str,
-    staged_bytes: Arc<AtomicU64>,
+    staging: Staging,
     /// Set once the local copy is gone, so its bytes are counted off once.
     removed: AtomicBool,
 }
 
 impl StagedUpload {
-    /// Remove the local copy and count its bytes off the staging total.
-    async fn remove_local(&self) {
+    /// Count the local copy off the staging total, once. `false` when it was
+    /// already given up.
+    fn release_bytes(&self) -> bool {
         if self.removed.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        self.staging.bytes.fetch_sub(self.size, Ordering::Relaxed);
+        true
+    }
+
+    /// Remove the local copy and its manifest, and count its bytes off the
+    /// staging total.
+    async fn remove_local(&self) {
+        if !self.release_bytes() {
             return;
         }
-        self.staged_bytes.fetch_sub(self.size, Ordering::Relaxed);
-        if let Err(e) = tokio::fs::remove_file(&self.local).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(local = %self.local.display(), error = %e, "Could not remove a staged file");
+        for path in [
+            self.local.clone(),
+            with_suffix(&self.local, MANIFEST_SUFFIX),
+        ] {
+            if let Err(e) = tokio::fs::remove_file(&path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(local = %path.display(), error = %e, "Could not remove a staged file");
+            }
         }
     }
 
-    /// Stream the local copy into one multipart upload.
+    /// A failure reading the local copy: unreadable for good, or a storage
+    /// error to retry.
+    fn local_error(&self, what: &str, e: std::io::Error) -> Error {
+        let message = format!("{what} the staged copy of {} failed", self.path);
+        if unreadable_for_good(&e) {
+            Error::unreadable_with(message, e)
+        } else {
+            Error::storage_with(message, e)
+        }
+    }
+
+    /// Stream the local copy into one multipart upload, aborting the upload on
+    /// any failure so no part is left behind in the store.
     async fn upload(&self) -> Result<()> {
-        let error = |what: &str, e: object_store::Error| {
-            store_error(self.backend_name, what, &self.path, e)
-        };
         if self.size == 0 {
             self.store
                 .put(&self.object_path, PutPayload::default())
                 .await
-                .map_err(|e| error("put", e))?;
+                .map_err(|e| store_error(self.backend_name, "put", &self.path, e))?;
             return Ok(());
         }
-        let mut file = tokio::fs::File::open(&self.local).await.map_err(|e| {
-            Error::storage_with(format!("the staged copy of {} is unreadable", self.path), e)
-        })?;
-        let upload = self
+        let file = tokio::fs::File::open(&self.local)
+            .await
+            .map_err(|e| self.local_error("opening", e))?;
+        let mut upload = self
             .store
             .put_multipart(&self.object_path)
             .await
-            .map_err(|e| error("multipart init", e))?;
-        let mut write = WriteMultipart::new_with_chunk_size(upload, self.chunk_size);
-        let mut chunk = vec![0u8; self.chunk_size];
+            .map_err(|e| store_error(self.backend_name, "multipart init", &self.path, e))?;
+        let uploaded = match self.stream_parts(file, upload.as_mut()).await {
+            Ok(()) => upload
+                .complete()
+                .await
+                .map(|_| ())
+                .map_err(|e| store_error(self.backend_name, "multipart complete", &self.path, e)),
+            Err(e) => Err(e),
+        };
+        if uploaded.is_err()
+            && let Err(e) = upload.abort().await
+        {
+            warn!(
+                path = %self.path,
+                backend = self.backend_name,
+                error = %e,
+                "Could not abort a failed multipart upload; its parts stay in the store until a lifecycle rule removes them"
+            );
+        }
+        uploaded
+    }
+
+    /// Read the local copy into `upload` one `chunk_size` part at a time, at
+    /// most [`UPLOAD_PART_CONCURRENCY`] in flight, which bounds its memory.
+    async fn stream_parts(
+        &self,
+        mut file: tokio::fs::File,
+        upload: &mut dyn MultipartUpload,
+    ) -> Result<()> {
+        let part_error = |e| store_error(self.backend_name, "part upload", &self.path, e);
+        let mut in_flight = futures::stream::FuturesUnordered::new();
+        let mut read_total: u64 = 0;
         loop {
-            let read = match file.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(e) => {
-                    let _ = write.abort().await;
-                    return Err(Error::storage_with(
-                        format!("reading the staged copy of {} failed", self.path),
-                        e,
-                    ));
-                }
-            };
-            write.write(&chunk[..read]);
-            if let Err(e) = write.wait_for_capacity(UPLOAD_PART_CONCURRENCY).await {
-                let _ = write.abort().await;
-                return Err(error("part upload", e));
+            let mut part = vec![0u8; self.chunk_size];
+            let filled = fill(&mut file, &mut part)
+                .await
+                .map_err(|e| self.local_error("reading", e))?;
+            if filled == 0 {
+                break;
+            }
+            read_total += filled as u64;
+            part.truncate(filled);
+            in_flight.push(upload.put_part(PutPayload::from(part)));
+            if in_flight.len() >= UPLOAD_PART_CONCURRENCY
+                && let Some(done) = in_flight.next().await
+            {
+                done.map_err(part_error)?;
+            }
+            if filled < self.chunk_size {
+                break;
             }
         }
-        write
-            .finish()
-            .await
-            .map(|_| ())
-            .map_err(|e| error("multipart complete", e))
+        while let Some(done) = in_flight.next().await {
+            done.map_err(part_error)?;
+        }
+        if read_total != self.size {
+            // A short copy would reach the store as if it were whole.
+            return Err(self.local_error(
+                "reading",
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("{read_total} of {} bytes", self.size),
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -652,15 +941,8 @@ impl PendingUpload for StagedUpload {
         let Some(&len) = self.blocks.get(index) else {
             return Ok(None);
         };
-        let unreadable = |e: std::io::Error| {
-            Error::storage_with(
-                format!(
-                    "block {index} of the staged copy of {} is unreadable",
-                    self.path
-                ),
-                e,
-            )
-        };
+        let what = format!("reading block {index} of");
+        let unreadable = |e: std::io::Error| self.local_error(&what, e);
         let start: u64 = self.blocks.iter().take(index).sum();
         let mut file = tokio::fs::File::open(&self.local)
             .await
@@ -675,6 +957,13 @@ impl PendingUpload for StagedUpload {
 
     async fn discard(&self) {
         self.remove_local().await;
+    }
+
+    async fn quarantine(&self) -> bool {
+        if !self.release_bytes() {
+            return false;
+        }
+        self.staging.quarantine(&self.local) == Quarantined::Moved
     }
 }
 
@@ -736,7 +1025,36 @@ impl StorageBackend for ObjectStoreBackend {
         Ok(())
     }
 
+    /// Cuts the staged copy back to the blocks appended before the one that
+    /// failed, which are all `size` and `blocks` count.
+    async fn truncate(&self, path: &str, len: u64) -> Result<()> {
+        let mut open = self.open.lock().await;
+        let staged = open.get_mut(path).ok_or_else(|| {
+            Error::storage(format!("{}: no staged file for {path}", self.backend_name))
+        })?;
+        if len != staged.size {
+            return Err(Error::storage(format!(
+                "{}: {path} holds {} whole bytes, not {len}",
+                self.backend_name, staged.size
+            )));
+        }
+        let local = staged.local.display().to_string();
+        let cut = |e: std::io::Error| {
+            Error::storage_with(format!("cutting {path} back at {local} failed"), e)
+        };
+        staged.file.set_len(len).await.map_err(cut)?;
+        staged
+            .file
+            .seek(std::io::SeekFrom::Start(len))
+            .await
+            .map_err(cut)?;
+        Ok(())
+    }
+
     /// Hands back the staged file to upload. Nothing reaches the store here.
+    ///
+    /// The file gets a manifest naming where it belongs, so a process that
+    /// stops before the upload lands leaves it for the next one to upload.
     async fn close(&self, path: &str) -> Result<Closed> {
         let staged = self.open.lock().await.remove(path).ok_or_else(|| {
             Error::storage(format!("{}: no staged file for {path}", self.backend_name))
@@ -751,6 +1069,18 @@ impl StorageBackend for ObjectStoreBackend {
             Error::storage_with(format!("staging {path} at {} failed", local.display()), e)
         })?;
         drop(file);
+        let manifest = StagedManifest {
+            path: path.to_string(),
+            blocks,
+        };
+        // Only a restart reads the manifest, so a file without one still uploads.
+        if let Err(e) = write_manifest(&local, &manifest).await {
+            warn!(
+                local = %local.display(),
+                error = %e,
+                "Could not write a staged file's manifest; a restart before it uploads quarantines it"
+            );
+        }
 
         Ok(Closed::Pending(Box::new(StagedUpload {
             store: Arc::clone(&self.store),
@@ -758,12 +1088,33 @@ impl StorageBackend for ObjectStoreBackend {
             path: path.to_string(),
             local,
             size,
-            blocks,
+            blocks: manifest.blocks,
             chunk_size: self.chunk_size,
             backend_name: self.backend_name,
-            staged_bytes: self.staging.bytes(),
+            staging: self.staging.clone(),
             removed: AtomicBool::new(false),
         })))
+    }
+
+    fn adopt(
+        &self,
+        file: RecoveredFile,
+    ) -> std::result::Result<Box<dyn PendingUpload>, RecoveredFile> {
+        if confine(&file.path).is_err() {
+            return Err(file);
+        }
+        Ok(Box::new(StagedUpload {
+            store: Arc::clone(&self.store),
+            object_path: self.object_path(&file.path),
+            path: file.path,
+            local: file.local,
+            size: file.size,
+            blocks: file.blocks,
+            chunk_size: self.chunk_size,
+            backend_name: self.backend_name,
+            staging: self.staging.clone(),
+            removed: AtomicBool::new(false),
+        }))
     }
 
     async fn abort(&self, path: &str) {
@@ -1470,6 +1821,85 @@ mod tests {
         }
     }
 
+    /// The only file in the staging directory.
+    fn only_staged_file(staging: &Staging) -> PathBuf {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(staging.dir())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.is_file())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        files.remove(0)
+    }
+
+    /// A staged copy torn by a failed append is cut back to its whole blocks,
+    /// and the next append lands straight after them.
+    #[tokio::test]
+    async fn a_torn_staged_copy_is_cut_back_to_its_whole_blocks() {
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"one\n")
+            .await
+            .expect("append");
+        // The half of a block a full disk leaves behind.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(only_staged_file(&staging))
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"tw"))
+            .expect("tear the copy");
+
+        backend
+            .truncate("events/a.jsonl", 3)
+            .await
+            .expect_err("only the whole blocks' length is accepted");
+        backend
+            .truncate("events/a.jsonl", 4)
+            .await
+            .expect("cut back");
+        backend
+            .append("events/a.jsonl", b"two\n")
+            .await
+            .expect("append after the cut");
+        let Closed::Pending(upload) = backend.close("events/a.jsonl").await.expect("close") else {
+            unreachable!("an object-store file is staged");
+        };
+        upload.attempt().await.expect("upload");
+        let object = store
+            .get(&ObjectPath::from("archive/events/a.jsonl"))
+            .await
+            .expect("uploaded")
+            .bytes()
+            .await
+            .expect("bytes");
+        assert_eq!(object.as_ref(), b"one\ntwo\n");
+    }
+
+    /// A local file torn by a failed append is cut back the same way.
+    #[tokio::test]
+    async fn a_torn_local_file_is_cut_back_to_its_whole_blocks() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let backend = FileBackend::new(temp_dir.path());
+
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"one\ntw")
+            .await
+            .expect("append");
+        backend
+            .truncate("events/a.jsonl", 4)
+            .await
+            .expect("cut back");
+        backend
+            .append("events/a.jsonl", b"two\n")
+            .await
+            .expect("append");
+        let content = std::fs::read(temp_dir.path().join("events/a.jsonl")).expect("read");
+        assert_eq!(content, b"one\ntwo\n");
+    }
+
     /// An abandoned file leaves no local copy and no staged bytes behind.
     #[tokio::test]
     async fn an_aborted_file_is_removed_from_staging() {
@@ -1487,17 +1917,291 @@ mod tests {
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
     }
 
-    /// Files a previous process left staged were never committed, so opening
-    /// the staging area clears them instead of uploading duplicates.
-    #[test]
-    fn opening_staging_clears_what_a_previous_process_left() {
-        let dir = TempDir::new().expect("create temp dir");
-        let uploads = dir.path().join("uploads");
-        std::fs::create_dir_all(&uploads).expect("dir");
-        std::fs::write(uploads.join("41-0.part"), b"stale").expect("stale file");
+    /// Leave in staging, as a process that stopped would, one complete file
+    /// holding `complete` and one never completed holding `incomplete`.
+    async fn leave_staged(staging: &Staging, complete: &[&[u8]], incomplete: &[u8]) {
+        let (_store, backend) = in_memory(staging);
+        backend.create("events/complete.jsonl").await.expect("create");
+        for block in complete {
+            backend
+                .append("events/complete.jsonl", block)
+                .await
+                .expect("append");
+        }
+        let Closed::Pending(upload) = backend
+            .close("events/complete.jsonl")
+            .await
+            .expect("close")
+        else {
+            unreachable!("an object-store file is staged");
+        };
+        // The process stops before the upload runs.
+        drop(upload);
+        backend.create("events/open.jsonl").await.expect("create");
+        backend
+            .append("events/open.jsonl", incomplete)
+            .await
+            .expect("append");
+    }
 
-        let staging = Staging::open(&uploads).expect("staging");
+    /// Files a previous process left in staging, when the source delivers
+    /// their records again because their offsets were never committed, are
+    /// removed rather than uploaded as duplicates.
+    #[tokio::test]
+    async fn recovery_removes_what_the_source_delivers_again() {
+        let dir = TempDir::new().expect("create temp dir");
+        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        leave_staged(&first, &[b"one\n"], b"two\n").await;
+
+        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let recovery = staging.recover(true).expect("recover");
+        assert_eq!(recovery.replayed, 2);
+        assert!(recovery.complete.is_empty());
+        assert_eq!(recovery.incomplete, 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
+    }
+
+    /// With no source to deliver them again, a complete file is handed back
+    /// and uploads whole, and one never completed is quarantined, not removed.
+    #[tokio::test]
+    async fn recovery_uploads_a_complete_file_and_quarantines_an_incomplete_one() {
+        let dir = TempDir::new().expect("create temp dir");
+        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        leave_staged(&first, &[b"one\n", b"two\n"], b"half").await;
+
+        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let mut recovery = staging.recover(false).expect("recover");
+        assert_eq!(recovery.incomplete, 1, "{recovery:?}");
+        assert_eq!(recovery.replayed, 0);
+        assert_eq!(recovery.complete.len(), 1, "{recovery:?}");
+        let file = recovery.complete.remove(0);
+        assert_eq!(file.path, "events/complete.jsonl");
+        assert_eq!(file.blocks, vec![4, 4]);
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 8);
+        let quarantined: Vec<Vec<u8>> = std::fs::read_dir(staging.dir().join(QUARANTINE_DIR))
+            .expect("quarantine dir")
+            .map(|entry| std::fs::read(entry.expect("entry").path()).expect("read"))
+            .collect();
+        assert_eq!(quarantined, vec![b"half".to_vec()]);
+
+        let (store, backend) = in_memory(&staging);
+        let upload = backend.adopt(file).expect("adopted");
+        assert_eq!(upload.block(1).await.expect("block"), Some(b"two\n".to_vec()));
+        upload.attempt().await.expect("upload");
+        let object = store
+            .get(&ObjectPath::from("archive/events/complete.jsonl"))
+            .await
+            .expect("uploaded")
+            .bytes()
+            .await
+            .expect("bytes");
+        assert_eq!(object.as_ref(), b"one\ntwo\n");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
+        let left: Vec<PathBuf> = std::fs::read_dir(staging.dir())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.is_file())
+            .collect();
+        assert!(left.is_empty(), "the copy and its manifest are removed: {left:?}");
+    }
+
+    /// A manifest that cannot be read, or that disagrees with its file, says
+    /// nothing reliable about where the file belongs, so it is quarantined.
+    #[tokio::test]
+    async fn a_file_with_an_unreadable_manifest_is_quarantined() {
+        let dir = TempDir::new().expect("create temp dir");
+        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        leave_staged(&first, &[b"one\n"], b"").await;
+        let manifest = std::fs::read_dir(first.dir())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| path.to_string_lossy().ends_with(MANIFEST_SUFFIX))
+            .expect("a manifest");
+        std::fs::write(&manifest, b"{not json").expect("corrupt the manifest");
+
+        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let recovery = staging.recover(false).expect("recover");
+        assert_eq!(recovery.corrupt, 1, "{recovery:?}");
+        assert!(recovery.complete.is_empty());
+        assert_eq!(
+            std::fs::read_dir(staging.dir().join(QUARANTINE_DIR))
+                .expect("quarantine dir")
+                .count(),
+            3,
+            "the corrupt file, its manifest and the incomplete file"
+        );
+    }
+
+    /// Wraps an in-memory store so every multipart completion fails, as a
+    /// store answering the completion with an error does, and counts aborts.
+    #[derive(Debug)]
+    struct FailingCompletion {
+        inner: object_store::memory::InMemory,
+        aborts: Arc<AtomicU64>,
+    }
+
+    impl std::fmt::Display for FailingCompletion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("FailingCompletion")
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingUpload {
+        inner: Box<dyn MultipartUpload>,
+        aborts: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl MultipartUpload for FailingUpload {
+        fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+            self.inner.put_part(data)
+        }
+        async fn complete(&mut self) -> object_store::Result<object_store::PutResult> {
+            Err(object_store::Error::Generic {
+                store: "failing",
+                source: "completion refused with 503".into(),
+            })
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.aborts.fetch_add(1, Ordering::Relaxed);
+            self.inner.abort().await
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for FailingCompletion {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            let inner = self.inner.put_multipart_opts(location, opts).await?;
+            Ok(Box::new(FailingUpload {
+                inner,
+                aborts: Arc::clone(&self.aborts),
+            }))
+        }
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A multipart upload whose completion fails is aborted, so its parts are
+    /// not left in the store, and the file stays staged for the next attempt.
+    #[tokio::test]
+    async fn a_failed_completion_aborts_the_multipart_upload() {
+        let (_dir, staging) = staging();
+        let aborts = Arc::new(AtomicU64::new(0));
+        let store = Arc::new(FailingCompletion {
+            inner: object_store::memory::InMemory::new(),
+            aborts: Arc::clone(&aborts),
+        });
+        let backend = ObjectStoreBackend::with_store(
+            store as Arc<dyn ObjectStore>,
+            "archive".to_string(),
+            "failing",
+            5 * 1024 * 1024,
+            &staging,
+        );
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"one\n")
+            .await
+            .expect("append");
+        let Closed::Pending(upload) = backend.close("events/a.jsonl").await.expect("close") else {
+            unreachable!("an object-store file is staged");
+        };
+
+        let err = upload.attempt().await.expect_err("completion fails");
+        assert!(!err.is_refused() && !err.is_unreadable(), "{err:?}");
+        assert_eq!(aborts.load(Ordering::Relaxed), 1, "the upload is aborted");
+        assert_eq!(
+            staging.bytes().load(Ordering::Relaxed),
+            4,
+            "the staged copy is kept for the next attempt"
+        );
+    }
+
+    /// A staged copy that is gone or shorter than written cannot be uploaded
+    /// by any retry, and a short one never reaches the store as if whole.
+    #[tokio::test]
+    async fn a_missing_or_short_staged_copy_is_unreadable_for_good() {
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+        for (name, damage) in [("gone", 0usize), ("short", 3)] {
+            let path = format!("events/{name}.jsonl");
+            backend.create(&path).await.expect("create");
+            backend.append(&path, b"0123456789\n").await.expect("append");
+            let Closed::Pending(upload) = backend.close(&path).await.expect("close") else {
+                unreachable!("an object-store file is staged");
+            };
+            let local = std::fs::read_dir(staging.dir())
+                .expect("dir")
+                .map(|entry| entry.expect("entry").path())
+                .find(|path| path.extension().is_some_and(|ext| ext == STAGED_EXTENSION))
+                .expect("the staged copy");
+            if damage == 0 {
+                std::fs::remove_file(&local).expect("remove the copy");
+            } else {
+                std::fs::write(&local, &b"0123456789\n"[..damage]).expect("shorten the copy");
+            }
+
+            let err = upload.attempt().await.expect_err("unreadable");
+            assert!(err.is_unreadable(), "{name}: {err:?}");
+            assert!(
+                store
+                    .head(&ObjectPath::from(format!("archive/{path}").as_str()))
+                    .await
+                    .is_err(),
+                "{name}: nothing reached the store"
+            );
+            let _ = upload.quarantine().await;
+        }
+        assert!(!unreadable_for_good(&std::io::Error::from(
+            std::io::ErrorKind::Interrupted
+        )));
+        assert!(!unreadable_for_good(&std::io::Error::from_raw_os_error(5)));
     }
 
     /// Only a refusal the store gives for the object itself is permanent.

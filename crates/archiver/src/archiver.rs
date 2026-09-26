@@ -26,14 +26,14 @@
 //! roll never commits past a record another destination still holds.
 
 use crate::config::{Config, SharedConfig};
-use crate::metrics::ArchiverMetrics;
-use dfe_archiver_core::archive::{ArchiveWriter, PendingFile, RollingPolicy, Settled};
+use crate::metrics::{ArchiverMetrics, DropReason, QuarantineReason, RemovalReason};
+use dfe_archiver_core::archive::{ArchiveWriter, FlushStats, PendingFile, RollingPolicy, Settled};
 use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
 use dfe_archiver_core::config::{ArchiveConfig, HELD_OFFSET_BYTES};
 use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::routing::depth::MAX_PARSE_DEPTH;
-use dfe_archiver_core::storage::{PendingUpload, probe_sink};
+use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
@@ -76,6 +76,17 @@ const UPLOAD_RETRY_FIRST: Duration = Duration::from_millis(500);
 /// The longest wait between two attempts at one upload.
 const UPLOAD_RETRY_MAX: Duration = Duration::from_secs(60);
 
+/// The first retry of a local write that failed in a way that can clear,
+/// doubling to `WRITE_RETRY_MAX`.
+const WRITE_RETRY_FIRST: Duration = Duration::from_millis(100);
+
+/// The longest wait between two attempts at one local write.
+const WRITE_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// How long a local write that keeps failing is retried once shutdown begins.
+/// A batch still failing then is withheld: read again after the restart.
+const DRAIN_WRITE_RETRY_LIMIT: Duration = Duration::from_secs(10);
+
 /// The share of the memory limit held offsets may take before intake pauses.
 const HELD_RECORDS_MEMORY_SHARE: u64 = 4;
 
@@ -92,16 +103,22 @@ fn held_record_cap(memory_limit_bytes: u64) -> u64 {
     (memory_limit_bytes / HELD_RECORDS_MEMORY_SHARE / HELD_OFFSET_BYTES).max(1)
 }
 
-/// The wait before retry `attempt` of an upload: exponential from
-/// `UPLOAD_RETRY_FIRST` to `UPLOAD_RETRY_MAX`, drawn from its upper half so
-/// uploads that failed together do not retry together.
-fn upload_retry_delay(attempt: u32) -> Duration {
-    let ceiling = UPLOAD_RETRY_FIRST
+// SHORTCUT: app-local backoff until scalo exports its own (scalo::backoff is pub(crate))
+/// The wait before retry `attempt` (0-based): exponential from `first` to
+/// `max`, drawn from its upper half so work that failed together does not
+/// retry together.
+fn retry_delay(attempt: u32, first: Duration, max: Duration) -> Duration {
+    let ceiling = first
         .saturating_mul(2u32.saturating_pow(attempt.min(16)))
-        .min(UPLOAD_RETRY_MAX);
+        .min(max);
     let jitter = std::hash::RandomState::new().hash_one((attempt, Instant::now()));
     let fraction = 0.5 + (jitter % 1000) as f64 / 2000.0;
     ceiling.mul_f64(fraction)
+}
+
+/// The wait before retry `attempt` of an upload.
+fn upload_retry_delay(attempt: u32) -> Duration {
+    retry_delay(attempt, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX)
 }
 
 /// Pause intake as held records or staged bytes near their caps.
@@ -177,6 +194,8 @@ struct Uploader {
 /// and settle its records accordingly. A transient failure keeps the file and
 /// its held offsets, and the next attempt starts a fresh upload. A refused
 /// file's records go to the DLQ when one is enabled, and are dropped when not.
+/// A local copy that cannot be read back is quarantined and its records
+/// withheld, because no retry of the upload can read it.
 async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Settled {
     let PendingFile {
         upload,
@@ -219,6 +238,20 @@ async fn upload_until_settled(file: PendingFile, uploader: Arc<Uploader>) -> Set
                     "The store refused an archive file for good; its records are dropped"
                 );
                 return Settled::dropped(offsets, records, e.to_string());
+            }
+            Err(e) if e.is_unreadable() => {
+                let moved = upload.quarantine().await;
+                uploader
+                    .metrics
+                    .record_staged_quarantined(1, QuarantineReason::Unreadable);
+                error!(
+                    path = %upload.path(),
+                    records,
+                    moved,
+                    error = %e,
+                    "A staged file cannot be read back, so no retry can upload it; it is quarantined and its records withheld"
+                );
+                return Settled::errored(offsets, records);
             }
             Err(e) => {
                 uploader.metrics.record_error();
@@ -307,9 +340,9 @@ async fn dead_letter_refused_file(
         Ok(lines) if lines > 0 || file.records == 0 => lines,
         Ok(_) => {
             let empty = Error::storage("no record could be read back");
-            return settle_unreadable(offsets, path, &empty);
+            return settle_unreadable(offsets, file.records, path, &empty);
         }
-        Err(e) => return settle_unreadable(offsets, path, &e),
+        Err(e) => return settle_unreadable(offsets, file.records, path, &e),
     };
     let whole_blocks = lines != file.records;
     let reason = if whole_blocks {
@@ -334,7 +367,7 @@ async fn dead_letter_refused_file(
         let plain = match file.block(index, compressor).await {
             Ok(Some(plain)) => plain,
             Ok(None) => break,
-            Err(e) => return settle_unreadable(offsets, path, &e),
+            Err(e) => return settle_unreadable(offsets, file.records, path, &e),
         };
         let entry = |payload: Vec<u8>, lines: u64| {
             let entry = DlqEntry::new("dfe-archiver", reason.as_str(), payload)
@@ -366,20 +399,23 @@ async fn dead_letter_refused_file(
                 error = %dlq_err,
                 "The DLQ could not take the records of a file the store refused; a restart writes them again"
             );
-            return Settled {
-                errored: offsets,
-                ..Settled::default()
-            };
+            return Settled::errored(offsets, file.records);
         }
         written += counts.iter().sum::<u64>();
     }
 
     file.upload.discard().await;
+    // A file recovered from a previous process does not know its record count, so its lines stand in.
+    let records = if file.records > 0 {
+        file.records
+    } else {
+        lines
+    };
     // Lines stand in for records, and a whole block of them holds more lines than records.
-    let dropped = too_large.min(file.records);
+    let dropped = too_large.min(records);
     let mut settled = Settled::default();
     if let Some(why) = too_large_reason {
-        settled.dropped_records = dropped;
+        settled.too_large_records = dropped;
         settled.dropped_reason = Some(format!(
             "{}, and no DLQ backend can hold them: {why}",
             file.refusal
@@ -387,7 +423,7 @@ async fn dead_letter_refused_file(
     }
     if written > 0 {
         settled.rejected = offsets;
-        settled.rejected_records = file.records - dropped;
+        settled.rejected_records = records.saturating_sub(dropped);
     } else {
         settled.dropped = offsets;
     }
@@ -396,16 +432,13 @@ async fn dead_letter_refused_file(
 
 /// Settle a refused file that cannot be read back for the DLQ `Errored`, so a
 /// restart writes its records again.
-fn settle_unreadable(offsets: OffsetSet, path: &str, error: &Error) -> Settled {
+fn settle_unreadable(offsets: OffsetSet, records: u64, path: &str, error: &Error) -> Settled {
     error!(
         path,
         error = %error,
         "A file the store refused could not be read back for the DLQ; a restart writes its records again"
     );
-    Settled {
-        errored: offsets,
-        ..Settled::default()
-    }
+    Settled::errored(offsets, records)
 }
 
 /// Per-instance log-spam guards. Live on `Archiver` (not as module statics)
@@ -415,6 +448,29 @@ struct LogSpamGuards {
     recv_error_last: AtomicU64,
     route_error_count: AtomicU64,
     backpressure_active: AtomicBool,
+    /// Set while a local write keeps failing and its batch is held.
+    write_failing: AtomicBool,
+    /// Input-validation security events, one a refused record.
+    validation_failures: AtomicU64,
+    /// DLQ-routing security events, one a dead-lettered batch.
+    dlq_events: AtomicU64,
+}
+
+/// Security events per record logged: the first and every thousandth.
+const VALIDATION_EVENT_SAMPLE: u64 = 1000;
+
+/// Security events per dead-lettered batch logged: the first and every hundredth.
+const DLQ_EVENT_SAMPLE: u64 = 100;
+
+/// `reason` with the running count, when this occurrence is one `counter`
+/// samples at one in `rate`, so a sustained condition logs a bounded stream
+/// that still says how large it is.
+fn sampled_reason(counter: &AtomicU64, rate: u64, reason: &str) -> Option<String> {
+    if !log_sampled(counter, rate) {
+        return None;
+    }
+    let total = counter.load(Ordering::Relaxed);
+    Some(format!("{reason} ({total} so far, 1 in {rate} logged)"))
 }
 
 /// What routing one received block produced.
@@ -432,8 +488,27 @@ enum Written {
     /// In its destination's open file, which holds the offsets until it is
     /// durable.
     Held { records: usize },
-    /// No file took it, so the batch comes back for the dead-letter path.
-    Failed(StagedBatch, Error),
+    /// Refused for good, so the batch comes back for the dead-letter path.
+    Refused(StagedBatch, Error),
+    /// A failure that can clear, still failing when shutdown stopped retrying
+    /// it, so the batch is withheld and never dead-lettered.
+    Withheld(StagedBatch, Error),
+}
+
+/// Why a failing write stopped retrying.
+enum WriteStop {
+    /// Refused for good: retrying the same records gets the same answer.
+    Refused(Error),
+    /// Still failing once shutdown had waited `DRAIN_WRITE_RETRY_LIMIT`.
+    GaveUp(Error),
+}
+
+/// The retries of one batch's write.
+#[derive(Default)]
+struct WriteRetry {
+    failures: u32,
+    /// When shutdown was first seen while retrying.
+    shutdown_seen: Option<Instant>,
 }
 
 /// Main archiver pipeline
@@ -736,6 +811,105 @@ fn spawn_dlq(config: &Config) -> Result<Dlq> {
     Ok(dlq)
 }
 
+/// Settle and report what a previous process left in staging: removed when
+/// the source delivers those records again, quarantined when never completed
+/// or unreadable, and returned to upload when complete.
+fn recover_staging(
+    staging: &Staging,
+    replayed: bool,
+    metrics: &ArchiverMetrics,
+) -> Result<Vec<RecoveredFile>> {
+    let recovery = staging.recover(replayed)?;
+    let dir = staging.dir().display();
+    if recovery.replayed > 0 {
+        metrics.record_staged_removed(recovery.replayed, RemovalReason::Replayed);
+        info!(
+            files = recovery.replayed,
+            dir = %dir,
+            "Removed staged files a previous process left; the source delivers their records again"
+        );
+    }
+    if recovery.incomplete > 0 {
+        metrics.record_staged_quarantined(recovery.incomplete, QuarantineReason::Incomplete);
+        warn!(
+            files = recovery.incomplete,
+            dir = %dir,
+            "Quarantined staged files a previous process never completed; the source cannot deliver their records again"
+        );
+    }
+    if recovery.corrupt > 0 {
+        metrics.record_staged_quarantined(recovery.corrupt, QuarantineReason::Corrupt);
+        warn!(
+            files = recovery.corrupt,
+            dir = %dir,
+            "Quarantined staged files whose manifest could not be read"
+        );
+    }
+    if recovery.quarantine_full > 0 {
+        metrics.record_staged_removed(recovery.quarantine_full, RemovalReason::QuarantineFull);
+        error!(
+            files = recovery.quarantine_full,
+            dir = %dir,
+            "Removed staged files the full quarantine directory could not take"
+        );
+    }
+    if !recovery.complete.is_empty() {
+        metrics.record_staged_recovered(recovery.complete.len() as u64);
+        info!(
+            files = recovery.complete.len(),
+            dir = %dir,
+            "Uploading complete staged files a previous process left"
+        );
+    }
+    Ok(recovery.complete)
+}
+
+/// Complete staged files a previous process left, as uploads through a
+/// backend of this destination. A file no backend of it can take is
+/// quarantined.
+fn adopt_recovered(
+    archive: &ArchiveConfig,
+    staging: &Staging,
+    files: Vec<RecoveredFile>,
+    metrics: &ArchiverMetrics,
+) -> Vec<PendingFile> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let backend = create_backend(archive, staging);
+    let mut uploads = Vec::with_capacity(files.len());
+    for file in files {
+        let adopted = match &backend {
+            Ok(backend) => backend.adopt(file),
+            Err(_) => Err(file),
+        };
+        match adopted {
+            Ok(upload) => {
+                // The routed destination is not recorded, so the path stands in for a dead letter.
+                let destination = upload.path().to_string();
+                uploads.push(PendingFile {
+                    upload,
+                    offsets: OffsetSet::default(),
+                    records: 0,
+                    destination,
+                });
+            }
+            Err(file) => {
+                staging.bytes().fetch_sub(file.size, Ordering::Relaxed);
+                let placed = staging.quarantine(&file.local);
+                metrics.record_staged_quarantined(1, QuarantineReason::NoStore);
+                warn!(
+                    local = %file.local.display(),
+                    path = %file.path,
+                    ?placed,
+                    "No backend of this destination can take a staged file a previous process left"
+                );
+            }
+        }
+    }
+    uploads
+}
+
 /// One permit per upload attempt running at once: `buffer.writer_parallelism`.
 /// Zero would never upload, so it counts as one.
 fn upload_slots(config: &Config) -> Arc<Semaphore> {
@@ -850,6 +1024,7 @@ impl Archiver {
             .collect();
 
         let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
+        let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
         let held_records = Arc::new(AtomicU64::new(0));
         attach_intake_caps(governor, &memory_guard, &held_records, &staging);
 
@@ -867,7 +1042,7 @@ impl Archiver {
             compressor: Arc::from(compressor_for(&config.compression)?),
         });
 
-        Ok(Self {
+        let archiver = Self {
             startup_config: config,
             shared_config,
             transport,
@@ -890,7 +1065,18 @@ impl Archiver {
             dlq,
             log_guards: LogSpamGuards::default(),
             routing_fallback_guards,
-        })
+        };
+        let uploads = adopt_recovered(
+            &archiver.startup_config.archive,
+            &archiver.staging,
+            recovered,
+            &archiver.metrics,
+        );
+        archiver.dispatch_uploads(Settled {
+            uploads,
+            ..Settled::default()
+        });
+        Ok(archiver)
     }
 
     /// Check the inbound transport (it connects or binds on creation) and prove
@@ -1114,7 +1300,7 @@ impl Archiver {
         match self.router.route(msg) {
             Ok(routed) => Some(routed),
             Err(e @ Error::TooDeep { .. }) => {
-                scalo::logger::security::input_validation_failure("routing", &e.to_string(), None);
+                self.security_validation_event(&e);
                 None
             }
             Err(e) => {
@@ -1129,12 +1315,33 @@ impl Archiver {
                         "Routing failed, using topic (sampled 1/1000)"
                     );
                 }
-                scalo::logger::security::input_validation_failure("routing", &e.to_string(), None);
+                self.security_validation_event(&e);
                 Some(dfe_archiver_core::routing::Routed {
                     destination: Router::topic_destination(msg),
                     fallback_fields: Vec::new(),
                 })
             }
+        }
+    }
+
+    /// Log a record routing refused as an input-validation security event,
+    /// sampled, because one arrives per record.
+    fn security_validation_event(&self, error: &Error) {
+        if let Some(reason) = sampled_reason(
+            &self.log_guards.validation_failures,
+            VALIDATION_EVENT_SAMPLE,
+            &error.to_string(),
+        ) {
+            scalo::logger::security::input_validation_failure("routing", &reason, None);
+        }
+    }
+
+    /// Log a dead-lettered batch as a DLQ-routing security event, sampled, so
+    /// a sustained refusal does not flood the log.
+    fn security_dlq_event(&self, action: &str, reason: &str, detail: Option<&str>) {
+        if let Some(reason) = sampled_reason(&self.log_guards.dlq_events, DLQ_EVENT_SAMPLE, reason)
+        {
+            scalo::logger::security::record_dlq(action, &reason, detail);
         }
     }
 
@@ -1226,8 +1433,10 @@ impl Archiver {
     }
 
     /// Phase 2: write staged batches concurrently, one task per destination
-    /// (each writer has its own Mutex so destinations never contend), and
-    /// dead-letter the ones no file took. Returns what the writes settled.
+    /// (each writer has its own Mutex so destinations never contend), holding
+    /// and retrying a write that fails in a way that can clear. A batch refused
+    /// for good is dead-lettered, and one still failing at shutdown withheld.
+    /// Returns what the writes settled.
     async fn write_staged(&self, staged: Vec<StagedBatch>) -> Settled {
         // futures::future::join_all runs writes concurrently on this task --
         // maximises I/O overlap without spawning new tasks.
@@ -1247,19 +1456,30 @@ impl Archiver {
                     cycle_ok += 1;
                     self.metrics.record_written(records as u64);
                 }
-                Written::Failed(batch, e) => {
+                Written::Refused(batch, e) => {
                     cycle_err += 1;
                     error!(
                         error = %e,
                         destination = %batch.destination,
-                        "Failed to write batch"
+                        "A batch was refused for good; it goes to the dead-letter path"
                     );
-                    self.metrics.record_error();
-                    // Surface storage-write failures per backend so the
-                    // per-backend error counter is non-empty (metrics-gap audit).
-                    self.metrics
-                        .record_sink_error(self.startup_config.archive.backend_name());
                     self.dead_letter(batch, &e).await;
+                }
+                Written::Withheld(batch, e) => {
+                    cycle_err += 1;
+                    error!(
+                        error = %e,
+                        destination = %batch.destination,
+                        records = batch.record_count,
+                        "A local write was still failing when shutdown stopped retrying it; its batch is withheld"
+                    );
+                    let records = batch.record_count as u64;
+                    self.withhold(
+                        tokens_of(batch.offsets),
+                        records,
+                        "its local write was still failing at shutdown",
+                    )
+                    .await;
                 }
             }
         }
@@ -1299,11 +1519,31 @@ impl Archiver {
         }
     }
 
+    /// Withhold records written nowhere. A source that holds offsets releases
+    /// them `Errored`, which keeps them below every later commit and ends the
+    /// loop so the restart reads them again. A source that cannot deliver them
+    /// again -- the direct transport, or Kafka with acknowledgements off --
+    /// has already let them go, so they are counted dropped with the reason.
+    async fn withhold(&self, tokens: Vec<KafkaToken>, records: u64, why: &str) {
+        if self.transport.holds_offsets() {
+            self.release(tokens, DeliveryStatus::Errored).await;
+            return;
+        }
+        if records == 0 {
+            return;
+        }
+        self.metrics
+            .record_dropped(records, DropReason::Unreplayable);
+        error!(
+            records,
+            why, "Dropped records written nowhere, on a source that cannot deliver them again"
+        );
+    }
+
     /// Start the uploads of staged files, then release the rest of what the
     /// writers settled: the offsets of durable files `Delivered`, of refused
     /// files the DLQ holds `Rejected`, of refused files nothing holds
-    /// `Dropped`, and of files that failed on local disk `Errored`, which keeps
-    /// them below every later commit and ends the loop.
+    /// `Dropped`, and withhold those of files that failed on local disk.
     async fn release_settled(&self, settled: Settled) {
         let settled = self.dispatch_uploads(settled);
         if settled.delivered_records > 0 {
@@ -1316,21 +1556,34 @@ impl Archiver {
         }
         self.release(settled.rejected.tokens(), DeliveryStatus::Rejected)
             .await;
+        let reason = settled
+            .dropped_reason
+            .as_deref()
+            .unwrap_or("refused by the store");
+        if settled.too_large_records > 0 {
+            self.metrics
+                .record_dropped(settled.too_large_records, DropReason::DlqTooLarge);
+            error!(
+                records = settled.too_large_records,
+                reason, "Dropped records of a refused file that no DLQ backend can hold"
+            );
+        }
         if settled.dropped_records > 0 {
-            self.metrics.record_dropped(settled.dropped_records);
+            self.metrics
+                .record_dropped(settled.dropped_records, DropReason::Refused);
             error!(
                 records = settled.dropped_records,
-                reason = settled
-                    .dropped_reason
-                    .as_deref()
-                    .unwrap_or("refused by the store"),
-                "Dropped records the store refused for good"
+                reason, "Dropped records the store refused for good"
             );
         }
         self.release(settled.dropped.tokens(), DeliveryStatus::Dropped)
             .await;
-        self.release(settled.errored.tokens(), DeliveryStatus::Errored)
-            .await;
+        self.withhold(
+            settled.errored.tokens(),
+            settled.errored_records,
+            "their file failed on local disk",
+        )
+        .await;
     }
 
     /// Refresh the held-record count the inbound brake reads on every recv, at
@@ -1495,13 +1748,72 @@ impl Archiver {
         Ok(writer)
     }
 
+    /// Decide what a failed write of `destination`'s batch does next: `None` to
+    /// write it again after a backoff, or why it stops. A failure no retry
+    /// changes stops at once. Any other is retried until shutdown has waited
+    /// `DRAIN_WRITE_RETRY_LIMIT` on it.
+    async fn after_write_failure(
+        &self,
+        retry: &mut WriteRetry,
+        destination: &str,
+        error: Error,
+    ) -> Option<WriteStop> {
+        self.metrics.record_error();
+        // Per backend, so the per-backend sink error counter moves.
+        self.metrics
+            .record_sink_error(self.startup_config.archive.backend_name());
+        if error.is_permanent() {
+            return Some(WriteStop::Refused(error));
+        }
+        retry.failures = retry.failures.saturating_add(1);
+        if self.cancel.is_cancelled() {
+            let since = *retry.shutdown_seen.get_or_insert_with(Instant::now);
+            if since.elapsed() >= DRAIN_WRITE_RETRY_LIMIT {
+                return Some(WriteStop::GaveUp(error));
+            }
+        }
+        if matches!(
+            sink_confirmation(&self.startup_config.archive),
+            SinkConfirmation::Local
+        ) {
+            self.sink.set(true);
+        }
+        let delay = retry_delay(retry.failures - 1, WRITE_RETRY_FIRST, WRITE_RETRY_MAX);
+        if log_state_change(&self.log_guards.write_failing, true) {
+            warn!(
+                destination,
+                error = %error,
+                "A local archive write failed; its batch and offsets are held and the write retried with backoff until it lands"
+            );
+        } else {
+            debug!(
+                destination,
+                attempt = retry.failures,
+                retry_in_ms = delay.as_millis(),
+                error = %error,
+                "A local archive write failed again"
+            );
+        }
+        let wake_on_shutdown = retry.shutdown_seen.is_none();
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = self.cancel.cancelled(), if wake_on_shutdown => {}
+        }
+        None
+    }
+
     /// Write one staged batch into its destination's open file.
     ///
     /// Once written, the batch's offsets are held against that file and
     /// released when it completes. A roll inside the write completes the
     /// previous file, whose offsets come back settled either way.
+    ///
+    /// A write that fails in a way that can clear -- a full or failing disk,
+    /// staging that cannot be created -- is retried with backoff and jitter
+    /// while the batch and its offsets are held. The loop receives nothing
+    /// until this returns, so nothing later is read or committed past it.
     #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
-    async fn write_batch(&self, batch: StagedBatch) -> (Written, Settled) {
+    async fn write_batch(&self, mut batch: StagedBatch) -> (Written, Settled) {
         let start = Instant::now();
         trace!(
             destination = %batch.destination,
@@ -1511,44 +1823,86 @@ impl Archiver {
             "Starting batch write"
         );
 
-        let writer_arc = match self.writer_for(batch.destination.as_str()) {
-            Ok(writer) => writer,
-            Err(e) => return (Written::Failed(batch, e), Settled::default()),
+        let mut retry = WriteRetry::default();
+        let mut settled = Settled::default();
+        let outcome = loop {
+            let writer_arc = match self.writer_for(batch.destination.as_str()) {
+                Ok(writer) => writer,
+                Err(e) => match self
+                    .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                    .await
+                {
+                    Some(stop) => break Err(stop),
+                    None => continue,
+                },
+            };
+            // Held across retries, so a later batch for this destination waits behind this one.
+            let mut writer = writer_arc.lock().await;
+            let attempt = loop {
+                // Write data (may trigger a roll), then flush it into the file.
+                let written = match writer.write(&batch.data).await {
+                    Ok(()) => writer.flush().await,
+                    Err(e) => Err(e),
+                };
+                record_files_opened(&self.metrics, &mut writer);
+                record_rolls(&self.metrics, &mut writer, batch.destination.as_str());
+                match written {
+                    Ok(flush_stats) => {
+                        let offsets = if self.transport.holds_offsets() {
+                            std::mem::take(&mut batch.offsets)
+                        } else {
+                            Vec::new()
+                        };
+                        writer.hold(offsets, batch.record_count as u64);
+                        settled.absorb(writer.take_settled());
+                        break Ok(flush_stats);
+                    }
+                    Err(e) => {
+                        settled.absorb(writer.take_settled());
+                        if let Some(stop) = self
+                            .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                            .await
+                        {
+                            break Err(stop);
+                        }
+                    }
+                }
+            };
+            break attempt;
         };
-
-        // Lock only THIS destination's writer -- other destinations can write concurrently
-        let mut writer = writer_arc.lock().await;
-
-        // Write data (may trigger a roll), then flush it into the file.
-        let written = match writer.write(&batch.data).await {
-            Ok(()) => writer.flush().await,
-            Err(e) => Err(e),
-        };
-        record_files_opened(&self.metrics, &mut writer);
-        record_rolls(&self.metrics, &mut writer, batch.destination.as_str());
-        // The batch leaves memory whether a file took it or the DLQ does.
+        // The batch leaves memory whether a file took it, the DLQ does, or it is withheld.
         self.memory_guard.release(batch.data.len() as u64);
 
-        let flush_stats = match written {
+        let flush_stats = match outcome {
             Ok(flush_stats) => flush_stats,
-            Err(e) => return (Written::Failed(batch, e), writer.take_settled()),
+            Err(WriteStop::Refused(e)) => return (Written::Refused(batch, e), settled),
+            Err(WriteStop::GaveUp(e)) => return (Written::Withheld(batch, e), settled),
         };
-        let StagedBatch {
-            destination,
-            data,
-            offsets,
-            record_count,
-            ..
-        } = batch;
-        let offsets = if self.transport.holds_offsets() {
-            offsets
-        } else {
-            Vec::new()
-        };
-        writer.hold(offsets, record_count as u64);
-        let settled = writer.take_settled();
-        drop(writer);
+        if retry.failures > 0 && log_state_change(&self.log_guards.write_failing, false) {
+            info!(
+                destination = %batch.destination,
+                attempts = retry.failures + 1,
+                "Local archive writes recovered; the held batch is written"
+            );
+        }
+        self.record_batch_written(&batch, flush_stats.as_ref(), start.elapsed());
+        (
+            Written::Held {
+                records: batch.record_count,
+            },
+            settled,
+        )
+    }
 
+    /// Record a batch that landed in its file, `duration` after its write
+    /// began, retries included.
+    fn record_batch_written(
+        &self,
+        batch: &StagedBatch,
+        flush_stats: Option<&FlushStats>,
+        duration: Duration,
+    ) {
+        let destination = batch.destination.as_str();
         if let Some(flush_stats) = flush_stats {
             let ratio = if flush_stats.uncompressed_bytes > 0 {
                 flush_stats.compressed_bytes as f64 / flush_stats.uncompressed_bytes as f64
@@ -1556,7 +1910,7 @@ impl Archiver {
                 1.0
             };
             debug!(
-                destination = %destination,
+                destination,
                 uncompressed_bytes = flush_stats.uncompressed_bytes,
                 compressed_bytes = flush_stats.compressed_bytes,
                 compression_ratio = format!("{ratio:.3}"),
@@ -1571,30 +1925,23 @@ impl Archiver {
             );
         }
 
-        let duration = start.elapsed();
         let backend = self.startup_config.archive.backend_name();
+        let bytes = batch.data.len() as u64;
         self.metrics
             .record_flush(duration.as_secs_f64(), FlushTrigger::Size);
-        self.metrics.record_bytes_written(data.len() as u64);
-        self.metrics.record_batch_size(data.len() as u64);
+        self.metrics.record_bytes_written(bytes);
+        self.metrics.record_batch_size(bytes);
         self.metrics
             .record_sink_duration(backend, duration.as_secs_f64());
 
         debug!(
-            destination = %destination,
-            records = record_count,
-            bytes = data.len(),
+            destination,
+            records = batch.record_count,
+            bytes,
             duration_ms = duration.as_millis(),
             backend,
             "Wrote batch to archive"
         );
-
-        (
-            Written::Held {
-                records: record_count,
-            },
-            settled,
-        )
     }
 
     /// Close every writer whose open file has outlived the rolling policy,
@@ -1857,13 +2204,15 @@ impl Archiver {
         settled
     }
 
-    /// Dead-letter a batch no file took, one entry per record, and release
+    /// Dead-letter a batch refused for good, one entry per record, and release
     /// each record's offset: `Rejected` once the DLQ confirms it holds the
-    /// record. When the store refused the batch for good, a record no DLQ
-    /// backend can ever hold is `Dropped` with the reason, and so is every
-    /// record with the DLQ off. Otherwise the whole batch is `Errored`, which
-    /// ends the loop so a restart writes it again: a local failure can clear,
-    /// and so can a failed DLQ write.
+    /// record. A record no DLQ backend can ever hold is `Dropped` with the
+    /// reason, and so is every record with the DLQ off, because the same
+    /// records are refused on every retry. A DLQ write that fails withholds the
+    /// whole batch, since that failure can clear.
+    ///
+    /// Only a refusal reaches here: a write that fails in a way that can clear
+    /// is held and retried in [`write_batch`](Self::write_batch).
     async fn dead_letter(&self, batch: StagedBatch, error: &Error) {
         if !self.dlq.is_enabled() {
             self.settle_without_dlq(batch, error).await;
@@ -1876,7 +2225,7 @@ impl Archiver {
             data_bytes = batch.data.len(),
             records,
             error = %error,
-            "Sending failed batch to DLQ"
+            "Sending a refused batch to the DLQ"
         );
         let entries = match record_dead_letters(batch, &format!("storage_write_failed: {error}")) {
             Ok(entries) => entries,
@@ -1888,32 +2237,16 @@ impl Archiver {
                     destination = %destination,
                     "A batch's records and offsets disagree; a restart writes it again"
                 );
-                self.release(tokens_of(offsets), DeliveryStatus::Errored)
-                    .await;
+                self.withhold(
+                    tokens_of(offsets),
+                    records,
+                    "its records and offsets disagree",
+                )
+                .await;
                 return;
             }
         };
         let Screened { writable, refused } = screen_dead_letters(&self.dlq, entries);
-        if let Some((why, _)) = refused.first()
-            && !error.is_refused()
-        {
-            error!(
-                records,
-                too_large = refused.len(),
-                destination = %destination,
-                reason = %why,
-                error = %error,
-                "The DLQ can never hold a record of a batch that failed locally; a restart writes the batch again"
-            );
-            let all = writable
-                .into_iter()
-                .map(|(_, offset)| offset)
-                .chain(refused.into_iter().map(|(_, offset)| offset))
-                .collect();
-            self.release(tokens_of(all), DeliveryStatus::Errored).await;
-            return;
-        }
-
         let (entries, written): (Vec<DlqEntry>, Vec<KafkaOffset>) = writable.into_iter().unzip();
         let outcome = if entries.is_empty() {
             Ok(())
@@ -1925,18 +2258,19 @@ impl Archiver {
                 error = %dlq_err,
                 destination = %destination,
                 records,
-                "The DLQ could not take a batch no file took; a restart writes it again"
+                "The DLQ could not take a refused batch; a restart writes it again"
             );
             let all = written
                 .into_iter()
                 .chain(refused.into_iter().map(|(_, offset)| offset))
                 .collect();
-            self.release(tokens_of(all), DeliveryStatus::Errored).await;
+            self.withhold(tokens_of(all), records, "the DLQ could not take them")
+                .await;
             return;
         }
         if !written.is_empty() {
             self.metrics.record_dlq(written.len() as u64);
-            scalo::logger::security::record_dlq(
+            self.security_dlq_event(
                 "storage_write_failed",
                 &error.to_string(),
                 Some(destination.as_str()),
@@ -1945,13 +2279,14 @@ impl Archiver {
                 .await;
         }
         if let Some((why, _)) = refused.first() {
-            self.metrics.record_dropped(refused.len() as u64);
+            self.metrics
+                .record_dropped(refused.len() as u64, DropReason::DlqTooLarge);
             error!(
                 records = refused.len(),
                 destination = %destination,
                 reason = %why,
                 error = %error,
-                "Dropped records the store refused for good and the DLQ can never hold"
+                "Dropped records refused for good that the DLQ can never hold"
             );
             let dropped = refused.into_iter().map(|(_, offset)| offset).collect();
             self.release(tokens_of(dropped), DeliveryStatus::Dropped)
@@ -1959,23 +2294,19 @@ impl Archiver {
         }
     }
 
-    /// Release a batch no file took while the DLQ is off: `Dropped` with the
-    /// reason when the store refused it for good, `Errored` otherwise.
+    /// Release a batch refused for good while the DLQ is off: `Dropped`,
+    /// counted, with the reason.
     async fn settle_without_dlq(&self, batch: StagedBatch, error: &Error) {
-        let status = if error.is_refused() {
-            self.metrics.record_dropped(batch.record_count as u64);
-            error!(
-                records = batch.record_count,
-                destination = %batch.destination,
-                reason = %error,
-                "Dropped records the store refused for good, with no DLQ to take them"
-            );
-            DeliveryStatus::Dropped
-        } else {
-            trace!(destination = %batch.destination, "DLQ disabled for a batch no file took");
-            DeliveryStatus::Errored
-        };
-        self.release(tokens_of(batch.offsets), status).await;
+        self.metrics
+            .record_dropped(batch.record_count as u64, DropReason::Refused);
+        error!(
+            records = batch.record_count,
+            destination = %batch.destination,
+            reason = %error,
+            "Dropped records refused for good, with no DLQ to take them"
+        );
+        self.release(tokens_of(batch.offsets), DeliveryStatus::Dropped)
+            .await;
     }
 
     /// Dead-letter the records routing refused for nesting past
@@ -1984,8 +2315,7 @@ impl Archiver {
     /// The same bytes are refused on every attempt, so a record is released
     /// `Rejected` once the DLQ confirms it, and `Dropped`, counted, with the
     /// DLQ off or when no DLQ backend can hold it. A DLQ write that fails
-    /// releases them `Errored`, which ends the loop so a restart refuses them
-    /// again.
+    /// withholds them, which ends the loop so a restart refuses them again.
     async fn dead_letter_too_deep(&self, records: Vec<KafkaMessage>) {
         if records.is_empty() {
             return;
@@ -2000,7 +2330,8 @@ impl Archiver {
             .release(records.iter().map(|m| m.payload.len() as u64).sum());
 
         if !self.dlq.is_enabled() {
-            self.metrics.record_dropped(count as u64);
+            self.metrics
+                .record_dropped(count as u64, DropReason::TooDeep);
             error!(
                 records = count,
                 reason = %reason,
@@ -2042,17 +2373,19 @@ impl Archiver {
                 .into_iter()
                 .chain(refused.into_iter().map(|(_, offset)| offset))
                 .collect();
-            self.release(tokens_of(all), DeliveryStatus::Errored).await;
+            self.withhold(tokens_of(all), count as u64, "the DLQ could not take them")
+                .await;
             return;
         }
         if !written.is_empty() {
             self.metrics.record_dlq(written.len() as u64);
-            scalo::logger::security::record_dlq("routing", &reason, None);
+            self.security_dlq_event("routing", &reason, None);
             self.release(tokens_of(written), DeliveryStatus::Rejected)
                 .await;
         }
         if let Some((why, _)) = refused.first() {
-            self.metrics.record_dropped(refused.len() as u64);
+            self.metrics
+                .record_dropped(refused.len() as u64, DropReason::DlqTooLarge);
             error!(
                 records = refused.len(),
                 reason = %why,
@@ -2074,8 +2407,8 @@ impl Archiver {
     /// handed out.
     ///
     /// An entry no DLQ backend can ever hold is dropped, counted and logged. A
-    /// DLQ write that can clear releases every filtered offset `Errored`, which
-    /// ends the loop so a restart routes the block again.
+    /// DLQ write that can clear withholds every filtered offset, which ends the
+    /// loop so a restart routes the block again.
     async fn route_filter_dlq(&self, entries: Vec<FilteredDlqEntry>, filtered: Vec<KafkaOffset>) {
         if entries.is_empty() && filtered.is_empty() {
             return;
@@ -2106,23 +2439,26 @@ impl Archiver {
                     error = %dlq_err,
                     "The DLQ could not take inbound-filter dead letters; a restart routes them again"
                 );
-                DeliveryStatus::Errored
+                let records = filtered.len() as u64;
+                self.withhold(tokens_of(filtered), records, "the DLQ could not take them")
+                    .await;
+                return;
+            }
+            if let Some((reason, ())) = refused.first() {
+                self.metrics
+                    .record_dropped(refused.len() as u64, DropReason::DlqTooLarge);
+                error!(
+                    records = refused.len(),
+                    reason = %reason,
+                    "Dropped inbound-filter dead letters the DLQ can never hold"
+                );
+            }
+            if written > 0 && self.dlq.is_enabled() {
+                self.metrics.record_dlq(written);
+                DeliveryStatus::Rejected
             } else {
-                if let Some((reason, ())) = refused.first() {
-                    self.metrics.record_dropped(refused.len() as u64);
-                    error!(
-                        records = refused.len(),
-                        reason = %reason,
-                        "Dropped inbound-filter dead letters the DLQ can never hold"
-                    );
-                }
-                if written > 0 && self.dlq.is_enabled() {
-                    self.metrics.record_dlq(written);
-                    DeliveryStatus::Rejected
-                } else {
-                    // A disabled DLQ counts what it drops in dlq_dropped_total.
-                    DeliveryStatus::Dropped
-                }
+                // A disabled DLQ counts what it drops in dlq_dropped_total.
+                DeliveryStatus::Dropped
             }
         };
         self.release(tokens_of(filtered), status).await;
@@ -2163,8 +2499,9 @@ impl Archiver {
 mod tests {
     use super::{
         RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader,
-        buffer_config, dead_letter_refused_file, held_record_cap, publish_kafka_lag,
-        record_files_opened, record_rolls, record_routing_fallbacks, restart_required_changes,
+        WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, dead_letter_refused_file,
+        held_record_cap, publish_kafka_lag, record_files_opened, record_rolls,
+        record_routing_fallbacks, restart_required_changes, retry_delay, sampled_reason,
         screen_dead_letters, sink_confirmation, upload_retry_delay, upload_slots,
         upload_until_settled,
     };
@@ -2217,6 +2554,33 @@ mod tests {
         }
         assert!(upload_retry_delay(39) <= UPLOAD_RETRY_MAX);
         assert!(upload_retry_delay(39) >= UPLOAD_RETRY_MAX / 2);
+    }
+
+    /// A held local write retries soon after a failure and never waits longer
+    /// than its ceiling, so it lands within seconds of the disk recovering.
+    #[test]
+    fn local_write_retries_back_off_to_a_short_ceiling() {
+        let first = retry_delay(0, WRITE_RETRY_FIRST, WRITE_RETRY_MAX);
+        assert!(first >= WRITE_RETRY_FIRST / 2 && first <= WRITE_RETRY_FIRST);
+        for attempt in 0..40 {
+            assert!(retry_delay(attempt, WRITE_RETRY_FIRST, WRITE_RETRY_MAX) <= WRITE_RETRY_MAX);
+        }
+        assert!(retry_delay(39, WRITE_RETRY_FIRST, WRITE_RETRY_MAX) >= WRITE_RETRY_MAX / 2);
+    }
+
+    /// A per-record security event is logged the first time and every
+    /// thousandth after, each saying how many there have been.
+    #[test]
+    fn security_events_are_sampled_with_a_running_count() {
+        let counter = AtomicU64::new(0);
+        let logged: Vec<(u64, String)> = (1..=2500)
+            .filter_map(|n| sampled_reason(&counter, 1000, "too deep").map(|reason| (n, reason)))
+            .collect();
+        assert_eq!(
+            logged.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![1, 1000, 2000]
+        );
+        assert_eq!(logged[2].1, "too deep (2000 so far, 1 in 1000 logged)");
     }
 
     /// A completed object-store upload is the store's own answer, while a
@@ -2446,6 +2810,134 @@ mod tests {
         );
     }
 
+    /// An upload whose local copy is gone.
+    struct UnreadableUpload {
+        attempts: Arc<AtomicUsize>,
+        quarantined: Arc<AtomicBool>,
+    }
+
+    impl PendingUpload for UnreadableUpload {
+        fn path(&self) -> &'static str {
+            "events/gone.jsonl"
+        }
+
+        fn size(&self) -> u64 {
+            10
+        }
+
+        fn attempt<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = dfe_archiver_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(Error::unreadable_with(
+                    "opening the staged copy of events/gone.jsonl failed",
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                ))
+            })
+        }
+
+        fn block<'life0, 'async_trait>(
+            &'life0 self,
+            _index: usize,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = dfe_archiver_core::Result<Option<Vec<u8>>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn discard<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {})
+        }
+
+        fn quarantine<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.quarantined.store(true, Ordering::SeqCst);
+                true
+            })
+        }
+    }
+
+    /// A staged copy that cannot be read back is quarantined after one
+    /// attempt, counted, and its records withheld -- never retried for ever.
+    #[tokio::test]
+    async fn an_unreadable_staged_copy_is_quarantined_not_retried() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("archiver"),
+        );
+        let metrics = Arc::new(ArchiverMetrics::register(&manager, "test"));
+        let uploader = Arc::new(Uploader {
+            slots: upload_slots(&Config::default()),
+            sink: Arc::new(SinkCircuit {
+                open: AtomicBool::new(false),
+                scaling: Arc::new(ScalingPressure::new(
+                    ScalingPressureConfig::default(),
+                    crate::scaling_components(),
+                )),
+                metrics: Arc::clone(&metrics),
+            }),
+            metrics,
+            backend: "memory",
+            dlq: Arc::new(Dlq::disabled()),
+            compressor: Arc::from(compressor_for(&CompressionConfig::default()).expect("codec")),
+        });
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let quarantined = Arc::new(AtomicBool::new(false));
+        let file = PendingFile {
+            upload: Box::new(UnreadableUpload {
+                attempts: Arc::clone(&attempts),
+                quarantined: Arc::clone(&quarantined),
+            }),
+            offsets: OffsetSet::default(),
+            records: 7,
+            destination: "events".to_string(),
+        };
+
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            upload_until_settled(file, uploader),
+        )
+        .await
+        .expect("an unreadable copy settles at once");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry");
+        assert!(quarantined.load(Ordering::SeqCst), "the copy is moved aside");
+        assert_eq!(settled.errored_records, 7, "the records are withheld");
+        assert_eq!(settled.delivered_records + settled.dropped_records, 0);
+        assert!(
+            manager
+                .render()
+                .lines()
+                .any(|line| line == r#"archiver_staged_files_quarantined_total{reason="unreadable"} 1"#),
+            "{}",
+            manager.render()
+        );
+    }
+
     /// A default deployment writes under the path the image pre-creates, and
     /// an absolute one, because the container working directory is root-owned.
     #[test]
@@ -2649,7 +3141,7 @@ mod tests {
     /// than records goes to the DLQ whole, as one entry.
     #[tokio::test]
     async fn a_payload_with_its_own_newline_never_reaches_the_dlq_in_pieces() {
-        // A MessagePack map carrying a 0x0a byte, beside a pretty-printed JSON record.
+        // A binary payload carrying a 0x0a byte, beside a pretty-printed JSON record.
         let binary: &[u8] = &[0x81, 0xa2, b'i', b'd', 0x0a];
         let mut second = b"{\"id\":1,\n  \"note\":\"two lines\"}\n".to_vec();
         second.extend_from_slice(binary);

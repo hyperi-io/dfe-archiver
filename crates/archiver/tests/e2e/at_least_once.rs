@@ -75,10 +75,28 @@ fn ids(lines: &[String]) -> Vec<u64> {
     ids
 }
 
-/// The archiver counter `name` as the offline manager renders it, or 0 before
-/// anything recorded it.
+/// The archiver counter `name` as the offline manager renders it, summed over
+/// every label set, or 0 before anything recorded it.
 fn counter(manager: &MetricsManager, name: &str) -> u64 {
-    let prefix = format!("archiver_{name} ");
+    let metric = format!("archiver_{name}");
+    manager
+        .render()
+        .lines()
+        .filter_map(|line| {
+            let (series, value) = line.rsplit_once(' ')?;
+            let series_name = series.split('{').next()?;
+            if series_name == metric {
+                value.trim().parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+/// The records `messages_dropped_total` counts under `reason`.
+fn dropped(manager: &MetricsManager, reason: &str) -> u64 {
+    let prefix = format!(r#"archiver_messages_dropped_total{{reason="{reason}"}} "#);
     manager
         .render()
         .lines()
@@ -187,6 +205,13 @@ fn block_staging(spool: &Path) {
     let staging = spool.join("uploads");
     std::fs::remove_dir_all(&staging).expect("remove staging");
     std::fs::write(&staging, b"").expect("block staging");
+}
+
+/// Undo [`block_staging`], as a disk that recovers does.
+fn unblock_staging(spool: &Path) {
+    let staging = spool.join("uploads");
+    std::fs::remove_file(&staging).expect("unblock staging");
+    std::fs::create_dir(&staging).expect("recreate staging");
 }
 
 /// Two replicas archiving the same destination in the same window each run a
@@ -518,10 +543,10 @@ async fn a_key_the_store_refuses_for_good_is_dropped_and_the_commit_moves_on() {
     );
 }
 
-/// A batch no file took and the DLQ refused, with a refusal that can clear,
-/// ends the loop so the process exits, and nothing commits past the batch.
-/// The restart reads it again, and once the DLQ confirms it holds the batch
-/// the commit moves past it.
+/// A batch the store refused for good and the DLQ refused too, with a refusal
+/// that can clear, ends the loop so the process exits, and nothing commits
+/// past the batch. The restart reads it again, and once the DLQ confirms it
+/// holds the batch the commit moves past it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it() {
     init_logs();
@@ -541,12 +566,13 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
 
     let spool = tempfile::TempDir::new().expect("spool");
     let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    // Past the 1024-byte object key limit, so every file's key is refused for good.
+    config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
     dead_letter_to(&mut config, "refusing-dlq");
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
     let first = archiver(&config, &metrics).await;
-    block_staging(spool.path());
     let running = tokio::spawn({
         let first = Arc::clone(&first);
         async move { first.run().await }
@@ -577,11 +603,9 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
         "a refusal that can clear dropped records"
     );
 
-    // The restart, with a DLQ that takes the batch and staging still failing.
-    std::fs::remove_file(spool.path().join("uploads")).expect("unblock staging");
+    // The restart, with a DLQ that takes the batch and the key still refused.
     dead_letter_to(&mut config, "dlq");
     let second = archiver(&config, &metrics).await;
-    block_staging(spool.path());
     let running = tokio::spawn({
         let second = Arc::clone(&second);
         async move { second.run().await }
@@ -677,16 +701,17 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     );
 }
 
-/// A batch that failed on local disk is never dropped, even when no DLQ
-/// backend can hold its dead letter: the loop ends, nothing commits, and once
-/// the disk recovers the restart archives the record.
+/// A local write that fails in a way that can clear holds its batch and
+/// retries it: nothing is dead-lettered, dropped or committed, the loop keeps
+/// running, and once the disk recovers every record lands once and the commit
+/// follows -- a record too large for any DLQ backend included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_local_failure_no_dlq_can_hold_replays_and_lands_after_the_restart() {
+async fn a_local_write_failure_holds_the_batch_until_the_disk_recovers() {
     init_logs();
-    let Some(kafka) = common::acquire_kafka("local_failure_oversize").await else {
+    let Some(kafka) = common::acquire_kafka("local_failure_holds").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("local_failure_oversize").await else {
+    let Some(minio) = common::acquire_minio("local_failure_holds").await else {
         return;
     };
     minio.create_bucket(BUCKET).await;
@@ -699,58 +724,184 @@ async fn a_local_failure_no_dlq_can_hold_replays_and_lands_after_the_restart() {
     dead_letter_to(&mut config, "dlq");
     let (manager, metrics) = metrics();
 
-    kafka.produce("events", &[oversize_record(0)]).await;
-    let first = archiver(&config, &metrics).await;
+    kafka.produce("events", &records(0..20)).await;
+    kafka.produce("events", &[oversize_record(20)]).await;
+    let archiver = archiver(&config, &metrics).await;
     block_staging(spool.path());
     let running = tokio::spawn({
-        let first = Arc::clone(&first);
-        async move { first.run().await }
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
     });
-    let ended = tokio::time::timeout(Duration::from_secs(45), running)
-        .await
-        .expect("the loop ran on past a batch it could neither write nor dead-letter")
-        .expect("loop task");
-    assert!(
-        matches!(ended, Err(dfe_archiver::Error::Withheld { records }) if records > 0),
-        "the loop must end with the withheld record, for main to exit non-zero: {ended:?}"
-    );
-    first.drain().await;
-    drop(first);
+    wait_until("the held write failed three times", || async {
+        counter(&manager, "archive_errors_total") >= 3
+    })
+    .await;
+    assert!(!running.is_finished(), "a failing local write ended the loop");
     assert_eq!(
         kafka.committed(GROUP, "events"),
         None,
-        "the commit passed a record that failed locally"
+        "the commit passed a batch held for its local write"
     );
     assert_eq!(
-        counter(&manager, "messages_dropped_total"),
+        counter(&manager, "messages_dlq_total"),
         0,
-        "a local failure dropped a record"
+        "a failure that can clear was dead-lettered"
     );
     assert_eq!(kafka.records_in("dlq"), 0, "nothing reached the DLQ topic");
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
 
-    // The restart, with local staging working again.
-    std::fs::remove_file(spool.path().join("uploads")).expect("unblock staging");
-    let second = archiver(&config, &metrics).await;
-    let running = tokio::spawn({
-        let second = Arc::clone(&second);
-        async move { second.run().await }
-    });
-    wait_until("the restart archived the record", || async {
-        counter(&manager, "messages_archived_total") >= 1
+    unblock_staging(spool.path());
+    wait_until("every record landed once the disk recovered", || async {
+        counter(&manager, "messages_archived_total") >= 21
     })
     .await;
-    stop(&second, running).await;
+    stop(&archiver, running).await;
     assert_eq!(
         ids(&minio.lines(BUCKET).await),
-        vec![0],
-        "the restart archives the record, once"
+        (0..21).collect::<Vec<_>>(),
+        "every held record lands, once"
     );
     assert_eq!(
         kafka.committed(GROUP, "events"),
-        Some(1),
-        "the commit follows once the record is archived"
+        Some(21),
+        "the commit follows once the held records are archived"
     );
     assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+    assert_eq!(counter(&manager, "messages_dlq_total"), 0);
+}
+
+/// A `file://` archive under `dir`, fed by the Push listener on a free port,
+/// rolling each file after a second, with no DLQ, as on the direct transport.
+fn direct_to_file(dir: &Path) -> Config {
+    let mut config = Config {
+        transport: TRANSPORT_GRPC.to_string(),
+        ..Config::default()
+    };
+    config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
+    config.archive.destination = format!("file://{}", dir.join("archive").display());
+    config.archive.roll_interval_secs = Some(1);
+    config.compression.enabled = false;
+    config.routing.mode = "topic".to_string();
+    config.buffer.flush_age_secs = 1;
+    config.buffer.spool_dir = dir.join("spool").display().to_string();
+    config.dlq.enabled = false;
+    config
+}
+
+/// Push `ids` to the listener `config` binds, retrying each until it is answered.
+async fn push_all(config: &Config, ids: std::ops::Range<u64>) {
+    let listen = config.grpc.listen.clone().expect("listen address");
+    let sender = GrpcTransport::new(&GrpcConfig {
+        endpoint: Some(format!("http://{listen}")),
+        ..GrpcConfig::default()
+    })
+    .await
+    .expect("sender");
+    for id in ids {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while !matches!(
+            sender.send("traffic", record(id).into()).await,
+            SendResult::Ok
+        ) {
+            assert!(Instant::now() < deadline, "the listener never took a push");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// The ids of every record archived under `dir`'s `file://` archive.
+fn archived_ids(dir: &Path) -> Vec<u64> {
+    let mut lines = Vec::new();
+    let mut stack = vec![dir.join("archive")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read archive dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let text = std::fs::read_to_string(&path).expect("read archive file");
+                lines.extend(text.lines().map(str::to_string));
+            }
+        }
+    }
+    ids(&lines)
+}
+
+/// Make the local archive's directory a file, so creating any archive file
+/// under it fails with an error that clears once [`unblock_archive`] runs.
+fn block_archive(dir: &Path) {
+    std::fs::write(dir.join("archive"), b"").expect("block the archive directory");
+}
+
+fn unblock_archive(dir: &Path) {
+    std::fs::remove_file(dir.join("archive")).expect("unblock the archive directory");
+    std::fs::create_dir(dir.join("archive")).expect("recreate the archive directory");
+}
+
+/// On the direct transport a held write is the only copy of its records, so
+/// a local failure that can clear is retried until it lands: nothing is
+/// dropped, and every record is archived once the disk recovers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_write_failure_on_the_direct_transport_holds_until_the_disk_recovers() {
+    init_logs();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let config = direct_to_file(dir.path());
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    block_archive(dir.path());
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    push_all(&config, 0..5).await;
+    wait_until("the held write failed three times", || async {
+        counter(&manager, "archive_errors_total") >= 3
+    })
+    .await;
+    assert!(!running.is_finished(), "a failing local write ended the loop");
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+
+    unblock_archive(dir.path());
+    wait_until("every record landed once the disk recovered", || async {
+        counter(&manager, "messages_archived_total") >= 5
+    })
+    .await;
+    stop(&archiver, running).await;
+    assert_eq!(archived_ids(dir.path()), (0..5).collect::<Vec<_>>());
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+}
+
+/// On the direct transport a batch still failing when shutdown stops
+/// retrying it cannot be delivered again, so it is counted dropped with the
+/// reason rather than lost without a trace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_still_failing_at_shutdown_on_the_direct_transport_is_counted_dropped() {
+    init_logs();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let config = direct_to_file(dir.path());
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    block_archive(dir.path());
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    push_all(&config, 0..5).await;
+    wait_until("the held write failed three times", || async {
+        counter(&manager, "archive_errors_total") >= 3
+    })
+    .await;
+    assert_eq!(counter(&manager, "messages_dropped_total"), 0);
+
+    stop(&archiver, running).await;
+    assert_eq!(
+        dropped(&manager, "unreplayable"),
+        5,
+        "every record still failing at shutdown is counted:\n{}",
+        manager.render()
+    );
 }
 
 /// A file the store refuses for good at upload is read back and dead-lettered

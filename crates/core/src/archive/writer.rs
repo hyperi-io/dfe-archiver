@@ -21,11 +21,11 @@ const MAX_OPEN_RETRIES: u32 = 10_000;
 
 /// A file-name component unique to one writer.
 ///
-/// The object-store `create` checks that no object exists, but an upload in
-/// progress is not an object, so two writers on the same destination and
-/// window -- two replicas, or an evicted writer still closing beside its
-/// replacement -- would otherwise pick the same key, and the later completion
-/// would replace the earlier object.
+/// An object-store `create` stages the file locally and never asks the store
+/// whether the key is taken, so two writers on the same destination and window
+/// -- two replicas, or an evicted writer still closing beside its replacement
+/// -- would otherwise pick the same key, and the later upload would replace
+/// the earlier object.
 fn writer_token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -74,9 +74,15 @@ pub struct Settled {
     pub rejected: OffsetSet,
     /// Records `rejected` covers, counted whether or not offsets are held.
     pub rejected_records: u64,
+    /// Records of a refused file dropped because no DLQ backend can hold
+    /// their dead letter. Their offsets travel with `rejected` or `dropped`.
+    pub too_large_records: u64,
     /// Records in files whose write or completion failed on local disk: not
     /// written anywhere, so they must be read again.
     pub errored: OffsetSet,
+    /// Records `errored` covers, counted whether or not offsets are held, so a
+    /// source that cannot deliver them again still counts them.
+    pub errored_records: u64,
     /// Files complete on local disk and still to reach the store.
     pub uploads: Vec<PendingFile>,
 }
@@ -103,6 +109,17 @@ impl Settled {
         }
     }
 
+    /// The records of a file that will never be durable and must be read
+    /// again.
+    #[must_use]
+    pub fn errored(offsets: OffsetSet, records: u64) -> Self {
+        Self {
+            errored: offsets,
+            errored_records: records,
+            ..Self::default()
+        }
+    }
+
     /// Move everything `other` settled into this one.
     pub fn absorb(&mut self, mut other: Self) {
         self.delivered.append(&mut other.delivered);
@@ -114,7 +131,9 @@ impl Settled {
         }
         self.rejected.append(&mut other.rejected);
         self.rejected_records += other.rejected_records;
+        self.too_large_records += other.too_large_records;
         self.errored.append(&mut other.errored);
+        self.errored_records += other.errored_records;
         self.uploads.append(&mut other.uploads);
     }
 
@@ -127,6 +146,8 @@ impl Settled {
             && self.dropped.is_empty()
             && self.rejected_records == 0
             && self.rejected.is_empty()
+            && self.too_large_records == 0
+            && self.errored_records == 0
             && self.errored.is_empty()
             && self.uploads.is_empty()
     }
@@ -301,6 +322,7 @@ impl ArchiveWriter {
             self.held_records += records;
         } else {
             self.settled.errored.extend(offsets);
+            self.settled.errored_records += records;
         }
     }
 
@@ -345,7 +367,25 @@ impl ArchiveWriter {
             self.settled.dropped_reason = Some(error.to_string());
         } else {
             self.settled.errored.append(&mut offsets);
+            self.settled.errored_records += records;
         }
+    }
+
+    /// Undo an append that failed: cut the open file back to its last whole
+    /// block and keep it, and the records it holds, so the caller can write the
+    /// same data again. A file that cannot be cut back is given up.
+    async fn roll_back(&mut self, error: &Error, uncompressed: u64) {
+        if let Some(ref state) = self.state {
+            let whole = state.compressed_bytes.load(Ordering::Relaxed);
+            if self.storage.truncate(&state.path, whole).await.is_ok() {
+                state
+                    .uncompressed_bytes
+                    .fetch_sub(uncompressed, Ordering::Relaxed);
+                debug!(path = %state.path, bytes = whole, error = %error, "Cut a file back after a failed append");
+                return;
+            }
+        }
+        self.abandon(error).await;
     }
 
     /// Give up the open file after a write into it failed, so the next write
@@ -443,7 +483,7 @@ impl ArchiveWriter {
             None => Ok(()),
         };
         if let Err(e) = appended {
-            self.abandon(&e).await;
+            self.roll_back(&e, uncompressed_len).await;
             return Err(e);
         }
         if let Some(ref state) = self.state {
@@ -1159,8 +1199,8 @@ mod tests {
         assert_eq!(backend.file_count(), 1);
     }
 
-    /// An upload in progress is invisible to the existence check, so two
-    /// writers on one destination and window must still pick different keys.
+    /// An object-store create never asks the store whether a key is taken, so
+    /// two writers on one destination and window must pick different keys.
     #[test]
     fn two_writers_on_one_stem_and_sequence_pick_different_keys() {
         let backend = Arc::new(MemoryBackend::new());
@@ -1417,6 +1457,89 @@ mod tests {
         writer.write(b"third\n").await.expect("write");
         let next = writer.test_current_path().expect("a new file").to_string();
         assert_ne!(first, next);
+    }
+
+    /// Tears the second append half way, as a disk that fills mid-write does,
+    /// and cuts a file back on request.
+    struct TornAppend {
+        inner: Arc<MemoryBackend>,
+        appends: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl StorageBackend for Arc<TornAppend> {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.inner.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            if self.appends.fetch_add(1, Ordering::Relaxed) == 1 {
+                self.inner.append(path, &data[..data.len() / 2]).await?;
+                return Err(crate::Error::Io(std::io::Error::from(
+                    std::io::ErrorKind::StorageFull,
+                )));
+            }
+            self.inner.append(path, data).await
+        }
+        async fn truncate(&self, path: &str, len: u64) -> Result<()> {
+            let mut files = self.inner.files.lock().expect("lock");
+            let file = files.get_mut(path).expect("file exists");
+            file.truncate(usize::try_from(len).expect("len"));
+            Ok(())
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            self.inner.close(path).await
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.inner.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.inner.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.inner.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "torn-append"
+        }
+    }
+
+    /// An append that fails part way is cut back off the file, which keeps its
+    /// earlier records held, so writing the same data again leaves one copy.
+    #[tokio::test]
+    async fn a_failed_append_is_cut_back_and_the_file_kept() {
+        let backend = Arc::new(TornAppend {
+            inner: Arc::new(MemoryBackend::new()),
+            appends: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut writer = writer_on(Box::new(Arc::clone(&backend)));
+
+        writer.write(b"first\n").await.expect("write");
+        writer.flush().await.expect("first append lands");
+        writer.hold(offsets(0, 0..1), 1);
+        let path = writer.test_current_path().expect("open file").to_string();
+
+        writer.write(b"second\n").await.expect("buffered");
+        writer.flush().await.expect_err("second append tears");
+        assert_eq!(
+            writer.test_current_path(),
+            Some(path.as_str()),
+            "the file is kept"
+        );
+        assert!(
+            writer.take_settled().is_empty(),
+            "nothing is errored or released"
+        );
+
+        writer.write(b"second\n").await.expect("write again");
+        writer.flush().await.expect("the retry lands");
+        writer.hold(offsets(0, 1..2), 1);
+        writer.close().await.expect("close");
+
+        let content = backend.inner.files.lock().expect("lock")[&path].clone();
+        assert_eq!(content, b"first\nsecond\n", "one whole copy of each block");
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1]);
+        assert!(settled.errored.is_empty());
     }
 
     /// A roll completes the old file, so its offsets settle then and the new

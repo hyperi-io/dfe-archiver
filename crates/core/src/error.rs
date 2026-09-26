@@ -51,6 +51,15 @@ pub enum Error {
         source: Option<BoxSource>,
     },
 
+    /// A staged file's local copy cannot be read back -- gone, not readable,
+    /// or shorter than what was written -- which no retry of its upload changes.
+    #[error("staged copy unreadable: {message}")]
+    Unreadable {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
+
     /// Already exists (file create was overwriting)
     #[error("already exists: {path}")]
     AlreadyExists { path: String },
@@ -145,10 +154,32 @@ impl Error {
         }
     }
 
+    /// Construct an unreadable-copy error wrapping the underlying error chain.
+    pub fn unreadable_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Unreadable {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
     /// Whether the store refused the object for good.
     #[must_use]
     pub fn is_refused(&self) -> bool {
         matches!(self, Self::Refused { .. })
+    }
+
+    /// Whether a staged file's local copy cannot be read back.
+    #[must_use]
+    pub fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unreadable { .. })
+    }
+
+    /// Whether a write failed for a reason no retry of the same records
+    /// changes: the store refused their object, or the writer could not encode
+    /// them. Every other failure, a full or failing disk included, can clear.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Refused { .. } | Self::Compression(_))
     }
 }
 
@@ -181,7 +212,8 @@ impl Error {
             | Self::Routing(_)
             | Self::TooDeep { .. }
             | Self::Compression(_)
-            | Self::Refused { .. } => ErrorCategory::Data,
+            | Self::Refused { .. }
+            | Self::Unreadable { .. } => ErrorCategory::Data,
 
             // Fatal - fail
             Self::Config(_) | Self::Shutdown => ErrorCategory::Fatal,
@@ -285,6 +317,19 @@ mod tests {
         );
         assert!(Error::refused("key too long").is_refused());
         assert!(!Error::storage("503").is_refused());
+
+        assert!(Error::refused("key too long").is_permanent());
+        assert!(Error::Compression("cannot encode".into()).is_permanent());
+        for can_clear in [
+            Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+            Error::Io(std::io::Error::from_raw_os_error(5)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::NotADirectory)),
+            Error::storage("staging failed"),
+        ] {
+            assert!(!can_clear.is_permanent(), "{can_clear}");
+        }
 
         assert_eq!(
             Error::Config("missing".into()).category(),

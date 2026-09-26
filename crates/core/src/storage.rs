@@ -29,6 +29,26 @@ pub trait PendingUpload: Send + Sync {
 
     /// Give the file up and remove the local copy.
     async fn discard(&self);
+
+    /// Give the file up and move the local copy aside for an operator,
+    /// instead of removing it. `true` when there was a copy to move.
+    async fn quarantine(&self) -> bool {
+        self.discard().await;
+        false
+    }
+}
+
+/// A complete staged file a previous process left, found at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredFile {
+    /// Where the local copy is.
+    pub local: std::path::PathBuf,
+    /// The file's path under the destination.
+    pub path: String,
+    /// The local copy's size in bytes.
+    pub size: u64,
+    /// The length of each block appended, in order.
+    pub blocks: Vec<u64>,
 }
 
 /// Where a closed file stands.
@@ -65,6 +85,18 @@ pub trait StorageBackend: Send + Sync {
     /// Append data to existing file/object
     async fn append(&self, path: &str, data: &[u8]) -> Result<()>;
 
+    /// Cut an open file back to its first `len` bytes, undoing an append that
+    /// failed part way, so the file ends on its last whole block again.
+    ///
+    /// # Errors
+    /// The default cannot cut a file back, and the writer then gives it up.
+    async fn truncate(&self, path: &str, _len: u64) -> Result<()> {
+        Err(crate::Error::storage(format!(
+            "{}: {path} cannot be cut back",
+            self.name()
+        )))
+    }
+
     /// Complete the file: [`Closed::Durable`] once it survives a crash of the
     /// process or the node, [`Closed::Pending`] when it still has to reach
     /// the store. A record's offset is released only once its file is durable
@@ -73,6 +105,18 @@ pub trait StorageBackend: Send + Sync {
 
     /// Give up a file whose write failed, removing what it left behind.
     async fn abort(&self, _path: &str) {}
+
+    /// Take over a complete staged file a previous process left, to upload it.
+    ///
+    /// # Errors
+    /// Hands the file back when this backend stages nothing, or the file's
+    /// path is not one it would write.
+    fn adopt(
+        &self,
+        file: RecoveredFile,
+    ) -> std::result::Result<Box<dyn PendingUpload>, RecoveredFile> {
+        Err(file)
+    }
 
     /// Check if path exists
     async fn exists(&self, path: &str) -> Result<bool>;

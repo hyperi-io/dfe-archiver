@@ -42,6 +42,9 @@ futures = { workspace = true }
 compact_str = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = { workspace = true }
+# The manifest a completed staged file carries, so a restart can upload it.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
