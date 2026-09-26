@@ -571,7 +571,7 @@
       "type": "object",
       "properties": {
         "flush_bytes": {
-          "description": "Flush a destination's in-memory buffer into its archive file once it\nholds this many bytes. Each of up to 64 destinations holds up to this\nmuch, plus one record, in memory.",
+          "description": "Flush a destination's in-memory buffer into its archive file once it\nholds this many bytes, plus one record. A ceiling per destination: up\nto 64 destinations buffer at once, and all of them together hold no\nmore than a quarter of the memory limit, past which the largest\nbuffers flush first.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,

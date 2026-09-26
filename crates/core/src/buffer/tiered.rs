@@ -44,6 +44,11 @@ pub struct TieredBufferConfig {
     /// size (default 100,000).
     pub hot_buffer_records: usize,
 
+    /// Bytes every destination's hot buffer may hold together. Past it the
+    /// largest buffers flush first, so `hot_buffer_size` is a ceiling per
+    /// destination rather than a figure multiplied by the destination count.
+    pub max_hot_bytes: usize,
+
     /// Flush age for hot buffers (seconds)
     pub hot_buffer_age_secs: u64,
 
@@ -66,6 +71,7 @@ impl Default for TieredBufferConfig {
             max_hot_buffers: 64,
             hot_buffer_size: 1024 * 1024,
             hot_buffer_records: 100_000,
+            max_hot_bytes: usize::MAX,
             hot_buffer_age_secs: 30,
             spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
             max_spool_bytes: 10 * 1024 * 1024 * 1024,
@@ -331,22 +337,26 @@ impl TieredBufferManager {
 
         if let Some(evict_key) = evict_key
             && let Some((_, mut buffer)) = self.hot_buffers.remove(&evict_key)
-            && !buffer.is_empty()
         {
-            debug!(
-                evicted_dest = %evict_key,
-                records = buffer.record_count,
-                bytes = buffer.size(),
-                "LRU eviction triggered"
-            );
             self.stats
-                .current_hot_bytes
-                .fetch_sub(buffer.size(), Ordering::Relaxed);
-            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
-            batches_to_write.push(buffer.drain(evict_key));
-            self.stats
-                .hot_buffer_evictions
-                .fetch_add(1, Ordering::Relaxed);
+                .current_hot_buffers
+                .fetch_sub(1, Ordering::Relaxed);
+            if !buffer.is_empty() {
+                debug!(
+                    evicted_dest = %evict_key,
+                    records = buffer.record_count,
+                    bytes = buffer.size(),
+                    "LRU eviction triggered"
+                );
+                self.stats
+                    .current_hot_bytes
+                    .fetch_sub(buffer.size(), Ordering::Relaxed);
+                self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+                batches_to_write.push(buffer.drain(evict_key));
+                self.stats
+                    .hot_buffer_evictions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         let mut entry = self.hot_buffers.entry(key.clone()).or_insert_with(|| {
@@ -397,8 +407,42 @@ impl TieredBufferManager {
             self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
             batches_to_write.push(batch);
         }
+        // The cap walks every buffer, so this destination's entry is released first.
+        drop(entry);
+        self.flush_largest_past_cap(&mut batches_to_write);
 
         Ok(batches_to_write)
+    }
+
+    /// Flush the largest hot buffers until those left hold no more than
+    /// `max_hot_bytes` together.
+    fn flush_largest_past_cap(&self, batches: &mut Vec<StagedBatch>) {
+        while self.stats.current_hot_bytes.load(Ordering::Relaxed) > self.config.max_hot_bytes {
+            let largest = self
+                .hot_buffers
+                .iter()
+                .filter(|entry| !entry.is_empty())
+                .max_by_key(|entry| entry.size())
+                .map(|entry| entry.key().clone());
+            let Some(key) = largest else {
+                break;
+            };
+            let Some(mut entry) = self.hot_buffers.get_mut(&key) else {
+                break;
+            };
+            let bytes = entry.size();
+            debug!(
+                destination = %key,
+                bytes,
+                cap = self.config.max_hot_bytes,
+                "Hot buffers reached their memory cap; flushing the largest"
+            );
+            batches.push(entry.drain(key));
+            self.stats
+                .current_hot_bytes
+                .fetch_sub(bytes, Ordering::Relaxed);
+            self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Flush all hot buffers (for shutdown or time-based flush)
@@ -417,6 +461,9 @@ impl TieredBufferManager {
                     bytes = entry.size(),
                     "Flushing hot buffer"
                 );
+                self.stats
+                    .current_hot_bytes
+                    .fetch_sub(entry.size(), Ordering::Relaxed);
                 self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
                 batches.push(entry.drain(key.clone()));
             }
@@ -440,6 +487,9 @@ impl TieredBufferManager {
                     bytes = entry.size(),
                     "Flushing aged hot buffer"
                 );
+                self.stats
+                    .current_hot_bytes
+                    .fetch_sub(entry.size(), Ordering::Relaxed);
                 self.stats.staging_writes.fetch_add(1, Ordering::Relaxed);
                 batches.push(entry.drain(key));
             }
@@ -466,6 +516,13 @@ impl TieredBufferManager {
     /// Get disk protection config for visibility
     pub fn disk_protection_config(&self) -> (u64, u64) {
         (self.config.max_spool_bytes, self.config.min_free_disk_bytes)
+    }
+
+    /// Bytes the hot buffers hold, summed buffer by buffer rather than read
+    /// from the running total.
+    #[cfg(test)]
+    fn held_bytes(&self) -> usize {
+        self.hot_buffers.iter().map(|entry| entry.size()).sum()
     }
 }
 
@@ -668,6 +725,112 @@ mod tests {
         let batches = manager.flush_all();
         assert_eq!(batches[0].data, b"\ndata\n");
         assert_eq!(batches[0].record_count, 2);
+    }
+
+    /// Many destinations at a large per-destination flush size hold no more
+    /// than the cap together, and every record pushed comes back once.
+    #[test]
+    fn hot_buffers_together_stay_under_the_cap_and_lose_nothing() {
+        const RECORD: usize = 1024;
+        const CAP: usize = 256 * 1024;
+        const RECORDS: i64 = 20_000;
+        let (_spool, mut config) = spooled(64, 1024 * 1024 * 1024);
+        config.max_hot_bytes = CAP;
+        let manager = TieredBufferManager::new(config).expect("create");
+
+        let mut batches = Vec::new();
+        let mut most_held = 0;
+        for offset in 0..RECORDS {
+            let destination = format!("dest-{}", offset % 64);
+            let payload = vec![b'x'; RECORD - 1];
+            batches.extend(
+                manager
+                    .push(&destination, make_message(&payload, "t", offset))
+                    .expect("push"),
+            );
+            let held = manager.held_bytes();
+            most_held = most_held.max(held);
+            assert!(held <= CAP, "{held} bytes held after offset {offset}");
+        }
+        assert!(most_held > CAP / 2, "the cap was reached: {most_held}");
+        batches.extend(manager.flush_all());
+
+        let mut offsets: Vec<i64> = batches
+            .iter()
+            .flat_map(|batch| batch.offsets.iter().map(KafkaOffset::offset))
+            .collect();
+        offsets.sort_unstable();
+        assert_eq!(
+            offsets,
+            (0..RECORDS).collect::<Vec<_>>(),
+            "each record once"
+        );
+        let bytes: usize = batches.iter().map(|batch| batch.data.len()).sum();
+        assert_eq!(bytes, 20_000 * RECORD);
+        assert_eq!(manager.held_bytes(), 0);
+        assert_eq!(
+            manager.stats().current_hot_bytes,
+            0,
+            "the total follows every flush"
+        );
+    }
+
+    /// At the cap the largest buffer flushes, and a smaller one keeps filling.
+    #[test]
+    fn the_largest_buffer_flushes_first_at_the_cap() {
+        let (_spool, mut config) = spooled(10, 1024 * 1024);
+        // Four records of ten bytes pass it.
+        config.max_hot_bytes = 39;
+        let manager = TieredBufferManager::new(config).expect("create");
+
+        for offset in 0..3 {
+            let flushed = manager
+                .push("large", make_message(b"123456789", "t", offset))
+                .expect("push");
+            assert!(flushed.is_empty());
+        }
+        let flushed = manager
+            .push("small", make_message(b"123456789", "t", 3))
+            .expect("push past the cap");
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].destination.as_str(), "large");
+        assert_eq!(flushed[0].record_count, 3);
+        assert_eq!(
+            manager.held_bytes(),
+            10,
+            "the small buffer keeps its record"
+        );
+    }
+
+    /// Flushing by age counts the flushed bytes off the running total, so the
+    /// cap and the buffer gauges read what the buffers hold.
+    #[test]
+    fn an_aged_flush_counts_its_bytes_off_the_total() {
+        let (_spool, mut config) = spooled(10, 1024 * 1024);
+        config.hot_buffer_age_secs = 0;
+        let manager = TieredBufferManager::new(config).expect("create");
+        manager
+            .push("dest", make_message(b"aged", "t", 0))
+            .expect("push");
+
+        let aged = manager.flush_aged();
+        assert!(!aged.is_empty() || manager.held_bytes() == 0);
+        assert_eq!(manager.stats().current_hot_bytes, manager.held_bytes());
+    }
+
+    /// No more than `max_hot_buffers` destinations buffer at once, and the
+    /// buffer count follows the evictions.
+    #[test]
+    fn no_more_than_max_hot_buffers_destinations_buffer_at_once() {
+        let (_spool, config) = spooled(64, 1024 * 1024);
+        let manager = TieredBufferManager::new(config).expect("create");
+        for offset in 0..100 {
+            manager
+                .push(&format!("dest-{offset}"), make_message(b"x", "t", offset))
+                .expect("push");
+        }
+        assert_eq!(manager.hot_buffers.len(), 64);
+        assert_eq!(manager.stats().current_hot_buffers, 64);
     }
 
     /// Each record comes back whole, one per offset, even when its payload

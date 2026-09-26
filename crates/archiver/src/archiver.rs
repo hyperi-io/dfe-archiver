@@ -90,6 +90,10 @@ const DRAIN_WRITE_RETRY_LIMIT: Duration = Duration::from_secs(10);
 /// The share of the memory limit held offsets may take before intake pauses.
 const HELD_RECORDS_MEMORY_SHARE: u64 = 4;
 
+/// The share of the memory limit every destination's hot buffer may take
+/// together before the largest flush.
+const HOT_BUFFER_MEMORY_SHARE: u64 = 4;
+
 /// How often the held-record count is taken for the inbound brake.
 const HELD_REFRESH: Duration = Duration::from_millis(250);
 
@@ -811,6 +815,17 @@ fn spawn_dlq(config: &Config) -> Result<Dlq> {
     Ok(dlq)
 }
 
+/// The tiered buffer on `config`, capped by `memory_limit_bytes`.
+fn hot_buffers(config: &Config, memory_limit_bytes: u64) -> Result<TieredBufferManager> {
+    let buffer_config = buffer_config(config, memory_limit_bytes);
+    info!(
+        flush_bytes = buffer_config.hot_buffer_size,
+        hot_bytes_cap = buffer_config.max_hot_bytes,
+        "Hot buffers flush per destination at flush_bytes, and the largest first once all of them together reach the cap"
+    );
+    TieredBufferManager::new(buffer_config)
+}
+
 /// Settle and report what a previous process left in staging: removed when
 /// the source delivers those records again, quarantined when never completed
 /// or unreadable, and returned to upload when complete.
@@ -917,11 +932,20 @@ fn upload_slots(config: &Config) -> Arc<Semaphore> {
 }
 
 /// Map the operator's `buffer` section onto the tiered buffer's own config.
-fn buffer_config(config: &Config) -> dfe_archiver_core::buffer::TieredBufferConfig {
+///
+/// `memory_limit_bytes` is the memory guard's limit. Every destination's
+/// buffer together may take a quarter of it, so `buffer.flush_bytes` is a
+/// ceiling per destination, never multiplied by the destination count.
+fn buffer_config(
+    config: &Config,
+    memory_limit_bytes: u64,
+) -> dfe_archiver_core::buffer::TieredBufferConfig {
+    let hot_bytes_cap = (memory_limit_bytes / HOT_BUFFER_MEMORY_SHARE).max(1);
     dfe_archiver_core::buffer::TieredBufferConfig {
         max_hot_buffers: 64,
         hot_buffer_size: config.buffer.flush_bytes,
         hot_buffer_records: config.buffer.flush_records,
+        max_hot_bytes: usize::try_from(hot_bytes_cap).unwrap_or(usize::MAX),
         hot_buffer_age_secs: config.buffer.flush_age_secs,
         spool_dir: config.buffer.spool_dir.clone().into(),
         max_spool_bytes: 10 * 1024 * 1024 * 1024, // 10GB
@@ -972,7 +996,7 @@ impl Archiver {
 
         let router = Router::new(config.routing.clone());
 
-        let buffer = TieredBufferManager::new(buffer_config(&config))?;
+        let buffer = hot_buffers(&config, memory_guard.limit_bytes())?;
         let slots = upload_slots(&config);
 
         // The runtime's unified ScalingPressure, so the archiver's loops drive
@@ -2630,8 +2654,31 @@ mod tests {
         config.buffer.spool_dir = "/srv/dfe/spool".to_string();
 
         assert_eq!(
-            buffer_config(&config).spool_dir,
+            buffer_config(&config, GIB).spool_dir,
             Path::new("/srv/dfe/spool"),
+        );
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// Every destination's buffer together takes a quarter of the memory
+    /// limit, whatever flush size each is allowed, so a 128 MiB flush on a
+    /// 1 GiB pod cannot multiply past it.
+    #[test]
+    fn hot_buffers_together_take_a_quarter_of_the_memory_limit() {
+        let mut config = Config::default();
+        config.buffer.flush_bytes = 128 * 1024 * 1024;
+        let buffer = buffer_config(&config, GIB);
+        assert_eq!(buffer.hot_buffer_size, 128 * 1024 * 1024);
+        assert_eq!(buffer.max_hot_bytes, 256 * 1024 * 1024);
+        assert!(
+            buffer.max_hot_bytes < buffer.max_hot_buffers * buffer.hot_buffer_size,
+            "the cap binds where the per-destination flush alone would not"
+        );
+        assert_eq!(
+            buffer_config(&config, 0).max_hot_bytes,
+            1,
+            "a zero limit still caps"
         );
     }
 
@@ -2681,8 +2728,9 @@ mod tests {
         let mut config = Config::default();
         config.buffer.spool_dir = spool.path().display().to_string();
         configure(&mut config);
-        let buffer = dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config))
-            .expect("buffer");
+        let buffer =
+            dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config, GIB))
+                .expect("buffer");
         for offset in 0.. {
             let message = KafkaMessage::for_test(vec![b'x'; RECORD - 1], "events", 0, offset);
             if let Some(batch) = buffer.push("dest", message).expect("push").pop() {
@@ -2917,22 +2965,24 @@ mod tests {
             destination: "events".to_string(),
         };
 
-        let settled = tokio::time::timeout(
-            Duration::from_secs(5),
-            upload_until_settled(file, uploader),
-        )
-        .await
-        .expect("an unreadable copy settles at once");
+        let settled =
+            tokio::time::timeout(Duration::from_secs(5), upload_until_settled(file, uploader))
+                .await
+                .expect("an unreadable copy settles at once");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry");
-        assert!(quarantined.load(Ordering::SeqCst), "the copy is moved aside");
+        assert!(
+            quarantined.load(Ordering::SeqCst),
+            "the copy is moved aside"
+        );
         assert_eq!(settled.errored_records, 7, "the records are withheld");
         assert_eq!(settled.delivered_records + settled.dropped_records, 0);
         assert!(
             manager
                 .render()
                 .lines()
-                .any(|line| line == r#"archiver_staged_files_quarantined_total{reason="unreadable"} 1"#),
+                .any(|line| line
+                    == r#"archiver_staged_files_quarantined_total{reason="unreadable"} 1"#),
             "{}",
             manager.render()
         );
@@ -2946,7 +2996,7 @@ mod tests {
 
         assert_eq!(config.buffer.spool_dir, DEFAULT_SPOOL_DIR);
         assert_eq!(
-            buffer_config(&config).spool_dir,
+            buffer_config(&config, GIB).spool_dir,
             Path::new("/var/spool/dfe/archiver"),
         );
     }

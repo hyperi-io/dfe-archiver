@@ -459,8 +459,10 @@ pub struct MinioConfig {
 #[serde(default)]
 pub struct BufferConfig {
     /// Flush a destination's in-memory buffer into its archive file once it
-    /// holds this many bytes. Each of up to 64 destinations holds up to this
-    /// much, plus one record, in memory.
+    /// holds this many bytes, plus one record. A ceiling per destination: up
+    /// to 64 destinations buffer at once, and all of them together hold no
+    /// more than a quarter of the memory limit, past which the largest
+    /// buffers flush first.
     pub flush_bytes: usize,
 
     /// Flush when buffer exceeds this age (seconds)
