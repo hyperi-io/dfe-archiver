@@ -862,15 +862,35 @@ impl StagedUpload {
         uploaded
     }
 
-    /// Read the local copy into `upload` one `chunk_size` part at a time, at
-    /// most [`UPLOAD_PART_CONCURRENCY`] in flight, which bounds its memory.
+    /// The outcome of one part's upload task.
+    fn part_outcome(
+        &self,
+        joined: std::result::Result<object_store::Result<()>, tokio::task::JoinError>,
+    ) -> Result<()> {
+        match joined {
+            Ok(uploaded) => {
+                uploaded.map_err(|e| store_error(self.backend_name, "part upload", &self.path, e))
+            }
+            Err(e) => Err(Error::storage_with(
+                format!(
+                    "{}: a part upload of {} did not finish",
+                    self.backend_name, self.path
+                ),
+                e,
+            )),
+        }
+    }
+
+    /// Read the local copy into `upload` one `chunk_size` part at a time, each
+    /// uploading in its own task while the next is read, at most
+    /// [`UPLOAD_PART_CONCURRENCY`] in flight, which bounds its memory.
     async fn stream_parts(
         &self,
         mut file: tokio::fs::File,
         upload: &mut dyn MultipartUpload,
     ) -> Result<()> {
-        let part_error = |e| store_error(self.backend_name, "part upload", &self.path, e);
-        let mut in_flight = futures::stream::FuturesUnordered::new();
+        // Dropped on an early return, which aborts every part still uploading.
+        let mut in_flight = tokio::task::JoinSet::new();
         let mut read_total: u64 = 0;
         loop {
             let mut part = vec![0u8; self.chunk_size];
@@ -882,18 +902,18 @@ impl StagedUpload {
             }
             read_total += filled as u64;
             part.truncate(filled);
-            in_flight.push(upload.put_part(PutPayload::from(part)));
+            in_flight.spawn(upload.put_part(PutPayload::from(part)));
             if in_flight.len() >= UPLOAD_PART_CONCURRENCY
-                && let Some(done) = in_flight.next().await
+                && let Some(joined) = in_flight.join_next().await
             {
-                done.map_err(part_error)?;
+                self.part_outcome(joined)?;
             }
             if filled < self.chunk_size {
                 break;
             }
         }
-        while let Some(done) = in_flight.next().await {
-            done.map_err(part_error)?;
+        while let Some(joined) = in_flight.join_next().await {
+            self.part_outcome(joined)?;
         }
         if read_total != self.size {
             // A short copy would reach the store as if it were whole.
@@ -959,7 +979,12 @@ impl PendingUpload for StagedUpload {
         if !self.release_bytes() {
             return false;
         }
-        self.staging.quarantine(&self.local) == Quarantined::Moved
+        let staging = self.staging.clone();
+        let local = self.local.clone();
+        // Blocking filesystem calls, so off the runtime's worker threads.
+        tokio::task::spawn_blocking(move || staging.quarantine(&local))
+            .await
+            .is_ok_and(|placed| placed == Quarantined::Moved)
     }
 }
 

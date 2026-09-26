@@ -313,6 +313,11 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
     drop(first);
 
     let second = archiver(&config, &metrics).await;
+    assert_eq!(
+        counter(&manager, "staged_files_removed_total"),
+        1,
+        "the killed archiver's open file is removed, since Kafka delivers its records again"
+    );
     let running = tokio::spawn({
         let second = Arc::clone(&second);
         async move { second.run().await }
@@ -1129,6 +1134,88 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
         ids(&minio.lines(BUCKET).await),
         vec![0, 2],
         "only the pushes the listener answered are archived"
+    );
+}
+
+/// On the direct transport nothing delivers a stopped process's records
+/// again, so the next process uploads the complete file it left and
+/// quarantines the one it never completed, rather than deleting either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_process_s_complete_file_is_uploaded_on_the_direct_transport() {
+    init_logs();
+    let Some(minio) = common::acquire_minio("staged_recovery").await else {
+        return;
+    };
+    minio.create_bucket(BUCKET).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = archive_to(&minio, spool.path());
+    config.transport = TRANSPORT_GRPC.to_string();
+    config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
+    let (manager, metrics) = metrics();
+
+    // A process that stops after closing one file and before uploading it,
+    // with a second file still open.
+    {
+        let staging =
+            dfe_archiver::io::Staging::open(spool.path().join("uploads")).expect("staging");
+        let backend = create_backend(&config.archive, &staging).expect("backend");
+        backend
+            .create("events/2026/left-0001.jsonl")
+            .await
+            .expect("create");
+        backend
+            .append("events/2026/left-0001.jsonl", b"{\"id\":0}\n{\"id\":1}\n")
+            .await
+            .expect("append");
+        let closed = backend
+            .close("events/2026/left-0001.jsonl")
+            .await
+            .expect("close");
+        drop(closed);
+        backend
+            .create("events/2026/open-0001.jsonl")
+            .await
+            .expect("create");
+        backend
+            .append("events/2026/open-0001.jsonl", b"{\"id\":2}\n")
+            .await
+            .expect("append");
+    }
+
+    let archiver = archiver(&config, &metrics).await;
+    wait_until(
+        "the complete file a stopped process left is uploaded",
+        || async { !minio.keys(BUCKET).await.is_empty() },
+    )
+    .await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        minio.keys(BUCKET).await,
+        vec!["archive/events/2026/left-0001.jsonl".to_string()]
+    );
+    assert_eq!(ids(&minio.lines(BUCKET).await), vec![0, 1]);
+    assert_eq!(counter(&manager, "staged_files_recovered_total"), 1);
+    assert!(
+        manager
+            .render()
+            .lines()
+            .any(|line| line
+                == r#"archiver_staged_files_quarantined_total{reason="incomplete"} 1"#),
+        "{}",
+        manager.render()
+    );
+    let quarantined = std::fs::read_dir(spool.path().join("uploads").join("quarantine"))
+        .expect("quarantine dir")
+        .count();
+    assert_eq!(
+        quarantined, 1,
+        "the file never completed is kept for an operator"
     );
 }
 
