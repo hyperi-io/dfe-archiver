@@ -1,18 +1,19 @@
 // Project:   dfe-archiver
 // File:      crates/archiver/tests/e2e/at_least_once.rs
-// Purpose:   At-least-once delivery against a real MinIO and Kafka
+// Purpose:   At-least-once delivery against a real S3-compatible store and Kafka
 // Language:  Rust
 //
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-//! At-least-once delivery, proved against a real `MinIO` and a real Kafka.
+//! At-least-once delivery, proved against a real S3-compatible store
+//! (`LocalStack`, through the `minio://` destination) and a real Kafka.
 //!
 //! Every test starts the containers it needs, mapped to host ports below 10240,
 //! and removes them when it ends. Not `#[ignore]`d, as with the other
 //! object-store e2e tests: the default run needs a Docker daemon.
 
-use crate::common::{self, KafkaFixture, MinioFixture};
+use crate::common::{self, KafkaFixture, S3StoreFixture};
 use dfe_archiver::Archiver;
 use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
 use dfe_archiver::compression::create_compressor;
@@ -34,6 +35,10 @@ const GROUP: &str = "archivers";
 
 /// The bucket every test archives into.
 const BUCKET: &str = "archive";
+
+/// A path segment the refusing proxy answers every upload under with the
+/// store's refusal of the object.
+const REFUSED_SEGMENT: &str = "refused-at-upload";
 
 /// A record carrying `id`, padded with `pad` pseudo-random characters so a
 /// producer's compression cannot shrink it back under a ceiling.
@@ -167,10 +172,10 @@ async fn stop(archiver: &Archiver, running: tokio::task::JoinHandle<dfe_archiver
 
 /// Uncompressed NDJSON under `minio://archive/archive`, flushed into the open
 /// file every second and routed by topic.
-fn archive_to(minio: &MinioFixture, spool: &Path) -> Config {
+fn archive_to(store: &S3StoreFixture, spool: &Path) -> Config {
     let mut config = Config::default();
     config.archive.destination = format!("minio://{BUCKET}/archive");
-    config.archive.minio = Some(minio.config(BUCKET));
+    config.archive.minio = Some(store.config(BUCKET));
     config.compression.enabled = false;
     config.routing.mode = "topic".to_string();
     config.buffer.flush_age_secs = 1;
@@ -180,8 +185,8 @@ fn archive_to(minio: &MinioFixture, spool: &Path) -> Config {
 }
 
 /// [`archive_to`], reading `topic` from `kafka` in [`GROUP`].
-fn kafka_to(kafka: &KafkaFixture, minio: &MinioFixture, spool: &Path, topic: &str) -> Config {
-    let mut config = archive_to(minio, spool);
+fn kafka_to(kafka: &KafkaFixture, store: &S3StoreFixture, spool: &Path, topic: &str) -> Config {
+    let mut config = archive_to(store, spool);
     config.kafka.brokers = vec![kafka.bootstrap.clone()];
     config.kafka.group_id = GROUP.to_string();
     config.kafka.topics = vec![topic.to_string()];
@@ -219,15 +224,15 @@ fn unblock_staging(spool: &Path) {
 /// object.
 #[tokio::test]
 async fn two_writers_on_one_destination_and_window_write_two_objects() {
-    let Some(minio) = common::acquire_minio("two_writers_on_one_destination").await else {
-        return; // no Docker; acquire_minio said so and failed the run in CI
+    let Some(store) = common::acquire_s3_store("two_writers_on_one_destination").await else {
+        return; // no Docker; acquire_s3_store said so and failed the run in CI
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     let (_staging_dir, staging) = common::staging();
 
     let archive = ArchiveConfig {
         destination: format!("minio://{BUCKET}/events"),
-        minio: Some(minio.config(BUCKET)),
+        minio: Some(store.config(BUCKET)),
         ..ArchiveConfig::default()
     };
     let writer = || {
@@ -255,13 +260,13 @@ async fn two_writers_on_one_destination_and_window_write_two_objects() {
     common::upload_closed(&mut first).await;
     common::upload_closed(&mut second).await;
 
-    let keys = minio.keys(BUCKET).await;
+    let keys = store.keys(BUCKET).await;
     assert_eq!(
         keys.len(),
         2,
         "one replica's object replaced the other's: {keys:?}"
     );
-    let mut lines = minio.lines(BUCKET).await;
+    let mut lines = store.lines(BUCKET).await;
     lines.sort();
     assert_eq!(lines, vec![r#"{"replica":1}"#, r#"{"replica":2}"#]);
 }
@@ -274,15 +279,15 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
     let Some(kafka) = common::acquire_kafka("kill_before_roll").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("kill_before_roll").await else {
+    let Some(store) = common::acquire_s3_store("kill_before_roll").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.produce("events", &records(0..50)).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let config = kafka_to(&kafka, &store, spool.path(), "events");
     let (manager, metrics) = metrics();
 
     let first = archiver(&config, &metrics).await;
@@ -305,7 +310,7 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
         None,
         "an offset was committed while the file holding its record was still open"
     );
-    assert!(minio.keys(BUCKET).await.is_empty(), "no file has completed");
+    assert!(store.keys(BUCKET).await.is_empty(), "no file has completed");
 
     // The kill: no drain, so the open upload is abandoned.
     running.abort();
@@ -328,14 +333,14 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
     .await;
     stop(&second, running).await;
 
-    let keys = minio.keys(BUCKET).await;
+    let keys = store.keys(BUCKET).await;
     assert_eq!(
         keys.len(),
         1,
         "only the second archiver's file completed: {keys:?}"
     );
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         (0..50).collect::<Vec<_>>(),
         "every record the killed archiver held is archived, once"
     );
@@ -351,14 +356,14 @@ async fn a_kill_before_roll_re_reads_the_records_the_open_file_held() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_graceful_stop_under_traffic_writes_every_record_it_answered() {
     init_logs();
-    let Some(minio) = common::acquire_minio("graceful_stop_under_traffic").await else {
+    let Some(store) = common::acquire_s3_store("graceful_stop_under_traffic").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
     let port = common::free_low_port(&[]);
-    let mut config = archive_to(&minio, spool.path());
+    let mut config = archive_to(&store, spool.path());
     config.transport = TRANSPORT_GRPC.to_string();
     config.grpc.listen = Some(format!("127.0.0.1:{port}"));
     let (manager, metrics) = metrics();
@@ -421,7 +426,7 @@ async fn a_graceful_stop_under_traffic_writes_every_record_it_answered() {
     pushing.store(false, Ordering::Release);
     let answered = traffic.await.expect("sender task");
 
-    let stored: BTreeSet<u64> = ids(&minio.lines(BUCKET).await).into_iter().collect();
+    let stored: BTreeSet<u64> = ids(&store.lines(BUCKET).await).into_iter().collect();
     let lost: Vec<u64> = answered
         .iter()
         .copied()
@@ -445,13 +450,13 @@ async fn a_store_that_fails_until_it_recovers_loses_nothing() {
     let Some(kafka) = common::acquire_kafka("store_recovers").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("store_recovers").await else {
+    let Some(store) = common::acquire_s3_store("store_recovers").await else {
         return;
     };
     kafka.create_topic("events", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     config.archive.roll_interval_secs = Some(2);
     let (manager, metrics) = metrics();
 
@@ -478,14 +483,14 @@ async fn a_store_that_fails_until_it_recovers_loses_nothing() {
         "a record was counted archived before its file reached the store"
     );
 
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     wait_until("every record landed once the store came back", || async {
         counter(&manager, "messages_archived_total") >= 20
     })
     .await;
     stop(&archiver, running).await;
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         (0..20).collect::<Vec<_>>(),
         "every record lands, once"
     );
@@ -511,14 +516,14 @@ async fn a_key_the_store_refuses_for_good_is_dropped_and_the_commit_moves_on() {
     let Some(kafka) = common::acquire_kafka("store_refuses").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("store_refuses").await else {
+    let Some(store) = common::acquire_s3_store("store_refuses").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     // Past the 1024-byte object key limit, so every file's key is refused.
     config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
     let (manager, metrics) = metrics();
@@ -543,7 +548,7 @@ async fn a_key_the_store_refuses_for_good_is_dropped_and_the_commit_moves_on() {
     assert_eq!(counter(&manager, "messages_dropped_total"), 20);
     assert_eq!(counter(&manager, "messages_archived_total"), 0);
     assert!(
-        minio.keys(BUCKET).await.is_empty(),
+        store.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
     );
 }
@@ -558,10 +563,10 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
     let Some(kafka) = common::acquire_kafka("dlq_refuses").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("dlq_refuses").await else {
+    let Some(store) = common::acquire_s3_store("dlq_refuses").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
     // Below the DLQ producer's own ceiling, so the refusal reads as one that can clear.
@@ -570,7 +575,7 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
         .await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     // Past the 1024-byte object key limit, so every file's key is refused for good.
     config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
     dead_letter_to(&mut config, "refusing-dlq");
@@ -633,7 +638,7 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
     assert!(kafka.records_in("dlq") > 0, "the DLQ topic holds the batch");
     assert_eq!(counter(&manager, "messages_dropped_total"), 0);
     assert!(
-        minio.keys(BUCKET).await.is_empty(),
+        store.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
     );
 }
@@ -655,15 +660,15 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     let Some(kafka) = common::acquire_kafka("dlq_never_holds").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("dlq_never_holds").await else {
+    let Some(store) = common::acquire_s3_store("dlq_never_holds").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     // Past the 1024-byte object key limit, so every file's key is refused.
     config.archive.path_template = format!("{}/{{year}}", "k".repeat(1100));
     // Long enough that the small records wait for the oversize one, which
@@ -701,7 +706,7 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     assert_eq!(counter(&manager, "messages_dlq_total"), 20);
     assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
     assert!(
-        minio.keys(BUCKET).await.is_empty(),
+        store.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
     );
 }
@@ -716,15 +721,15 @@ async fn a_local_write_failure_holds_the_batch_until_the_disk_recovers() {
     let Some(kafka) = common::acquire_kafka("local_failure_holds").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("local_failure_holds").await else {
+    let Some(store) = common::acquire_s3_store("local_failure_holds").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     config.archive.roll_interval_secs = Some(2);
     dead_letter_to(&mut config, "dlq");
     let (manager, metrics) = metrics();
@@ -765,7 +770,7 @@ async fn a_local_write_failure_holds_the_batch_until_the_disk_recovers() {
     .await;
     stop(&archiver, running).await;
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         (0..21).collect::<Vec<_>>(),
         "every held record lands, once"
     );
@@ -924,19 +929,21 @@ async fn a_file_the_store_refuses_at_upload_dead_letters_every_record() {
     let Some(kafka) = common::acquire_kafka("upload_refused").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("upload_refused").await else {
+    let Some(store) = common::acquire_s3_store("upload_refused").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     config.archive.roll_interval_secs = Some(2);
-    // Under the 1024-byte key limit checked before staging, one segment past
-    // the store's 255, so the store refuses the file when it uploads.
-    config.archive.path_template = format!("{}/{{year}}", "s".repeat(300));
+    // The archiver's own key check passes the file, and the store refuses it
+    // when it uploads.
+    let refusing = store.refusing_uploads(REFUSED_SEGMENT).await;
+    config.archive.minio = Some(refusing.config(BUCKET));
+    config.archive.path_template = format!("{REFUSED_SEGMENT}/{{year}}");
     // The file is read back through the codec it was written with.
     config.compression.enabled = true;
     dead_letter_to(&mut config, "dlq");
@@ -967,7 +974,7 @@ async fn a_file_the_store_refuses_at_upload_dead_letters_every_record() {
     assert_eq!(counter(&manager, "messages_archived_total"), 0);
     assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
     assert!(
-        minio.keys(BUCKET).await.is_empty(),
+        store.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
     );
 }
@@ -1008,19 +1015,21 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
     let Some(kafka) = common::acquire_kafka("upload_refused_oversize").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("upload_refused_oversize").await else {
+    let Some(store) = common::acquire_s3_store("upload_refused_oversize").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     config.archive.roll_interval_secs = Some(5);
-    // Under the 1024-byte key limit checked before staging, one segment past
-    // the store's 255, so the store refuses the file when it uploads.
-    config.archive.path_template = format!("{}/{{year}}", "s".repeat(300));
+    // The archiver's own key check passes the file, and the store refuses it
+    // when it uploads.
+    let refusing = store.refusing_uploads(REFUSED_SEGMENT).await;
+    config.archive.minio = Some(refusing.config(BUCKET));
+    config.archive.path_template = format!("{REFUSED_SEGMENT}/{{year}}");
     config.compression.enabled = true;
     dead_letter_to(&mut config, "dlq");
     let (manager, metrics) = metrics();
@@ -1051,7 +1060,7 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
     assert_eq!(counter(&manager, "messages_archived_total"), 0);
     assert_dead_letters_are(&kafka.read_all("dlq"), 0..20);
     assert!(
-        minio.keys(BUCKET).await.is_empty(),
+        store.keys(BUCKET).await.is_empty(),
         "nothing reached the store"
     );
 }
@@ -1062,14 +1071,14 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
     init_logs();
-    let Some(minio) = common::acquire_minio("push_under_pressure").await else {
+    let Some(store) = common::acquire_s3_store("push_under_pressure").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
     let port = common::free_low_port(&[]);
-    let mut config = archive_to(&minio, spool.path());
+    let mut config = archive_to(&store, spool.path());
     config.transport = TRANSPORT_GRPC.to_string();
     config.grpc.listen = Some(format!("127.0.0.1:{port}"));
     let (manager, metrics) = metrics();
@@ -1131,7 +1140,7 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
     stop(&archiver, running).await;
 
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         vec![0, 2],
         "only the pushes the listener answered are archived"
     );
@@ -1143,13 +1152,13 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stopped_process_s_complete_file_is_uploaded_on_the_direct_transport() {
     init_logs();
-    let Some(minio) = common::acquire_minio("staged_recovery").await else {
+    let Some(store) = common::acquire_s3_store("staged_recovery").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = archive_to(&minio, spool.path());
+    let mut config = archive_to(&store, spool.path());
     config.transport = TRANSPORT_GRPC.to_string();
     config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
     let (manager, metrics) = metrics();
@@ -1186,7 +1195,7 @@ async fn a_stopped_process_s_complete_file_is_uploaded_on_the_direct_transport()
     let archiver = archiver(&config, &metrics).await;
     wait_until(
         "the complete file a stopped process left is uploaded",
-        || async { !minio.keys(BUCKET).await.is_empty() },
+        || async { !store.keys(BUCKET).await.is_empty() },
     )
     .await;
     let running = tokio::spawn({
@@ -1196,10 +1205,10 @@ async fn a_stopped_process_s_complete_file_is_uploaded_on_the_direct_transport()
     stop(&archiver, running).await;
 
     assert_eq!(
-        minio.keys(BUCKET).await,
+        store.keys(BUCKET).await,
         vec!["archive/events/2026/left-0001.jsonl".to_string()]
     );
-    assert_eq!(ids(&minio.lines(BUCKET).await), vec![0, 1]);
+    assert_eq!(ids(&store.lines(BUCKET).await), vec![0, 1]);
     assert_eq!(counter(&manager, "staged_files_recovered_total"), 1);
     assert!(
         manager
@@ -1245,15 +1254,15 @@ async fn a_deeply_nested_record_is_dead_lettered_and_the_rest_are_archived() {
     let Some(kafka) = common::acquire_kafka("too_deep").await else {
         return;
     };
-    let Some(minio) = common::acquire_minio("too_deep").await else {
+    let Some(store) = common::acquire_s3_store("too_deep").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
     kafka.create_topic("events", &[]).await;
     kafka.create_topic("dlq", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let mut config = kafka_to(&kafka, &minio, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
     // Expression routing is the mode that parses each record.
     config.routing.mode = "expression".to_string();
     config.archive.roll_interval_secs = Some(2);
@@ -1282,7 +1291,7 @@ async fn a_deeply_nested_record_is_dead_lettered_and_the_rest_are_archived() {
     assert_eq!(counter(&manager, "messages_dlq_total"), 2);
     assert_eq!(counter(&manager, "messages_dropped_total"), 0);
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         (0..20).collect::<Vec<_>>(),
         "every record around the deep ones is archived, once"
     );
@@ -1314,14 +1323,14 @@ async fn a_deeply_nested_record_is_dead_lettered_and_the_rest_are_archived() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deeply_nested_record_with_no_dlq_is_dropped_and_the_rest_are_archived() {
     init_logs();
-    let Some(minio) = common::acquire_minio("too_deep_no_dlq").await else {
+    let Some(store) = common::acquire_s3_store("too_deep_no_dlq").await else {
         return;
     };
-    minio.create_bucket(BUCKET).await;
+    store.create_bucket(BUCKET).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
     let port = common::free_low_port(&[]);
-    let mut config = archive_to(&minio, spool.path());
+    let mut config = archive_to(&store, spool.path());
     config.transport = TRANSPORT_GRPC.to_string();
     config.grpc.listen = Some(format!("127.0.0.1:{port}"));
     config.routing.mode = "expression".to_string();
@@ -1374,7 +1383,7 @@ async fn a_deeply_nested_record_with_no_dlq_is_dropped_and_the_rest_are_archived
     assert_eq!(counter(&manager, "messages_dropped_total"), 2);
     assert_eq!(counter(&manager, "messages_dlq_total"), 0);
     assert_eq!(
-        ids(&minio.lines(BUCKET).await),
+        ids(&store.lines(BUCKET).await),
         vec![0, 1],
         "the records around the deep ones are archived"
     );

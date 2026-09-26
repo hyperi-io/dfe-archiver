@@ -279,9 +279,10 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     Err("Kafka did not become healthy within 30s".into())
 }
 
-// -- MinIO: the shared dev stack, a precondition rather than a fixture -
+// -- The dev stack's S3 store: a precondition rather than a fixture -----
 
-/// Host:port the `MinIO` tests talk to, from `MINIO_ENDPOINT` or the dev default.
+/// Host:port the `minio://` tests talk to, from `MINIO_ENDPOINT` or the dev
+/// default.
 fn minio_host_port() -> String {
     load_dotenv();
     let endpoint =
@@ -300,24 +301,22 @@ fn minio_host_port() -> String {
     }
 }
 
-/// Is the shared dev-stack `MinIO` up? Returns false having said why, and having
-/// failed the run outright in CI.
+/// Is the shared dev-stack S3 store up? Returns false having said why, and
+/// having failed the run outright in CI.
 ///
-/// `archiver-minio` in `docker-compose.dev.yaml` is the DEVELOPER's stack, and
-/// it is genuinely shared -- one `MinIO` serves the whole suite, and the bucket
-/// prefixes keep the tests out of each other's way. That makes it a
-/// PRECONDITION, not a fixture: bring it up with
+/// `archiver-s3` in `docker-compose.dev.yaml` is the DEVELOPER's stack, and it
+/// is shared -- one store serves the whole suite, and the bucket prefixes keep
+/// the tests out of each other's way. That makes it a PRECONDITION, not a
+/// fixture: bring it up with
 ///
-///     docker compose -f docker-compose.dev.yaml up -d minio minio-init
+///     docker compose -f docker-compose.dev.yaml up -d s3
 ///
-/// This used to start `MinIO` itself and hand back an RAII guard that ran
-/// `compose down` on drop. Two things were wrong with that and neither survives
-/// process-per-test. nextest runs every test in its own PROCESS, so all six
-/// `MinIO` tests raced to `compose up` and several came away believing they owned
-/// the container -- then the first to finish tore it down under the other five.
-/// And there is no end-of-suite hook to tear a shared container down from, so
-/// the honest options were "leak it" or "do not start it". Starting a container
-/// nothing can clean up is what left `archiver-minio` running after the suite.
+/// Starting it from a test would need a `compose down` on drop, and nextest
+/// runs every test in its own PROCESS: all the `minio://` tests would race to
+/// `compose up`, several would believe they owned the container, and the first
+/// to finish would tear it down under the rest. There is no end-of-suite hook to
+/// tear a shared container down from, so the honest options are "leak it" or
+/// "do not start it".
 ///
 /// Where a test genuinely needs a container of its own it starts one via
 /// testcontainers under [`container_name`], which is per-test, labelled, and
@@ -329,10 +328,10 @@ pub fn ensure_minio() -> bool {
         return true;
     }
     require_service_in_ci(
-        "MinIO",
+        "the dev stack's S3 store",
         &format!(
             "nothing accepting TCP on {host_port} -- start the dev stack with \
-             `docker compose -f docker-compose.dev.yaml up -d minio minio-init`"
+             `docker compose -f docker-compose.dev.yaml up -d s3`"
         ),
     );
     false
@@ -353,7 +352,7 @@ pub fn ensure_minio() -> bool {
 // Random names already meant one container per test, so per-test naming costs
 // nothing; a shared name would be the regression.
 //
-// The dev-stack containers (`archiver-minio` and friends in
+// The dev-stack containers (`archiver-s3` and friends in
 // docker-compose.dev.yaml) are deliberately NOT renamed to this scheme. They
 // belong to the developer who ran `docker compose up` and are correctly named
 // for that -- see `ensure_minio`.
@@ -1310,35 +1309,31 @@ fn worth_a_retry(error: &str) -> bool {
         || error.contains("End of stream reached before finding message")
 }
 
-// -- MinIO, owned per test --
+// -- S3-compatible store (LocalStack), owned per test --
 
-/// `MinIO`, pinned by digest: the newest release with a published image, since
-/// RELEASE.2025-10-15T17-29-55Z shipped none.
-///
-/// renovate: datasource=docker depName=quay.io/minio/minio
-const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+/// Credentials the store is addressed with. `LocalStack` accepts any pair.
+const S3_STORE_USER: &str = "test";
+const S3_STORE_PASSWORD: &str = "test";
 
-/// Root credentials the fixture starts `MinIO` with.
-const MINIO_USER: &str = "minioadmin";
-const MINIO_PASSWORD: &str = "minioadmin";
-
-/// A `MinIO` this test owns, mapped to a port below 10240. Dropping it stops and
+/// An S3-compatible store this test owns, `LocalStack` mapped to a port below
+/// 10240. The archiver reaches it through its `minio://` destination, the S3
+/// client for an endpoint of the operator's choosing. Dropping it stops and
 /// removes the container.
-pub struct MinioFixture {
+pub struct S3StoreFixture {
     /// `http://127.0.0.1:<port>`.
     pub endpoint: String,
     _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
 }
 
-impl MinioFixture {
-    /// The archiver's `minio` section for `bucket` on this `MinIO`.
+impl S3StoreFixture {
+    /// The archiver's `minio` section for `bucket` on this store.
     #[must_use]
     pub fn config(&self, bucket: &str) -> dfe_archiver::config::MinioConfig {
         dfe_archiver::config::MinioConfig {
             endpoint: self.endpoint.clone(),
-            access_key: MINIO_USER.to_string(),
+            access_key: S3_STORE_USER.to_string(),
             secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
-                MINIO_PASSWORD.to_string(),
+                S3_STORE_PASSWORD.to_string(),
             ),
             bucket: bucket.to_string(),
             use_ssl: false,
@@ -1354,11 +1349,11 @@ impl MinioFixture {
             .endpoint_url(&self.endpoint)
             .region(aws_sdk_s3::config::Region::new("us-east-1"))
             .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                MINIO_USER,
-                MINIO_PASSWORD,
+                S3_STORE_USER,
+                S3_STORE_PASSWORD,
                 None,
                 None,
-                "minio-fixture",
+                "s3-store-fixture",
             ))
             .force_path_style(true)
             .build();
@@ -1434,45 +1429,232 @@ impl MinioFixture {
             .uploads()
             .len()
     }
+
+    /// A proxy to this store that refuses every upload whose key contains
+    /// `refused`, as a store refuses an object it can never accept, and passes
+    /// every other request through. `LocalStack` itself refuses no key the
+    /// archiver's own 1024-byte check lets through.
+    pub async fn refusing_uploads(&self, refused: &str) -> RefusingProxy {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the refusing proxy");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("the proxy's address")
+        );
+        let upstream = self.endpoint.clone();
+        let refused = refused.to_string();
+        let task = tokio::spawn(async move {
+            // Dropped with the accept loop, which ends every open connection.
+            let mut connections = tokio::task::JoinSet::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                connections.spawn(relay_requests(socket, upstream.clone(), refused.clone()));
+            }
+        });
+        RefusingProxy { endpoint, task }
+    }
 }
 
-/// Start a `MinIO` for `test` on a fixed port below 10240.
+/// The answer a store gives for an object key it can never accept.
+const KEY_REFUSAL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>KeyTooLongError</Code><Message>Your key is too long</Message></Error>";
+
+/// A proxy in front of an [`S3StoreFixture`] that refuses some uploads. It
+/// stops when this is dropped.
+pub struct RefusingProxy {
+    /// `http://127.0.0.1:<port>`.
+    pub endpoint: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RefusingProxy {
+    /// The archiver's `minio` section for `bucket`, through this proxy.
+    #[must_use]
+    pub fn config(&self, bucket: &str) -> dfe_archiver::config::MinioConfig {
+        dfe_archiver::config::MinioConfig {
+            endpoint: self.endpoint.clone(),
+            access_key: S3_STORE_USER.to_string(),
+            secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
+                S3_STORE_PASSWORD.to_string(),
+            ),
+            bucket: bucket.to_string(),
+            use_ssl: false,
+        }
+    }
+}
+
+impl Drop for RefusingProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// One HTTP/1.1 request, as a client sent it.
+struct ProxiedRequest {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+/// Read the next request from `conn`, or `None` once the client is done.
+async fn read_request(
+    conn: &mut tokio::io::BufReader<tokio::net::TcpStream>,
+) -> Option<ProxiedRequest> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let mut request_line = String::new();
+    if conn.read_line(&mut request_line).await.ok()? == 0 {
+        return None;
+    }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut headers = Vec::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if conn.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.trim().to_string(), value.trim().to_string());
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().ok()?;
+            }
+            headers.push((name, value));
+        }
+    }
+    let mut body = vec![0u8; length];
+    conn.read_exact(&mut body).await.ok()?;
+    Some(ProxiedRequest {
+        method,
+        target,
+        headers,
+        body,
+    })
+}
+
+/// Serve one client connection: a request uploading a key that contains
+/// `refused` gets [`KEY_REFUSAL`], and any other goes to `upstream`.
+async fn relay_requests(socket: tokio::net::TcpStream, upstream: String, refused: String) {
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return;
+    };
+    let mut conn = tokio::io::BufReader::new(socket);
+    while let Some(request) = read_request(&mut conn).await {
+        let uploads = matches!(request.method.as_str(), "POST" | "PUT");
+        let answer = if uploads && request.target.contains(&refused) {
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{KEY_REFUSAL}",
+                KEY_REFUSAL.len()
+            )
+            .into_bytes()
+        } else {
+            match forward(&client, &upstream, request).await {
+                Ok(answer) => answer,
+                Err(_) => return,
+            }
+        };
+        if conn.get_mut().write_all(&answer).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Send `request` on to `upstream`, and return its answer as HTTP/1.1 bytes.
+async fn forward(
+    client: &reqwest::Client,
+    upstream: &str,
+    request: ProxiedRequest,
+) -> Result<Vec<u8>, reqwest::Error> {
+    use std::fmt::Write as _;
+
+    // reqwest frames the body and the connection itself.
+    const HOP_HEADERS: [&str; 3] = ["content-length", "transfer-encoding", "connection"];
+    let method =
+        reqwest::Method::from_bytes(request.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut outbound = client
+        .request(method.clone(), format!("{upstream}{}", request.target))
+        .body(request.body);
+    for (name, value) in &request.headers {
+        if !HOP_HEADERS.iter().any(|hop| name.eq_ignore_ascii_case(hop)) {
+            outbound = outbound.header(name.as_str(), value.as_str());
+        }
+    }
+    let response = outbound.send().await?;
+    let status = response.status();
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\n",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    );
+    let object_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("0")
+        .to_string();
+    for (name, value) in response.headers() {
+        if !HOP_HEADERS.contains(&name.as_str()) {
+            let _ = write!(head, "{name}: {}\r\n", value.to_str().unwrap_or(""));
+        }
+    }
+    let body = response.bytes().await?;
+    // A HEAD answer carries the object's length and no body.
+    let head_only = method == reqwest::Method::HEAD;
+    let length = if head_only {
+        object_length
+    } else {
+        body.len().to_string()
+    };
+    let _ = write!(head, "Content-Length: {length}\r\n\r\n");
+    let mut answer = head.into_bytes();
+    if !head_only {
+        answer.extend_from_slice(&body);
+    }
+    Ok(answer)
+}
+
+/// Start an S3-compatible store for `test` on a fixed port below 10240.
 ///
 /// Returns `None` only when Docker is absent, having failed the run in CI.
-pub async fn acquire_minio(test: &str) -> Option<MinioFixture> {
+pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
     use testcontainers::{GenericImage, ImageExt};
 
-    let name = container_name(Some(test), "minio");
+    let name = container_name(Some(test), "localstack");
     let mut taken = Vec::new();
     let mut last_error = String::new();
     for _ in 0..3 {
         reap_stale(&name);
         let port = free_low_port(&taken);
-        let image = GenericImage::new("quay.io/minio/minio", MINIO_TAG)
-            .with_exposed_port(9000u16.tcp())
-            // STDERR: MinIO writes its whole startup banner there.
-            .with_wait_for(WaitFor::message_on_stderr("API:"))
-            .with_env_var("MINIO_ROOT_USER", MINIO_USER)
-            .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
-            .with_cmd(["server", "/data"])
-            .with_mapped_port(port, 9000u16.tcp())
+        let image = GenericImage::new("localstack/localstack", LOCALSTACK_TAG)
+            .with_exposed_port(4566u16.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready."))
+            .with_env_var("SERVICES", "s3")
+            .with_mapped_port(port, 4566u16.tcp())
             .with_container_name(&name)
-            .with_labels(test_labels("minio"))
+            .with_labels(test_labels("localstack"))
             .with_startup_timeout(CONTAINER_STARTUP);
         match image.start().await {
             Ok(container) => {
                 let endpoint = format!("http://127.0.0.1:{port}");
                 if let Err(e) = wait_for_port(&format!("127.0.0.1:{port}"), 120).await {
-                    require_container_in_ci("MinIO", &e);
+                    require_container_in_ci("LocalStack", &e);
                     return None;
                 }
-                if let Err(e) = wait_for_minio(&endpoint).await {
-                    require_container_in_ci("MinIO", &e);
+                if let Err(e) = wait_for_localstack_s3(&endpoint).await {
+                    require_container_in_ci("LocalStack", &e);
                     return None;
                 }
-                return Some(MinioFixture {
+                return Some(S3StoreFixture {
                     endpoint,
                     _container: container,
                 });
@@ -1486,26 +1668,8 @@ pub async fn acquire_minio(test: &str) -> Option<MinioFixture> {
             }
         }
     }
-    require_container_in_ci("MinIO", &last_error);
+    require_container_in_ci("LocalStack", &last_error);
     None
-}
-
-/// Wait until `MinIO` answers its liveness probe.
-async fn wait_for_minio(endpoint: &str) -> Result<(), String> {
-    let url = format!("{endpoint}/minio/health/live");
-    let client = reqwest::Client::new();
-    for _ in 0..240 {
-        if client
-            .get(&url)
-            .send()
-            .await
-            .is_ok_and(|r| r.status().is_success())
-        {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    Err(format!("{url} did not answer within 60s"))
 }
 
 // -- Kafka, owned per test --
