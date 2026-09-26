@@ -176,12 +176,11 @@ or file polling (5-second interval).
 
 **Hot-reloaded (takes effect on next batch):**
 - `kafka.batch_size` - re-read once per receive
-- `buffer.backpressure_pause_secs` - re-read on each backpressure pause
 
 **Requires pod restart** - everything else. The pipeline snapshots the config at
-startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `routing.*`,
-`compression.*`, `dlq.*` and the rest of `buffer.*` (the flush thresholds
-included) keep their startup values until the process restarts. A reload of one
+startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `buffer.*`,
+`routing.*`, `compression.*` and `dlq.*` keep their startup values until the
+process restarts. A reload of one
 of those logs a warning naming the sections that changed, and the security event
 says a restart is needed rather than reporting a reload that reached nothing.
 
@@ -267,9 +266,9 @@ Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers
 
 **Platform** (`dfe_*`): `records_received_total`, `records_delivered_total`, `transport_sent_total`, `scaling_pressure` - auto-emitted by scalo.
 
-**Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend), `BackpressureMetrics`.
+**Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend).
 
-**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `writer_evictions_total`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`, `routing_fallback_total{field}`, `kafka_commit_errors_total`.
+**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `writer_evictions_total`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `hot_buffer_evictions_total`, `unique_destinations`, `routing_fallback_total{field}`, `kafka_commit_errors_total`.
 
 **Archiver delivery** (`dfe_archiver_*`): `messages_written_total`, `messages_archived_total`, `messages_dlq_total`, `messages_dropped_total{reason}` (`refused`, `dlq_too_large`, `too_deep`, `unreplayable`), `uploads_pending`, `staged_bytes`, `staged_files_recovered_total`, `staged_files_quarantined_total{reason}`, `staged_files_removed_total{reason}`, and `pipeline_delivery_guarantee{guarantee, reason}`.
 

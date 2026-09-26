@@ -55,17 +55,22 @@ cargo build --features default,jemalloc --release
 
 ### CI/CD Pipeline
 
-CI is managed by the [HyperI CI](https://github.com/hyperi-io/ci) submodule (`ci/`).
-Configuration is in `.hyperi-ci.yaml`.
+`.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow. Configuration is in `.hyperi-ci.yaml`.
 
 **Pipeline stages:**
 
-```text
-Push to any branch
-  -> CI workflow: Detect -> Quality (fmt, clippy, audit) -> Test (with coverage)
-
-GitHub Release created (via semantic-release)
-  -> Publish workflow: Detect -> Build (x86_64 + aarch64) -> Publish
+```mermaid
+flowchart LR
+    E["push, pull request or dispatch"] --> P["Plan<br/>predicts the version and which jobs run"]
+    E --> CM["Commit messages"]
+    P --> Q["Quality<br/>fmt, clippy, audit, deny"]
+    P --> T["Test<br/>with coverage"]
+    Q --> B["Build<br/>x86_64 and aarch64"]
+    T --> B
+    B -->|"a release"| RT["Release tail<br/>tag, GitHub release, ghcr image"]
+    Q --> G["Gate"]
+    T --> G
+    B --> G
 ```
 
 ### Build Targets
@@ -81,25 +86,13 @@ to compile `librdkafka` from source.
 
 ### Artifact Destinations
 
-#### Crate (library)
+No crate is published: all three set `publish = false`.
 
-| Destination | URL |
+| Artefact | Destination |
 |---|---|
-| HyperI Cargo Registry | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/` |
-
-Published via `cargo publish --registry hyperi`. Used as a dependency:
-
-```toml
-dfe-archiver = { version = ">=1.2", registry = "hyperi" }
-```
-
-#### Binaries
-
-| Destination | Location |
-|---|---|
-| JFrog Artifactory | `https://hypersec.jfrog.io/artifactory/hyperi-binaries/dfe-archiver/{version}/` |
-| JFrog Artifactory (latest) | `https://hypersec.jfrog.io/artifactory/hyperi-binaries/dfe-archiver/latest/` |
-| GitHub Releases | `https://github.com/hyperi-io/dfe-archiver/releases/` |
+| Container image | `ghcr.io/hyperi-io/dfe-archiver` |
+| Binaries | hyperi-ci's `release.destinations.binaries`, Cloudflare R2 (`downloads.hyperi.io`) by default |
+| Release notes | `https://github.com/hyperi-io/dfe-archiver/releases/`, with no binaries attached |
 
 **Binary naming convention:**
 
@@ -149,52 +142,24 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 
 ## Architecture
 
-```text
-+------------------------------------+    +------------------------------------+
-| Kafka consumer group (scalo)       |    | scalo Push listener (grpc)         |
-| - batches of kafka.batch_size, 10K |    | - one push per call                |
-| - tracks every offset it hands out |    | - answered once queued             |
-+------------------------------------+    +------------------------------------+
-                  |                                         |
-                  +--------------------+--------------------+
-                                       v
-+------------------------------------------------------------------------------+
-| Router                                                                       |
-| - topic, or JSON fields (default: expression on org_id)                      |
-| - depth scan before every parse: past 64 levels the record goes to the DLQ   |
-| - every segment encoded, so no value names another directory                 |
-+------------------------------------------------------------------------------+
-                                       |
-                                       v
-+------------------------------------------------------------------------------+
-| Hot buffers, one per destination, in memory                                  |
-| - at most 64 at once: a record for another flushes the least recently used   |
-| - each flushes at flush_bytes, flush_records or flush_age_secs               |
-| - all together at most a quarter of the memory limit, largest flushed first  |
-+------------------------------------------------------------------------------+
-                                       |
-                                       v
-+------------------------------------------------------------------------------+
-| Archive writers, one per destination                                         |
-| - up to archive.max_writers (1024), past which the least recent one closes   |
-| - each flush appends one compressed frame (zstd by default)                  |
-| - a failed append is cut back and retried, its batch and offsets held        |
-| - a file rolls at roll_size_bytes compressed, or roll_interval_secs          |
-+------------------------------------------------------------------------------+
-                                       |  file closes
-                                       v
-+------------------------------------------------------------------------------+
-| Local path: the file and its directories synced to disk                      |
-| Object store: staged under <buffer.spool_dir>/uploads, uploaded whole in the |
-| background, buffer.writer_parallelism uploads at once, retried until taken   |
-+------------------------------------------------------------------------------+
-                                       |  file durable
-                                       v
-+------------------------------------------------------------------------------+
-| Release                                                                      |
-| - kafka: each partition commits up to its lowest offset not yet released     |
-| - grpc: nothing to release, as the push was answered at enqueue              |
-+------------------------------------------------------------------------------+
+```mermaid
+flowchart TB
+    K["Kafka consumer group (scalo)<br/>batches of kafka.batch_size, 10K by default<br/>tracks every offset it hands out"]
+    P["scalo Push listener (grpc)<br/>one push per call, answered once queued"]
+    R["Router<br/>topic, or JSON fields (default: expression on org_id)<br/>depth scan before every parse, past 64 levels to the DLQ<br/>every path segment encoded"]
+    H["Hot buffers, one per destination, in memory<br/>at most 64 at once, the least recently used flushed for another<br/>each flushes at flush_bytes, flush_records or flush_age_secs<br/>together at most a quarter of the memory limit, largest first"]
+    W["Archive writers, one per destination<br/>up to archive.max_writers (1024), the least recent closed past it<br/>each flush appends one compressed frame, zstd by default<br/>a failed append is cut back and retried, its batch and offsets held<br/>a file rolls at roll_size_bytes compressed, or roll_interval_secs"]
+    L["Local path<br/>the file and its directories synced to disk"]
+    S["Object store<br/>staged under buffer.spool_dir/uploads, uploaded whole in the background<br/>writer_parallelism uploads at once, retried until the store takes it"]
+    C["Release<br/>kafka: each partition commits up to its lowest offset not yet released<br/>grpc: nothing to release, the push was answered at enqueue"]
+    K --> R
+    P --> R
+    R --> H
+    H -->|flush| W
+    W -->|file closes| L
+    W -->|file closes| S
+    L -->|synced| C
+    S -->|store confirms| C
 ```
 
 ---
@@ -280,11 +245,11 @@ With expression-based routing (e.g., by `org_id`), you could have 10,000+ unique
 
 ### Solution: a ceiling per destination and a cap on all of them
 
-```text
-Hot buffers (memory): at most 64 at once, a quarter of the memory limit together
-    | flush at flush_bytes, flush_records, flush_age_secs, LRU eviction or the cap
-    v
-Archive writers: one per destination, up to archive.max_writers (1024)
+```mermaid
+flowchart TB
+    H["Hot buffers, in memory<br/>at most 64 at once, a quarter of the memory limit together"]
+    W["Archive writers<br/>one per destination, up to archive.max_writers (1024)"]
+    H -->|"flush_bytes, flush_records, flush_age_secs,<br/>LRU eviction or the cap"| W
 ```
 
 Nothing spills to disk ahead of the writers. The only files on local disk are the archive files themselves: the open file on a local path, or the staged copy of an object-store file.
@@ -323,16 +288,18 @@ On `kafka` with `acknowledgements.enabled` (the default) no record is lost: a ki
 
 ### Implementation
 
-```text
-1. Receive a batch, and the armed consumer records every offset it hands out
-2. Buffer per destination
-3. Write each flushed batch into the destination's open file, retrying a
-   write that can clear, and hold its offsets on that file
-4. The file closes (roll, age close, eviction or shutdown): a local file is
-   synced, an object-store file is handed to an upload task
-5. The upload task retries until the store takes the file
-6. Release the file's offsets, and the consumer commits each partition up to
-   its lowest offset not yet released
+```mermaid
+flowchart TB
+    A["Step 1: receive a batch<br/>the armed consumer records every offset it hands out"]
+    B["Step 2: buffer per destination"]
+    C["Step 3: write each flushed batch into the destination's open file<br/>retrying a write that can clear, and hold its offsets on that file"]
+    D["Step 4: the file closes on a roll, an age close, an eviction or shutdown"]
+    E["Local file synced"]
+    F["Step 5: upload task<br/>retries until the store takes the file"]
+    G["Step 6: release the file's offsets<br/>the consumer commits each partition up to its lowest offset not yet released"]
+    A --> B --> C --> D
+    D -->|local path| E --> G
+    D -->|object store| F --> G
 ```
 
 An object-store file is written to local staging, `<buffer.spool_dir>/uploads`, and uploaded whole once it closes. The loop never waits on the store: step 5 runs in a background task, which the loop collects each cycle. A failed upload keeps the staged file and its held offsets and retries with exponential backoff and jitter, from 0.5 s up to 60 s between attempts. Every attempt is a fresh multipart upload from the staged copy, so it signs its requests afresh however long the store has been down, and a failed attempt aborts its upload so no parts are left in the store. A staged copy that cannot be read back -- missing, unreadable by permission, shorter than the bytes staged -- is moved to `<buffer.spool_dir>/uploads/quarantine` and its offsets are released `Errored`, because no retry can read it. Any other read error, EIO included, is retried. On a local path, step 4 syncs the file, and every directory above it up to the destination, to disk.
@@ -469,10 +436,10 @@ Only archive files: the open file of a local destination, and under `<buffer.spo
 
 Messages routed by Kafka topic name:
 
-```
-Topic: events -> Destination: events/
-Topic: logs -> Destination: logs/
-```
+| Topic | Destination |
+|-------|-------------|
+| `events` | `events/` |
+| `logs` | `logs/` |
 
 ### Expression-Based (Default)
 
@@ -790,6 +757,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_files_closed_total` | Archive files closed (rolled) |
 | `dfe_archiver_archive_roll_total{trigger}` | Archive files rolled, by trigger |
 | `dfe_archiver_writer_evictions_total` | Writers closed because `archive.max_writers` was reached |
+| `dfe_archiver_hot_buffer_evictions_total` | Hot buffers flushed early because a record for another destination needed their slot |
 | `dfe_archiver_flush_operations_total` | Flush operations |
 | `dfe_archiver_archive_errors_total` | Archive errors, each failed attempt counted |
 | `dfe_archiver_kafka_commit_errors_total` | Offset releases the transport failed |
@@ -798,8 +766,6 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
 | `dfe_archiver_staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt`, `no_store` |
 | `dfe_archiver_staged_files_removed_total{reason}` | Staged files removed at startup: `replayed`, `quarantine_full` |
-| `dfe_archiver_disk_pressure_events_total` | Registered and never incremented: a buffer push cannot fail |
-
 ### Gauges
 
 | Metric | Description |
@@ -809,9 +775,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_kafka_lag` | Records past this pod's read position (sum across assigned partitions). The commit an open file holds does not inflate it |
 | `pipeline_delivery_guarantee{guarantee,reason}` | 1 for the delivery guarantee in force |
 | `dfe_archiver_hot_buffers_active` | Active hot buffers |
-| `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
-| `dfe_archiver_spool_bytes` | Always 0: nothing spools ahead of the writers. `staged_bytes` is the disk in use |
-| `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
+| `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers || `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
 | `dfe_archiver_staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
 
 ### Histograms
