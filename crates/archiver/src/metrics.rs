@@ -228,13 +228,24 @@ impl ArchiverMetrics {
             "Pipeline throughput: events processed per second",
         );
 
-        // Labelled metrics (described manually for label dimensions)
-        metrics::describe_counter!("archive_roll_total", "Archive file roll events by trigger");
-        metrics::describe_counter!("kafka_commit_errors_total", "Failed Kafka offset commits");
-        metrics::describe_counter!(
-            "routing_fallback_total",
-            "Expression-routing fields absent from a record, by field path"
+        let _ = manager.counter_with_labels(
+            "archive_roll_total",
+            "Archive file roll events by trigger",
+            &["trigger"],
+            "custom",
         );
+        let _ = manager.counter("kafka_commit_errors_total", "Failed Kafka offset commits");
+        let _ = manager.counter_with_labels(
+            "routing_fallback_total",
+            "Expression-routing fields absent from a record, by field path",
+            &["field"],
+            "custom",
+        );
+        let _ = manager.counter(
+            "writer_evictions_total",
+            "Archive writers evicted from the max_writers LRU and closed",
+        );
+        // In the manifest through ServiceMetrics, which names its labels.
         metrics::describe_gauge!(
             "pipeline_delivery_guarantee",
             "1 for the delivery guarantee in force, by guarantee and reason"
@@ -790,6 +801,72 @@ mod tests {
                 panic!("{name} is not in the manifest");
             };
             assert_eq!(descriptor.labels, vec!["reason".to_string()], "{name}");
+        }
+    }
+
+    /// The name of every metric a `counter!`, `gauge!` or `histogram!` in
+    /// `source` records.
+    fn emitted_names(source: &str) -> std::collections::BTreeSet<&str> {
+        let mut names = std::collections::BTreeSet::new();
+        for open in ["counter!(\"", "gauge!(\"", "histogram!(\""] {
+            let mut rest = source;
+            while let Some(at) = rest.find(open) {
+                rest = &rest[at + open.len()..];
+                if let Some(end) = rest.find('"') {
+                    names.insert(&rest[..end]);
+                }
+            }
+        }
+        names
+    }
+
+    /// Every metric the archiver records is in the manifest `metrics-manifest`
+    /// prints, so no series reaches Prometheus undescribed.
+    #[test]
+    fn every_metric_the_archiver_records_is_in_the_manifest() {
+        let manager =
+            MetricsManager::with_config(scalo::metrics::MetricsConfig::offline("archiver"));
+        let _metrics = ArchiverMetrics::register(&manager, "abc");
+        let manifest: std::collections::BTreeSet<String> = manager
+            .registry()
+            .manifest()
+            .metrics
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+
+        let mut emitted = emitted_names(include_str!("metrics.rs"));
+        emitted.extend(emitted_names(include_str!("archiver.rs")));
+        assert!(emitted.len() > 30, "the scan found {emitted:?}");
+        let missing: Vec<&str> = emitted
+            .into_iter()
+            .filter(|name| !manifest.contains(&format!("archiver_{name}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "recorded but not in the manifest: {missing:?}"
+        );
+    }
+
+    /// A labelled metric's manifest entry names its labels.
+    #[test]
+    fn labelled_metrics_carry_their_labels_in_the_manifest() {
+        let manager =
+            MetricsManager::with_config(scalo::metrics::MetricsConfig::offline("archiver"));
+        let _metrics = ArchiverMetrics::register(&manager, "abc");
+        let manifest = manager.registry().manifest();
+        for (name, labels) in [
+            ("archiver_archive_roll_total", vec!["trigger"]),
+            ("archiver_routing_fallback_total", vec!["field"]),
+            (
+                "archiver_pipeline_delivery_guarantee",
+                vec!["guarantee", "reason", "listener"],
+            ),
+        ] {
+            let Some(descriptor) = manifest.metrics.iter().find(|m| m.name == name) else {
+                panic!("{name} is not in the manifest");
+            };
+            assert_eq!(descriptor.labels, labels, "{name}");
         }
     }
 
