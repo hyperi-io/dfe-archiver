@@ -708,6 +708,18 @@ fn record_routing_fallbacks(
     }
 }
 
+/// The bytes received records lease on the memory guard: their payloads.
+fn received_bytes(messages: &[KafkaMessage]) -> u64 {
+    messages.iter().map(|m| m.payload.len() as u64).sum()
+}
+
+/// The bytes a staged batch's records leased on the memory guard when they
+/// were received, so its release returns exactly that lease.
+fn leased_bytes(batch: &StagedBatch) -> u64 {
+    // The buffer appended one newline to each record after its lease was taken.
+    batch.data.len().saturating_sub(batch.record_count) as u64
+}
+
 /// The commit tokens of `offsets`.
 fn tokens_of(offsets: Vec<KafkaOffset>) -> Vec<KafkaToken> {
     offsets.into_iter().map(KafkaOffset::into_token).collect()
@@ -1278,8 +1290,7 @@ impl Archiver {
         // this). The `kafka_lag` scaling component is driven by the pod's
         // position lag in `push_kafka_lag_signal` (scale-invariant), NOT by
         // per-batch throughput, so nothing is set here.
-        let batch_bytes: u64 = messages.iter().map(|m| m.payload.len() as u64).sum();
-        self.memory_guard.add_bytes(batch_bytes);
+        self.memory_guard.add_bytes(received_bytes(&messages));
 
         // Phase 1: route + buffer accumulate (returns staged batches, a
         // backpressure flag set when the buffer rejects a push, and the records
@@ -1895,7 +1906,7 @@ impl Archiver {
             break attempt;
         };
         // The batch leaves memory whether a file took it, the DLQ does, or it is withheld.
-        self.memory_guard.release(batch.data.len() as u64);
+        self.memory_guard.release(leased_bytes(&batch));
 
         let flush_stats = match outcome {
             Ok(flush_stats) => flush_stats,
@@ -2350,8 +2361,7 @@ impl Archiver {
         }
         .to_string();
         // The records leave memory whether the DLQ takes them or not.
-        self.memory_guard
-            .release(records.iter().map(|m| m.payload.len() as u64).sum());
+        self.memory_guard.release(received_bytes(&records));
 
         if !self.dlq.is_enabled() {
             self.metrics
@@ -2524,9 +2534,9 @@ mod tests {
     use super::{
         RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader,
         WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, dead_letter_refused_file,
-        held_record_cap, publish_kafka_lag, record_files_opened, record_rolls,
-        record_routing_fallbacks, restart_required_changes, retry_delay, sampled_reason,
-        screen_dead_letters, sink_confirmation, upload_retry_delay, upload_slots,
+        held_record_cap, leased_bytes, publish_kafka_lag, received_bytes, record_files_opened,
+        record_rolls, record_routing_fallbacks, restart_required_changes, retry_delay,
+        sampled_reason, screen_dead_letters, sink_confirmation, upload_retry_delay, upload_slots,
         upload_until_settled,
     };
     use crate::config::validate_config;
@@ -2716,6 +2726,56 @@ mod tests {
             first_flush(|config| config.buffer.flush_records = 50).record_count,
             50
         );
+    }
+
+    /// What records lease on the memory guard when received is exactly what
+    /// their staged batches release, whatever the payload sizes, the empty
+    /// payload and one holding a newline of its own included.
+    #[test]
+    fn a_batch_releases_exactly_what_its_records_leased() {
+        let spool = tempfile::TempDir::new().expect("spool");
+        let mut config = Config::default();
+        config.buffer.spool_dir = spool.path().display().to_string();
+        config.buffer.flush_bytes = 64;
+        let buffer =
+            dfe_archiver_core::buffer::TieredBufferManager::new(buffer_config(&config, GIB))
+                .expect("buffer");
+        let guard = scalo::memory::MemoryGuard::new(scalo::memory::MemoryGuardConfig::default());
+
+        let payloads: Vec<Vec<u8>> = (0..200)
+            .map(|n| match n % 4 {
+                0 => Vec::new(),
+                1 => b"two\nlines".to_vec(),
+                _ => vec![b'x'; n],
+            })
+            .collect();
+        let messages: Vec<KafkaMessage> = payloads
+            .into_iter()
+            .zip(0..)
+            .map(|(payload, offset)| KafkaMessage::for_test(payload, "events", 0, offset))
+            .collect();
+        guard.add_bytes(received_bytes(&messages));
+
+        let mut batches = Vec::new();
+        for (n, message) in messages.into_iter().enumerate() {
+            batches.extend(
+                buffer
+                    .push(&format!("dest-{}", n % 3), message)
+                    .expect("push"),
+            );
+        }
+        batches.extend(buffer.flush_all());
+        assert!(batches.len() > 3, "several batches flushed");
+        let leased: u64 = batches.iter().map(leased_bytes).sum();
+        let held = guard.reserved_bytes();
+        assert_eq!(
+            leased, held,
+            "the batches release {leased} of {held} leased bytes"
+        );
+        for batch in &batches {
+            guard.release(leased_bytes(batch));
+        }
+        assert_eq!(guard.reserved_bytes(), 0);
     }
 
     /// Records push this many bytes each: 1000 of payload and a newline.

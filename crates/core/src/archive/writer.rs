@@ -254,6 +254,8 @@ pub struct ArchiveWriter {
     compressor: Arc<dyn Compressor + Send + Sync>,
     storage: Box<dyn StorageBackend + Send + Sync>,
     state: Option<ArchiveState>,
+    /// Data written since the last flush. Allocated on write and handed to the
+    /// compressor on flush, so an idle writer holds no buffer.
     buffer: Vec<u8>,
     file_seq: u64,
     last_stem: Option<String>,
@@ -290,7 +292,7 @@ impl ArchiveWriter {
             compressor: Arc::from(compressor),
             storage,
             state: None,
-            buffer: Vec::with_capacity(1024 * 1024),
+            buffer: Vec::new(),
             file_seq: 0,
             last_stem: None,
             files_opened: 0,
@@ -465,8 +467,7 @@ impl ArchiveWriter {
 
         let uncompressed_len = self.buffer.len() as u64;
 
-        // Swap buffer with a pre-allocated replacement (avoids re-alloc on next write cycle)
-        let buffer = std::mem::replace(&mut self.buffer, Vec::with_capacity(1024 * 1024));
+        let buffer = std::mem::take(&mut self.buffer);
         let compressor = Arc::clone(&self.compressor);
 
         let compress_start = std::time::Instant::now();
@@ -692,6 +693,12 @@ impl ArchiveWriter {
     #[cfg(test)]
     pub fn test_current_path(&self) -> Option<&str> {
         self.state.as_ref().map(|s| s.path.as_str())
+    }
+
+    /// Bytes the write buffer has allocated, for testing
+    #[cfg(test)]
+    pub fn test_buffer_capacity(&self) -> usize {
+        self.buffer.capacity()
     }
 }
 
@@ -1101,6 +1108,34 @@ mod tests {
         }
         writer.close().await.expect("close");
         assert_eq!(backend.file_count(), 1);
+    }
+
+    /// A writer holds a write buffer only between a write and its flush, so
+    /// 1024 idle writers -- `archive.max_writers` by default -- hold none.
+    #[tokio::test]
+    async fn an_idle_writer_holds_no_write_buffer() {
+        let backend = Arc::new(MemoryBackend::new());
+        let mut writers = Vec::with_capacity(1024);
+        for _ in 0..1024 {
+            let mut writer = test_writer_on(&backend, RollingPolicy::default(), "none");
+            assert_eq!(
+                writer.test_buffer_capacity(),
+                0,
+                "a new writer allocates nothing"
+            );
+            writer.write_record(b"{\"id\":1}").await.expect("write");
+            assert!(
+                writer.test_buffer_capacity() >= 9,
+                "a write buffers its bytes"
+            );
+            writer.flush().await.expect("flush");
+            writers.push(writer);
+        }
+        let held: usize = writers
+            .iter()
+            .map(ArchiveWriter::test_buffer_capacity)
+            .sum();
+        assert_eq!(held, 0, "1024 flushed writers hold {held} buffer bytes");
     }
 
     #[tokio::test]

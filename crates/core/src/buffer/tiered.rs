@@ -94,11 +94,12 @@ struct HotBuffer {
 }
 
 impl HotBuffer {
+    /// Allocates nothing until a record arrives, as a drained buffer does.
     fn new() -> Self {
         Self {
-            data: Vec::with_capacity(1024 * 1024),
-            offsets: Vec::with_capacity(1024),
-            record_ends: Vec::with_capacity(1024),
+            data: Vec::new(),
+            offsets: Vec::new(),
+            record_ends: Vec::new(),
             record_count: 0,
             last_access: Instant::now(),
             created_at: Instant::now(),
