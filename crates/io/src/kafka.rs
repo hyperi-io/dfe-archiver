@@ -10,7 +10,6 @@ use compact_str::CompactString;
 use dfe_archiver_core::config::KafkaConfig;
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
-use rdkafka::consumer::Consumer;
 use scalo::SelfRegulationGovernor;
 use scalo::transport::ack::{DeliveryGuarantee, EffectiveGuarantee, GuaranteeReason};
 use scalo::transport::{
@@ -241,125 +240,6 @@ impl TransportAdapter {
     }
 }
 
-/// Sidecar consumer that collects rdkafka statistics via `StatsContext`
-/// and emits them as Prometheus metrics.
-///
-/// Creates a lightweight `BaseConsumer` with `statistics.interval.ms=5000`
-/// in a separate consumer group (`{group_id}-stats`). While the emitter lives,
-/// a background tokio task polls the consumer every 5s (triggering stats
-/// callbacks) and calls `emit_prometheus_metrics()` to push rdkafka internal
-/// stats to the global Prometheus recorder. Dropping the emitter closes the
-/// consumer and ends the task.
-///
-/// Emitted metrics (per DFE metrics standard, `rdkafka_` prefix):
-/// - `rdkafka_global_msg_cnt` / `rdkafka_global_msg_size_bytes`
-/// - `rdkafka_broker_rtt_avg_seconds{broker}` / `rdkafka_broker_outbuf_cnt{broker}`
-/// - `rdkafka_topic_partition_consumer_lag{topic,partition}`
-/// - `rdkafka_topic_partition_committed_offset{topic,partition}`
-/// - `rdkafka_consumer_rebalance_count`
-pub struct KafkaStatsEmitter {
-    consumer:
-        std::sync::Arc<rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-/// A dropped `JoinHandle` detaches its task, so the poll task is aborted here.
-impl Drop for KafkaStatsEmitter {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-impl KafkaStatsEmitter {
-    /// Create a stats emitter for the given Kafka config.
-    ///
-    /// # Errors
-    /// Returns error if the sidecar consumer cannot be created.
-    pub fn new(config: &KafkaConfig) -> Result<Self> {
-        use rdkafka::config::ClientConfig;
-        use rdkafka::consumer::Consumer;
-
-        let stats_ctx = scalo::transport::kafka::StatsContext::new();
-
-        let mut client_config = ClientConfig::new();
-        client_config.set("bootstrap.servers", config.brokers.join(","));
-        // Separate group so this consumer doesn't steal partitions
-        client_config.set("group.id", format!("{}-stats", config.group_id));
-        client_config.set("security.protocol", &config.security_protocol);
-        client_config.set("statistics.interval.ms", "5000");
-        client_config.set("enable.auto.commit", "false");
-
-        if let Some(ref mechanism) = config.sasl_mechanism {
-            client_config.set("sasl.mechanism", mechanism);
-        }
-        if let Some(ref user) = config.sasl_username {
-            client_config.set("sasl.username", user);
-        }
-        if let Some(ref pass) = config.sasl_password {
-            client_config.set("sasl.password", pass.expose());
-        }
-        // Same private-CA trust as the consumer transport. Without it a broker
-        // on a private CA fails this sidecar's TLS handshake and every
-        // `rdkafka_*` metric disappears behind one non-fatal warn line.
-        if let Some(ref ca) = config.ssl_ca_location {
-            client_config.set("ssl.ca.location", ca);
-        }
-
-        let consumer: rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext> =
-            client_config
-                .create_with_context(stats_ctx)
-                .map_err(|e| Error::transport_with("stats consumer creation failed", e))?;
-
-        // Subscribe to same topics so we get partition-level lag stats. An
-        // empty list is auto-discovery, which this sidecar does not run: it
-        // still reports the global and per-broker stats, without per-partition
-        // lag. `position_lag()` reads the main consumer, so the KEDA signal is
-        // unaffected either way.
-        if config.topics.is_empty() {
-            info!("Kafka topics are discovered, so the stats sidecar reports no per-partition lag");
-        } else {
-            let topic_refs: Vec<&str> = config.topics.iter().map(String::as_str).collect();
-            consumer
-                .subscribe(&topic_refs)
-                .map_err(|e| Error::transport_with("stats subscribe failed", e))?;
-        }
-
-        let consumer = std::sync::Arc::new(consumer);
-
-        // The task holds a weak reference, so the consumer leaves its group when
-        // the emitter drops, not at runtime teardown after the broker has gone.
-        let consumer_bg = std::sync::Arc::downgrade(&consumer);
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let Some(consumer) = consumer_bg.upgrade() else {
-                    return;
-                };
-                // poll triggers internal librdkafka callbacks including stats
-                let _ = consumer.poll(std::time::Duration::from_millis(0));
-                consumer.context().emit_prometheus_metrics();
-            }
-        });
-
-        info!("Kafka stats emitter started (statistics.interval.ms=5000)");
-
-        Ok(Self { consumer, task })
-    }
-
-    /// Get the current metrics snapshot.
-    #[must_use]
-    pub fn get_metrics(&self) -> scalo::transport::kafka::KafkaMetrics {
-        self.consumer.context().get_metrics()
-    }
-
-    /// Get total consumer lag across all partitions.
-    #[must_use]
-    pub fn total_lag(&self) -> i64 {
-        scalo::transport::kafka::total_consumer_lag(&self.consumer.context().get_metrics())
-    }
-}
-
 /// Convert local config to the scalo transport config.
 ///
 /// Public because the DLQ producer rides the SAME conversion as the consumer
@@ -367,7 +247,8 @@ impl KafkaStatsEmitter {
 pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
     // Force librdkafka statistics on so `position_lag()` populates -- the
     // unified ScalingPressure's Kafka inbound term and the
-    // `dfe_archiver_kafka_lag` gauge both read it. scalo
+    // `dfe_archiver_kafka_lag` gauge both read it, and the same statistics
+    // callback publishes the `rdkafka_*` gauges. scalo
     // already defaults this to 5000ms when unset, but we set it EXPLICITLY (as
     // a highest-priority override) so a future profile/default change can never
     // silently flip it to 0 and zero the lag signal.
