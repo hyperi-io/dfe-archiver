@@ -1796,6 +1796,7 @@ impl KafkaFixture {
     pub fn committed(&self, group: &str, topic: &str) -> Option<i64> {
         use rdkafka::consumer::{BaseConsumer, Consumer};
         use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+        use rdkafka::types::RDKafkaErrorCode;
 
         let consumer: BaseConsumer = self
             .client()
@@ -1805,9 +1806,31 @@ impl KafkaFixture {
             .expect("kafka consumer");
         let mut wanted = TopicPartitionList::new();
         wanted.add_partition(topic, 0);
-        let committed = consumer
-            .committed_offsets(wanted, Duration::from_secs(10))
-            .expect("committed offsets");
+        // A group coordinator that has not loaded yet answers at once with one
+        // of these three codes, so only they are retried, up to the deadline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let committed = loop {
+            match consumer.committed_offsets(wanted.clone(), Duration::from_secs(10)) {
+                Err(e)
+                    if std::time::Instant::now() < deadline
+                        && matches!(
+                            e.rdkafka_error_code(),
+                            Some(
+                                RDKafkaErrorCode::NotCoordinator
+                                    | RDKafkaErrorCode::CoordinatorLoadInProgress
+                                    | RDKafkaErrorCode::CoordinatorNotAvailable
+                            )
+                        ) =>
+                {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                result => {
+                    break result.unwrap_or_else(|e| {
+                        panic!("committed offsets of {group} on {topic}: {e}")
+                    });
+                }
+            }
+        };
         committed
             .elements_for_topic(topic)
             .first()
