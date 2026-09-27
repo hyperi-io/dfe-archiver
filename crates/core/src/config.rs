@@ -9,6 +9,7 @@
 use crate::buffer::DEFAULT_SPOOL_DIR;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use scalo::config::sensitive::SensitiveString;
+use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
 pub use scalo::config::sensitive;
@@ -26,15 +27,14 @@ pub use scalo::dlq::DlqConfig;
 ///
 /// ## Hot-reload behavior
 ///
-/// **Hot-reloaded**, because the pipeline re-reads them from the shared config:
-/// - `kafka.batch_size` — once per receive
-/// - `buffer.backpressure_pause_secs` — on each backpressure pause
+/// **Hot-reloaded**, because the pipeline re-reads it from the shared config:
+/// - `kafka.batch_size` -- once per receive
 ///
-/// **Requires pod restart** — everything else. `Archiver` snapshots the config
+/// **Requires pod restart** -- everything else. `Archiver` snapshots the config
 /// at construction into `startup_config`, so a reload of `transport`,
-/// `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
-/// the `buffer.*` flush thresholds is accepted and validated but does not reach
-/// the running pipeline. `restart_required_changes` names those sections, and
+/// `kafka.*`, `grpc.*`, `archive.*`, `buffer.*`, `routing.*`, `compression.*`
+/// or `dlq.*` is accepted and validated but does not reach the running
+/// pipeline. `restart_required_changes` names those sections, and
 /// the reloader warns instead of reporting a reload.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -102,11 +102,53 @@ fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
 }
 
+/// Roll interval when none is configured and offsets are held: at 10k
+/// records/s that keeps about 96 MB of held offsets per pod.
+pub const HELD_OFFSETS_ROLL_INTERVAL_SECS: u64 = 300;
+
+/// Roll interval when none is configured and no offset waits on a file.
+pub const DEFAULT_ROLL_INTERVAL_SECS: u64 = 3600;
+
+/// A roll interval above this, with offsets held, is warned about at startup.
+pub const HELD_OFFSETS_ROLL_WARN_SECS: u64 = 900;
+
+/// Approximate memory each held record costs: scalo's offset tracking plus the
+/// archive writer's own copy.
+pub const HELD_OFFSET_BYTES: u64 = 32;
+
 impl Config {
     /// Whether records arrive on the Push listener rather than a broker.
     #[must_use]
     pub fn is_direct(&self) -> bool {
         self.transport == TRANSPORT_GRPC
+    }
+
+    /// Whether the Kafka consumer holds each offset until the archive file
+    /// holding its record completes.
+    #[must_use]
+    pub fn holds_offsets(&self) -> bool {
+        !self.is_direct() && self.kafka.acknowledgements.enabled
+    }
+
+    /// The roll interval in force: `archive.roll_interval_secs` when set,
+    /// otherwise a default short enough to bound held-offset memory.
+    #[must_use]
+    pub fn roll_interval_secs(&self) -> u64 {
+        self.archive
+            .roll_interval_secs
+            .unwrap_or(if self.holds_offsets() {
+                HELD_OFFSETS_ROLL_INTERVAL_SECS
+            } else {
+                DEFAULT_ROLL_INTERVAL_SECS
+            })
+    }
+
+    /// The roll interval when offsets are held for longer than
+    /// [`HELD_OFFSETS_ROLL_WARN_SECS`], or `None` when it needs no warning.
+    #[must_use]
+    pub fn long_held_roll_interval(&self) -> Option<u64> {
+        let secs = self.roll_interval_secs();
+        (self.holds_offsets() && secs > HELD_OFFSETS_ROLL_WARN_SECS).then_some(secs)
     }
 
     /// Why this configuration gives the archiver nothing to do, or `None` when
@@ -157,6 +199,14 @@ pub struct GrpcConfig {
 
     /// Archive destination key for a record whose sender set no routing key.
     pub default_topic: String,
+
+    /// The listener answers each push once its records are queued, with this
+    /// on or off: a record is released only when its archive file completes, at
+    /// the roll interval, long after any sender's deadline. So the archive copy
+    /// on this transport is at-most-once, and `enabled: false` only changes the
+    /// reason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`
+    /// to `acks_disabled`.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for GrpcConfig {
@@ -168,6 +218,7 @@ impl Default for GrpcConfig {
             max_message_size: 16 * 1024 * 1024,
             compression: false,
             default_topic: "default_land".to_string(),
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -231,6 +282,13 @@ pub struct KafkaConfig {
 
     /// Session timeout (ms)
     pub session_timeout_ms: u32,
+
+    /// With `enabled: true` (the default) a record's offset is committed only
+    /// once the archive file holding it is complete in the store, so a kill
+    /// re-reads what an open file held: duplicates are possible, loss is not.
+    /// With `enabled: false` offsets are committed as records are received,
+    /// and a kill loses what the open files and buffers held.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for KafkaConfig {
@@ -253,6 +311,7 @@ impl Default for KafkaConfig {
             batch_size: 10_000,
             max_poll_interval_ms: 300_000,
             session_timeout_ms: 30_000,
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -279,8 +338,13 @@ pub struct ArchiveConfig {
     /// Rolling trigger: final compressed file size in bytes (not inbound data)
     pub roll_size_bytes: u64,
 
-    /// Rolling trigger: interval in seconds
-    pub roll_interval_secs: u64,
+    /// Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
+    /// consumer holds offsets (`transport: kafka` with
+    /// `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
+    /// because every record in an open file keeps about 32 bytes of held
+    /// offset in memory until the file completes. A configured value always
+    /// wins, and one above 900 with offsets held logs a warning at startup.
+    pub roll_interval_secs: Option<u64>,
 
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
     pub multipart_chunk_size: usize,
@@ -335,7 +399,7 @@ impl Default for ArchiveConfig {
             path_template: "{year}/{month}/{day}/{hour}".to_string(),
             file_extension: "jsonl".to_string(),
             roll_size_bytes: 1024 * 1024 * 1024, // 1GB final compressed file size
-            roll_interval_secs: 3600,            // 1 hour
+            roll_interval_secs: None,
             multipart_chunk_size: 8 * 1024 * 1024, // 8MB
             max_writers: 1024,
             s3: None,
@@ -393,24 +457,27 @@ pub struct MinioConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
-    /// Flush when buffer exceeds this size (bytes)
+    /// Flush a destination's in-memory buffer into its archive file once it
+    /// holds this many bytes, plus one record. A ceiling per destination: up
+    /// to 64 destinations buffer at once, and all of them together hold no
+    /// more than a quarter of the memory limit, past which the largest
+    /// buffers flush first.
     pub flush_bytes: usize,
 
     /// Flush when buffer exceeds this age (seconds)
     pub flush_age_secs: u64,
 
-    /// Maximum records per buffer before flush
+    /// Flush a destination's in-memory buffer into its archive file once it
+    /// holds this many records, whatever its size.
     pub flush_records: usize,
 
-    /// Number of concurrent archive writers
+    /// Object-store uploads of closed archive files running at once. Each
+    /// holds four parts of `archive.multipart_chunk_size` in memory. A local
+    /// destination has no uploads, so this does not apply to it.
     pub writer_parallelism: usize,
 
-    /// How long to pause Kafka consumption after a backpressure trigger.
-    /// Lower values cycle faster but burn more CPU when downstream is slow;
-    /// higher values let buffers drain but increase tail latency.
-    pub backpressure_pause_secs: u64,
-
-    /// Tier 2 spool directory, created at startup. Absolute because a relative
+    /// Directory holding `uploads/`, where object-store files are staged until
+    /// the store takes them, created at startup. Absolute because a relative
     /// path resolves under the container WORKDIR, which appuser cannot write.
     pub spool_dir: String,
 }
@@ -418,11 +485,10 @@ pub struct BufferConfig {
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            flush_bytes: 64 * 1024 * 1024, // 64MB
+            flush_bytes: 1024 * 1024, // 1 MiB
             flush_age_secs: 60,
             flush_records: 100_000,
-            writer_parallelism: 4,
-            backpressure_pause_secs: 5,
+            writer_parallelism: 2,
             spool_dir: DEFAULT_SPOOL_DIR.to_string(),
         }
     }
@@ -457,7 +523,9 @@ impl Default for RoutingConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompressionConfig {
-    /// Compression codec: none, zstd, lz4, snappy, gzip
+    /// Compression codec: none, zstd (`.zst`), lz4 (LZ4 frame format, `.lz4`),
+    /// snappy (snappy framing format, `.sz`), gzip (`.gz`). Each flush appends
+    /// one frame or gzip member.
     pub codec: String,
 
     /// Compression level (codec-specific)
@@ -584,7 +652,7 @@ impl Config {
     }
 
     /// Where archives are written, how they are rolled and compressed, where
-    /// the tier-2 spool lives, plus the metrics address and the S3 credentials
+    /// they are staged, plus the metrics address and the S3 credentials
     /// the same operator supplies.
     fn apply_archive_env(&mut self) {
         if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
@@ -640,7 +708,7 @@ impl Config {
 /// Normalisation: infer implied settings after all config sources merge.
 impl Normalize for Config {
     fn normalize(&mut self) {
-        // SASL credentials present → ensure mechanism is set
+        // SASL credentials present -> ensure mechanism is set
         if self.kafka.sasl_username.is_some()
             && self.kafka.sasl_password.is_some()
             && self.kafka.sasl_mechanism.is_none()

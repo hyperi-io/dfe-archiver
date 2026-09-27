@@ -17,7 +17,9 @@ use dfe_archiver_core::Result;
 use dfe_archiver_core::config::Config;
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use scalo::SelfRegulationGovernor;
+use scalo::transport::ack::{DeliveryGuarantee, GuaranteeReason};
 use scalo::transport::filter::FilteredDlqEntry;
+use scalo::transport::{DeliveryStatus, KafkaToken, SinkConfirmation};
 
 use crate::grpc::PushTransportAdapter;
 use crate::kafka::TransportAdapter;
@@ -26,13 +28,23 @@ use crate::kafka::TransportAdapter;
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
 /// can route them onward. The archiver configures no inbound scalo filters, so
-/// `dlq_entries` is empty in practice -- but the no-silent-drop contract is
-/// honoured regardless.
+/// `dlq_entries` and `filtered` are empty in practice -- but the no-silent-drop
+/// contract is honoured regardless.
 pub struct ReceivedBatch {
     /// Passing messages, each carrying its own commit token.
     pub messages: Vec<KafkaMessage>,
+    /// Offsets of records an inbound filter removed, still to be released.
+    pub filtered: Vec<KafkaOffset>,
     /// Inbound-filter DLQ entries carried forward from the transport.
     pub dlq_entries: Vec<FilteredDlqEntry>,
+}
+
+impl ReceivedBatch {
+    /// Whether the block carries nothing to process, dead-letter or release.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty() && self.filtered.is_empty() && self.dlq_entries.is_empty()
+    }
 }
 
 /// The transport records arrive on.
@@ -46,9 +58,8 @@ pub enum SourceTransport {
 impl SourceTransport {
     /// Build the transport the config names.
     ///
-    /// `governor` attaches the self-regulation pause-partitions brake to the
-    /// Kafka consumer. A push source has no broker-side brake -- it sheds
-    /// through the sender's own backpressure -- so the direct form ignores it.
+    /// `governor` is the self-regulation brake: it pauses the Kafka consumer's
+    /// partitions, and makes the Push listener shed pushes with `Unavailable`.
     ///
     /// # Errors
     /// Returns an error when the consumer cannot connect or the listener
@@ -58,7 +69,9 @@ impl SourceTransport {
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
         if config.is_direct() {
-            Ok(Self::Direct(PushTransportAdapter::new(&config.grpc).await?))
+            Ok(Self::Direct(
+                PushTransportAdapter::new(&config.grpc, governor).await?,
+            ))
         } else {
             Ok(Self::Bus(
                 TransportAdapter::new(&config.kafka, governor).await?,
@@ -69,7 +82,8 @@ impl SourceTransport {
     /// Receive a batch.
     ///
     /// # Errors
-    /// Returns an error when the underlying receive fails.
+    /// [`dfe_archiver_core::Error::Shutdown`] once the transport is closed and
+    /// has nothing left to return, or an error when the receive fails otherwise.
     pub async fn recv(&self, max_messages: usize) -> Result<ReceivedBatch> {
         match self {
             Self::Bus(a) => a.recv(max_messages).await,
@@ -77,15 +91,48 @@ impl SourceTransport {
         }
     }
 
-    /// Release processed records. A no-op on the direct form, where the Push
-    /// RPC response is the acknowledgement.
+    /// Release the records `tokens` names with `status`.
+    ///
+    /// On the bus this is the offset commit, up to each partition's lowest
+    /// offset not yet released. A no-op on the direct form, whose listener
+    /// answered each push at enqueue.
     ///
     /// # Errors
     /// Returns an error when the broker commit fails.
-    pub async fn commit(&self, offsets: Vec<KafkaOffset>) -> Result<()> {
+    pub async fn release(&self, tokens: &[KafkaToken], status: DeliveryStatus) -> Result<()> {
         match self {
-            Self::Bus(a) => a.commit(offsets).await,
-            Self::Direct(a) => a.commit(offsets).await,
+            Self::Bus(a) => a.release(tokens, status).await,
+            Self::Direct(_) => Ok(()),
+        }
+    }
+
+    /// Whether a release reaches the source, so the caller has to hold each
+    /// record's offset until the record is written. False on the direct form
+    /// and on a Kafka consumer that commits at receipt.
+    #[must_use]
+    pub fn holds_offsets(&self) -> bool {
+        match self {
+            Self::Bus(a) => a.holds_offsets(),
+            Self::Direct(_) => false,
+        }
+    }
+
+    /// Records handed out and not yet released: zero unless offsets are held.
+    #[must_use]
+    pub fn held_records(&self) -> u64 {
+        match self {
+            Self::Bus(a) => a.held_records(),
+            Self::Direct(_) => 0,
+        }
+    }
+
+    /// The delivery guarantee of the pipeline from this source into a sink
+    /// that confirms as `sink` does.
+    #[must_use]
+    pub fn guarantee(&self, sink: SinkConfirmation) -> (DeliveryGuarantee, GuaranteeReason) {
+        match self {
+            Self::Bus(a) => a.guarantee(sink),
+            Self::Direct(a) => a.guarantee(),
         }
     }
 
@@ -98,18 +145,20 @@ impl SourceTransport {
         }
     }
 
-    /// Per-pod assigned-partition consumer lag, or `None` on the direct form:
-    /// a push source keeps no backlog this pod can read, so the KEDA composite
+    /// Records past this pod's read position, or `None` on the direct form: a
+    /// push source keeps no backlog this pod can read, so the KEDA composite
     /// falls back to its other components rather than reading a false zero.
     #[must_use]
-    pub fn assigned_lag(&self) -> Option<i64> {
+    pub fn position_lag(&self) -> Option<i64> {
         match self {
-            Self::Bus(a) => Some(a.assigned_lag()),
+            Self::Bus(a) => Some(a.position_lag()),
             Self::Direct(_) => None,
         }
     }
 
-    /// Stop the transport.
+    /// Stop the transport. The Push listener stops accepting and keeps what it
+    /// already answered for [`recv`](Self::recv). The Kafka consumer stops
+    /// fetching and can still commit.
     ///
     /// # Errors
     /// Returns an error when the underlying close fails.

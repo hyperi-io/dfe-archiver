@@ -35,8 +35,9 @@ chosen by `transport.rs`, and the object-store backends behind `create_backend`
 (`storage.rs`): file, S3, GCS, Azure Blob and MinIO.
 
 **`crates/archiver`** (`dfe-archiver`) -- the binary and the pipeline that joins
-the other two. `archiver.rs` is the loop (receive, route, buffer, write,
-commit), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader,
+the other two. `archiver.rs` is the loop (receive, route, buffer, write, hand
+closed object-store files to background upload tasks, and release once a file
+is durable), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader,
 `metrics.rs` the Prometheus surface, and `contract.rs` the deployment contract
 the checked-in `Dockerfile` and the Helm chart are generated from.
 
@@ -45,6 +46,10 @@ the checked-in `Dockerfile` and the Helm chart are generated from.
 - `core` depends on no other workspace crate.
 - `core` has no metrics dependency: it counts what it did and the caller
   records it, which is why `ArchiveWriter::take_files_opened` exists.
+- `core` never releases an offset or uploads a file: the writer settles the
+  offsets held on a file as it closes, or hands them to the file's pending
+  upload, and the caller drains both with `ArchiveWriter::take_settled`,
+  uploads, and releases through the transport.
 - `io` depends on `core` only, never on `archiver`.
 - `archiver` is the only crate with a binary and the only reader of the
   deployment contract, so the Dockerfile and the chart have one source.
@@ -55,9 +60,8 @@ the checked-in `Dockerfile` and the Helm chart are generated from.
 ## Build graph
 
 `crates/io` is the cold-build bottleneck, and none of it is our code: it carries
-`aws-sdk-s3` (with `aws-lc-sys`, which compiles C), `object_store` with the
-aws/gcp/azure features, and `rdkafka-sys`, which builds librdkafka through
-cmake. The three workspace crates re-check in seconds against a warm
+`object_store` with the aws/gcp/azure features and `rdkafka-sys`, which builds
+librdkafka through cmake. The three workspace crates re-check in seconds against a warm
 dependency graph.
 
 Change propagation follows the arrows: a `core` edit rebuilds all three, an `io`

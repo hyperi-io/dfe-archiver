@@ -18,12 +18,12 @@ contract).
 ## Features
 
 - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
-- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none
+- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none, each in its standard framed format (LZ4 frames `.lz4`, the snappy framing format `.sz`, gzip members `.gz`, zstd frames `.zst`), so the codec's own tools read an archive file whole
 - **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
-- **At-least-once delivery**: Kafka offset commit only after successful archive write
-- **Memory-capped**: Tiered buffering with configurable limits
-- **Disk protection**: Backpressure when spool exceeds limits or disk space is low
+- **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete
+- **Memory-capped**: every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first
+- **Disk-bounded**: intake pauses as staged uploads near 8 GiB, and a full disk holds intake rather than dropping records
 
 ## Architecture
 
@@ -32,7 +32,7 @@ flowchart LR
     K[("Kafka<br/>batch recv, 10K msgs")] --> BM["Buffer Manager<br/>per-destination buffering"]
     BM --> AW["Archive Writer<br/>compressed rolling files"]
     AW --> ST["Storage backend<br/>File / S3 / GCS / Azure / MinIO"]
-    ST -. write ok .-> C["Kafka offset commit<br/>at-least-once"]
+    ST -. file complete .-> C["Kafka offset commit<br/>at-least-once"]
 ```
 
 The workspace is three crates -- `core`, `io` and `archiver` -- described under
@@ -46,11 +46,13 @@ Handles high destination cardinality (e.g., 10,000+ orgs) without exhausting mem
 
 ```mermaid
 flowchart TB
-    R["incoming records"] --> T1["Tier 1: hot buffers<br/>64 destinations x 1MB = 64MB"]
-    T1 -->|LRU eviction| T2["Tier 2: disk spool<br/>bounded by max_spool_bytes (10GB default)"]
-    T2 -->|batch flush| AW["Archive writers<br/>8 concurrent, semaphore-controlled"]
-    T2 -. spool over limit or low disk .-> BP["Backpressure<br/>pause Kafka consume"]
+    R["incoming records"] --> HB["Hot buffers, in memory<br/>64 destinations at once<br/>a quarter of the memory limit together"]
+    HB -->|"flush_bytes, flush_records, age,<br/>LRU eviction or the cap"| AW["Archive writers<br/>one per destination, up to max_writers (1024)"]
+    AW -->|file closes| ST["Local file synced, or staged file uploaded<br/>writer_parallelism uploads at once"]
+    ST -. held records or staged bytes near their caps .-> BP["Intake pauses<br/>Kafka partitions paused"]
 ```
+
+Nothing spools to disk ahead of the writers: the only local files are the archive files, and the staged copies of object-store files until the store takes them.
 
 ## Quick Start
 
@@ -138,19 +140,23 @@ kafka:
   sasl_mechanism: SCRAM-SHA-256
   sasl_username: archiver
   sasl_password: ${KAFKA_PASSWORD}  # env var substitution
+  acknowledgements:
+    enabled: true              # false commits at receipt
 
 archive:
   destination: s3://my-bucket/archives
   # Under the routed destination; {year} {month} {day} {hour} {minute}
-  # {timestamp} {seq} are the only placeholders, anything else is refused
+  # {timestamp} {seq} are the only placeholders, anything else is refused.
+  # Each file name ends -<seq>-<writer id>.
   path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824  # 1GB (final compressed size)
-  roll_interval_secs: 3600     # 1 hour
+  roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
 
 buffer:
-  flush_bytes: 67108864        # 64MB
+  flush_bytes: 1048576         # 1 MiB: a destination's buffer flushes into its file at this size
+  flush_records: 100000        # ... or at this many records, whichever comes first
   flush_age_secs: 60
-  writer_parallelism: 4
+  writer_parallelism: 2        # object-store uploads at once, each holding 4 x multipart_chunk_size
 
 compression:
   codec: zstd
@@ -170,12 +176,11 @@ or file polling (5-second interval).
 
 **Hot-reloaded (takes effect on next batch):**
 - `kafka.batch_size` - re-read once per receive
-- `buffer.backpressure_pause_secs` - re-read on each backpressure pause
 
 **Requires pod restart** - everything else. The pipeline snapshots the config at
-startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `routing.*`,
-`compression.*`, `dlq.*` and the rest of `buffer.*` (the flush thresholds
-included) keep their startup values until the process restarts. A reload of one
+startup, so `transport`, `kafka.*`, `grpc.*`, `archive.*`, `buffer.*`,
+`routing.*`, `compression.*` and `dlq.*` keep their startup values until the
+process restarts. A reload of one
 of those logs a warning naming the sections that changed, and the security event
 says a restart is needed rather than reporting a reload that reached nothing.
 
@@ -222,25 +227,38 @@ archive:
 
 ## At-Least-Once Delivery
 
-The archiver guarantees at-least-once delivery:
+On `kafka`, a record's offset is committed only once the archive file holding it is durable: the store confirmed the upload, or the local file and its directories synced to disk. An object-store file is written to `<buffer.spool_dir>/uploads` and uploaded whole when it rolls -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first -- so the store is never on the write path. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
 
-1. Messages are consumed from Kafka in batches
-2. Messages are buffered per-destination
-3. Buffers are compressed and written to storage
-4. **Only after successful storage write**, Kafka offsets are committed
+A failed upload keeps the staged file and its held offsets, and retries in the background with exponential backoff and jitter, from 0.5 s up to 60 s between attempts, until the store takes it. Each attempt is a fresh upload, and a failed one is aborted so it leaves no parts in the store. An outage of any length costs disk and consumer lag, never records. A staged copy that cannot be read back is moved to `<buffer.spool_dir>/uploads/quarantine` and its records are read again after a restart. Intake pauses (the Kafka partitions, through the self-regulation gate) as held records near a quarter of the memory limit at 32 bytes each, or staged files near 8 GiB. A store outage becomes consumer lag, not memory or disk growth. A refusal the store gives for the object itself -- a key past the 1024-byte limit, an entity too large -- is permanent. The file's records then go to the DLQ, each as its own entry, and only with the DLQ off, or for a record too large for any DLQ backend, are they dropped, counted in `messages_dropped_total` with the reason logged. `messages_archived_total` counts records when the store confirms their file, `messages_written_total` when they go into an open file.
 
-If the archiver crashes:
-- Before write: Messages are re-consumed from Kafka (no data loss)
-- After write, before commit: Duplicates on restart (at-least-once semantics)
+Each held record costs about 32 bytes of memory until its file is durable. So while offsets are held an unset `roll_interval_secs` is 300 rather than 3600: at 10k records/s that is 96 MB instead of 1.15 GB. A configured value always wins, and one above 900 logs a startup warning.
+
+If the archiver is killed, every record not yet in a durable file is read again after the restart: up to one roll interval of intake plus whatever was still uploading, as duplicates, never as loss. The restart removes the staged files the killed process left, since their records are read again.
+
+A local write that fails in a way that can clear -- a full or failing disk -- is held and retried with backoff and jitter, its batch and offsets kept, and the archiver receives nothing more until it lands. A disk that stays broken shows as consumer lag, not lost records. Once shutdown begins, a write still failing gets 10 s, then its records are left for the restart to read again.
+
+A batch refused for good -- by the store, or by the codec -- goes to the DLQ one record per entry, and only a write the DLQ confirms releases a record's offset. A record is dropped with its reason, counted in `messages_dropped_total`, if the DLQ is off or the record alone is too large for any DLQ backend once base64 grows it by a third. A DLQ write that fails, or a file that cannot complete, holds the commit below it, and nothing reads it again while the process runs, so the archiver drains and exits non-zero and the restart reads it again.
+
+Expression routing never parses a record nested past 64 levels, because sonic-rs recurses once per level with no limit and about 20,000 levels overflow a 2 MiB worker stack. The record goes to the DLQ as it arrived, under its topic, with the reason `payload nesting exceeds the maximum parse depth of 64`, and with the DLQ off it is dropped and counted in `messages_dropped_total{reason="too_deep"}`.
+
+`kafka.acknowledgements.enabled: false` commits at receipt instead, so a kill loses what the open files and buffers held. A record there that is written nowhere -- its file could not complete, or the DLQ could not take it -- is counted in `messages_dropped_total{reason="unreplayable"}`, and so is one on `grpc`.
+
+On `grpc` the listener answers each push once its records are queued: a record is released only when its file is durable, long after any sender's deadline. So the archive copy on the direct path is at-most-once -- a kill loses what the queue and the open files held. A graceful stop still writes every record it answered: the listener closes first, its queue is drained into the files, then the files complete and upload. The drain gives uploads 20 s. A file still uploading then keeps its staged copy: the restart uploads it on `grpc` or with acknowledgements off, and removes it on `kafka`, where its records are read again. A staged file no process completed is moved to quarantine rather than uploaded.
+
+Every file name carries a component unique to the writer, so two replicas writing one destination in one window never complete an upload onto the same key.
+
+`pipeline_delivery_guarantee{guarantee, reason}` reads 1 for the guarantee in force: `at_least_once`/`confirmed` on `kafka` into an object store, `at_least_once_local`/`sink_confirms_locally` on `kafka` into a local path, and `best_effort` with `acks_disabled` or, on `grpc`, `sink_cannot_confirm`.
 
 ## Disk Protection
 
-The archiver protects against disk exhaustion:
+The only files on local disk are archive files: a local destination's open files, and under `<buffer.spool_dir>/uploads` each object-store file until the store takes it.
 
-- `max_spool_bytes`: Hard limit on spool size (default 10GB)
-- `min_free_disk_bytes`: Minimum free space to maintain (default 1GB)
+- The archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume.
+- Intake pauses as staged bytes near 8 GiB, under the spool volume's 10 GiB `emptyDir` limit, so a store outage becomes consumer lag.
+- The quarantine directory holds at most 1 GiB. A file past it is removed and counted in `staged_files_removed_total{reason="quarantine_full"}`.
+- A local write that fails on a full disk is held and retried, never dropped.
 
-When limits are exceeded, `push()` returns an error (backpressure), causing Kafka consumption to pause until space is freed.
+Neither limit is configured. `staged_bytes` and `uploads_pending` show the disk in use.
 
 ## Metrics
 
@@ -248,9 +266,11 @@ Prometheus metrics at `http://0.0.0.0:9090/metrics` (configurable). Three layers
 
 **Platform** (`dfe_*`): `records_received_total`, `records_delivered_total`, `transport_sent_total`, `scaling_pressure` - auto-emitted by scalo.
 
-**Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend), `BackpressureMetrics`.
+**Metric groups** (`dfe_archiver_*`): `AppMetrics` (received/processed/error counts, memory, config reloads), `BufferMetrics` (bytes, records, flush duration), `ConsumerMetrics` (lag, partitions, rebalances, poll duration), `SinkMetrics` (write duration/errors by backend).
 
-**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `unique_destinations`.
+**Archiver-specific** (`dfe_archiver_*`): `files_created_total`, `files_closed_total`, `archive_roll_total{trigger}`, `writer_evictions_total`, `compression_ratio`, `compression_duration_seconds`, `events_per_second`, `hot_buffers_active`, `hot_buffer_evictions_total`, `unique_destinations`, `routing_fallback_total{field}`, `kafka_commit_errors_total`.
+
+**Archiver delivery** (`dfe_archiver_*`): `messages_written_total`, `messages_archived_total`, `messages_dlq_total`, `messages_dropped_total{reason}` (`refused`, `dlq_too_large`, `too_deep`, `unreplayable`), `uploads_pending`, `staged_bytes`, `staged_files_recovered_total`, `staged_files_quarantined_total{reason}`, `staged_files_removed_total{reason}`, and `pipeline_delivery_guarantee{guarantee, reason}`.
 
 **rdkafka stats** (`rdkafka_*`): `broker_rtt_avg_seconds{broker}`, `topic_partition_consumer_lag{topic,partition}`, `consumer_rebalance_count` - collected via sidecar `StatsContext` consumer.
 
@@ -274,7 +294,7 @@ needs a Docker daemon.
 # Unit, integration and object-store e2e tests
 cargo nextest run
 
-# Adds the Kafka, MinIO and GCS-credential tests, which need a live stack
+# Adds the Kafka, minio:// and GCS-credential tests, which need a live stack
 TEST_MODE=docker cargo nextest run -- --ignored
 
 # The same ignored tests against the remote dev stack
@@ -335,12 +355,11 @@ dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kaf
 |---------|----------------|
 | `hyperi-ci check` | The pre-push gate. `make check` is the same. |
 | `cargo nextest run` | Unit, integration and object-store e2e. Those are not `#[ignore]`d, so it starts Azurite, fake-gcs-server and LocalStack via testcontainers and needs a Docker daemon. |
-| `TEST_MODE=docker cargo nextest run -- --ignored` | Adds the Kafka, MinIO and GCS-credential tests, which need a live stack. `TEST_MODE=remote` runs them against the remote dev stack. |
-| `cargo deny check advisories` | Advisories and yanked crates. Run it by hand and read it. |
+| `TEST_MODE=docker cargo nextest run -- --ignored` | Adds the Kafka, `minio://` and GCS-credential tests, which need a live stack (`docker compose -f docker-compose.dev.yaml up -d`). `TEST_MODE=remote` runs them against the remote dev stack. |
+| `cargo deny check advisories` | Advisories and yanked crates. `quality.rust.audit` and `quality.rust.deny` are `blocking`, so a red advisory fails `hyperi-ci check` and CI too. |
 
-Green says less than it looks, three ways:
+Green says less than it looks, two ways:
 
-- `quality.rust.audit` and `quality.rust.deny` are `warn`, so red advisories leave the run green (#85).
 - the `default` nextest profile sets `retries = 0` deliberately, because hyperi-ci never selects `--profile ci`. A retry there hides a real intermittent. A test pins it.
 - the `push` trigger ignores `docs/**` and `**.md`, so a docs-only push runs nothing. `pull_request` has no such filter.
 
@@ -348,7 +367,7 @@ Green says less than it looks, three ways:
 
 | Don't | Do | Why |
 |-------|----|-----|
-| Commit the Kafka offsets of the batch that just flushed. | Commit a partition only up to the lowest offset still buffered in ANY destination, plus one. | Default routing is expression on `org_id`, so one partition fans out to several buffers. Org B's flush commits past Org A's unflushed records, and an ungraceful exit loses them (#82). |
+| Commit the Kafka offsets of a batch once it is written into a file. | Hold them on the file and release them when it completes. The armed consumer commits each partition up to its lowest offset not yet released. | A file is an upload in progress until it rolls, and a kill abandons it. Default routing is expression on `org_id`, so one partition fans out to several files that complete at different times (#82). |
 | Build a second `MetricsManager` in a test and assert on `render()`. | Share one manager, assert on the delta. | `set_global_recorder` succeeds once per process. Later managers keep the existing recorder and render an empty string. nextest forks per test and hides it, `cargo-llvm-cov` runs one process and does not (#84). |
 | Trust `cargo update -p rustls` to clear the advisory. | `cargo update -p rustls --precise 0.23.45`, then build both arches. | Plain `-p` stops at 0.23.43, still vulnerable, because 0.23.45 needs aws-lc-rs to move too. `--precise` drags `aws-lc-sys` 0.41 to 0.45, which compiles C (#85). |
 | Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |
@@ -360,7 +379,7 @@ Green says less than it looks, three ways:
 
 Inbound:
 
-- **hyperi-io/scalo-rs**, cargo dependency. The workspace declares `scalo = { version = ">=2.12.1, <3" }` and all three crates inherit it, so a scalo release is a range check, a bump and a rebuild.
+- **hyperi-io/scalo-rs**, cargo dependency. The workspace declares one `scalo` range in `[workspace.dependencies]` and all three crates inherit it, so a scalo release is a range check, a bump and a rebuild.
 - **hyperi-io/scalo-rs** again, generator, lockstep. `Dockerfile` comes from `scalo::deployment::generate_dockerfile()` over this repo's contract, so a generator or schema-version change means regenerate and commit the diff.
 
 Outbound -- the repo a change here breaks:

@@ -12,14 +12,21 @@ use dfe_archiver_core::types::{KafkaMessage, KafkaOffset};
 use dfe_archiver_core::{Error, Result};
 use rdkafka::consumer::Consumer;
 use scalo::SelfRegulationGovernor;
-use scalo::transport::{KafkaToken, KafkaTransport, TransportBase, TransportReceiver};
-use tracing::{debug, info, trace};
+use scalo::transport::ack::{DeliveryGuarantee, EffectiveGuarantee, GuaranteeReason};
+use scalo::transport::{
+    DeliveryStatus, KafkaToken, KafkaTransport, SinkConfirmation, TransportBase, TransportError,
+    TransportReceiver,
+};
+use tracing::{debug, info, trace, warn};
 
 use crate::transport::ReceivedBatch;
 
 /// Transport adapter wrapping the scalo Kafka transport
 pub struct TransportAdapter {
     transport: KafkaTransport,
+    /// `kafka.acknowledgements.enabled`: every offset handed out waits for its
+    /// release, rather than being committed at receipt.
+    held: bool,
 }
 
 impl TransportAdapter {
@@ -33,24 +40,31 @@ impl TransportAdapter {
     /// `governor` is `None` (self-regulation disabled), construction is
     /// byte-identical to before.
     ///
+    /// With `acknowledgements.enabled` the transport is armed before its first
+    /// receive: it then tracks every offset it hands out and commits each
+    /// partition only up to its lowest offset not yet released.
+    ///
     /// # Errors
     /// Returns error if connection fails
     pub async fn new(
         config: &KafkaConfig,
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
+        let held = config.acknowledgements.enabled;
         info!(
             brokers = %config.brokers.join(","),
             group_id = %config.group_id,
             topics = ?config.topics,
             governed = governor.is_some(),
+            acknowledgements = held,
             "Creating Kafka transport via scalo"
         );
 
         let hs_config = convert_config(config);
         let transport = KafkaTransport::new(&hs_config)
             .await
-            .map_err(|e| Error::transport_with("transport creation failed", e))?;
+            .map_err(|e| Error::transport_with("transport creation failed", e))?
+            .with_acknowledgements(config.acknowledgements);
 
         // Attach the self-regulation pause-partitions gate over the runtime's
         // shared pressure (the gate is evaluated automatically inside `recv`).
@@ -59,27 +73,40 @@ impl TransportAdapter {
             None => transport,
         };
 
-        Ok(Self { transport })
+        if held && let Some(control) = transport.ack_control() {
+            control.arm();
+        }
+
+        Ok(Self { transport, held })
     }
 
     /// Receive a batch from Kafka as a `WorkBatch`, reshaped into the archiver's
     /// per-message `KafkaMessage` model.
     ///
-    /// The transport yields a `WorkBatch<KafkaToken>` whose `records` and
-    /// `commit_tokens` are 1:1 and in the same order (one Kafka record produces
-    /// one record + one commit token), so they are zipped back into individual
-    /// `KafkaMessage`s -- preserving the per-message offset tracking the tiered
-    /// buffer relies on. Inbound-filter DLQ entries are surfaced for the caller
-    /// to route onward.
+    /// The transport yields a `WorkBatch<KafkaToken>` whose first
+    /// `records.len()` commit tokens pair 1:1 with the records, in order, and
+    /// whose remaining tokens belong to records an inbound filter removed.
+    /// The pairs are zipped back into individual `KafkaMessage`s -- preserving
+    /// the per-message offset tracking the tiered buffer relies on -- and the
+    /// filtered tokens come back in `filtered`, so a held transport can release
+    /// them. Inbound-filter DLQ entries are surfaced for the caller to route
+    /// onward.
+    ///
+    /// With acknowledgements off, the whole batch is committed here, before the
+    /// caller sees it.
     ///
     /// # Errors
-    /// Returns error if receive fails
+    /// [`Error::Shutdown`] once the transport is closed, or a transport error
+    /// when the receive fails otherwise.
     pub async fn recv(&self, max_messages: usize) -> Result<ReceivedBatch> {
         let batch = self
             .transport
             .recv(max_messages)
             .await
-            .map_err(|e| Error::transport_with("recv failed", e))?;
+            .map_err(|e| match e {
+                TransportError::Closed => Error::Shutdown,
+                other => Error::transport_with("recv failed", other),
+            })?;
 
         debug!(
             count = batch.records.len(),
@@ -87,13 +114,22 @@ impl TransportAdapter {
             "Received batch from Kafka"
         );
 
-        // `records[i]` corresponds to `commit_tokens[i]` (the transport builds
-        // both in the same order from each Kafka record). Zip them back into the
-        // per-message model the buffer uses.
+        if !self.held
+            && !batch.commit_tokens.is_empty()
+            && let Err(e) = self
+                .transport
+                .release(&batch.commit_tokens, DeliveryStatus::Delivered)
+                .await
+        {
+            // The records are in hand, and a missed commit only re-reads them after a restart.
+            warn!(error = %e, "Commit at receipt failed");
+        }
+
+        let mut tokens = batch.commit_tokens.into_iter();
         let messages: Vec<KafkaMessage> = batch
             .records
             .into_iter()
-            .zip(batch.commit_tokens)
+            .zip(tokens.by_ref())
             .map(|(record, token)| {
                 let topic = CompactString::from(token.topic.as_ref());
                 let partition = token.partition;
@@ -116,53 +152,76 @@ impl TransportAdapter {
                 )
             })
             .collect();
+        let filtered = if self.held {
+            tokens.map(KafkaOffset::new).collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(ReceivedBatch {
             messages,
+            filtered,
             dlq_entries: batch.dlq_entries,
         })
     }
 
-    /// Commit offsets for processed messages
+    /// Release the records `tokens` names with `status`.
     ///
-    /// IMPORTANT: Only call this AFTER data is confirmed written to storage.
-    /// This is the "release" point for at-least-once delivery.
+    /// Held, a release commits each partition up to its lowest offset not yet
+    /// released, and an `Errored` release keeps its offsets below every later
+    /// commit until the process restarts. With acknowledgements off the batch
+    /// was committed at receipt, so this does nothing.
     ///
     /// # Errors
-    /// Returns error if commit fails
-    pub async fn commit(&self, offsets: Vec<KafkaOffset>) -> Result<()> {
-        if offsets.is_empty() {
+    /// Returns error if the commit the release allows fails.
+    pub async fn release(&self, tokens: &[KafkaToken], status: DeliveryStatus) -> Result<()> {
+        if !self.held || tokens.is_empty() {
             return Ok(());
         }
-
-        let count = offsets.len();
-        let tokens: Vec<KafkaToken> = offsets.into_iter().map(KafkaOffset::into_token).collect();
-
         self.transport
-            .commit(&tokens)
+            .release(tokens, status)
             .await
-            .map_err(|e| Error::transport_with("commit failed", e))?;
-
-        debug!(count, "Committed offsets to Kafka");
+            .map_err(|e| Error::transport_with("release failed", e))?;
+        debug!(count = tokens.len(), ?status, "Released Kafka offsets");
         Ok(())
     }
 
-    /// Total consumer lag summed over THIS pod's ASSIGNED partitions.
-    ///
-    /// rdkafka reports `consumer_lag` only for assigned partitions, so the sum
-    /// is inherently PER-POD and scale-invariant: as the consumer group grows,
-    /// each pod's assigned lag falls. The archiver feeds it as the `kafka_lag`
-    /// component of the unified `ScalingPressure` engine (the Kafka inbound
-    /// pressure term KEDA scales on).
-    ///
-    /// Requires librdkafka statistics on the consumer (a non-zero
-    /// `statistics.interval.ms`); scalo's `KafkaTransport` defaults it to
-    /// 5000ms, so the stats snapshot populates without extra config. With stats
-    /// disabled the snapshot is empty and this returns 0 (the Kafka term then
-    /// contributes 0).
+    /// Whether released offsets reach the commit, so the caller has to hold
+    /// each record's offset until the record is written.
     #[must_use]
-    pub fn assigned_lag(&self) -> i64 {
-        scalo::transport::kafka::total_consumer_lag(&self.transport.stats()).max(0)
+    pub fn holds_offsets(&self) -> bool {
+        self.held
+    }
+
+    /// Records handed out and not yet released.
+    #[must_use]
+    pub fn held_records(&self) -> u64 {
+        if !self.held {
+            return 0;
+        }
+        self.transport
+            .ack_control()
+            .map_or(0, |control| control.held().count)
+    }
+
+    /// Records past this pod's read position, summed over its partitions.
+    ///
+    /// The committed-offset lag grows by up to a roll interval of intake while
+    /// open files hold their commit, so the `kafka_lag` scaling term reads
+    /// this instead: it counts unread backlog whatever the commit policy.
+    /// Requires librdkafka statistics on the consumer, which `convert_config`
+    /// forces on.
+    #[must_use]
+    pub fn position_lag(&self) -> i64 {
+        self.transport.total_position_lag().max(0)
+    }
+
+    /// The delivery guarantee this source gives into a sink that confirms as
+    /// `sink` does.
+    #[must_use]
+    pub fn guarantee(&self, sink: SinkConfirmation) -> (DeliveryGuarantee, GuaranteeReason) {
+        let effective = EffectiveGuarantee::of(self.transport.ack_control(), sink);
+        (effective.guarantee, effective.reason)
     }
 
     /// Check if transport is healthy
@@ -186,10 +245,11 @@ impl TransportAdapter {
 /// and emits them as Prometheus metrics.
 ///
 /// Creates a lightweight `BaseConsumer` with `statistics.interval.ms=5000`
-/// in a separate consumer group (`{group_id}-stats`). A background tokio
-/// task polls the consumer every 5s (triggering stats callbacks) and calls
-/// `emit_prometheus_metrics()` to push rdkafka internal stats to the global
-/// Prometheus recorder.
+/// in a separate consumer group (`{group_id}-stats`). While the emitter lives,
+/// a background tokio task polls the consumer every 5s (triggering stats
+/// callbacks) and calls `emit_prometheus_metrics()` to push rdkafka internal
+/// stats to the global Prometheus recorder. Dropping the emitter closes the
+/// consumer and ends the task.
 ///
 /// Emitted metrics (per DFE metrics standard, `rdkafka_` prefix):
 /// - `rdkafka_global_msg_cnt` / `rdkafka_global_msg_size_bytes`
@@ -200,7 +260,14 @@ impl TransportAdapter {
 pub struct KafkaStatsEmitter {
     consumer:
         std::sync::Arc<rdkafka::consumer::BaseConsumer<scalo::transport::kafka::StatsContext>>,
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// A dropped `JoinHandle` detaches its task, so the poll task is aborted here.
+impl Drop for KafkaStatsEmitter {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl KafkaStatsEmitter {
@@ -246,7 +313,7 @@ impl KafkaStatsEmitter {
         // Subscribe to same topics so we get partition-level lag stats. An
         // empty list is auto-discovery, which this sidecar does not run: it
         // still reports the global and per-broker stats, without per-partition
-        // lag. `assigned_lag()` reads the main consumer, so the KEDA signal is
+        // lag. `position_lag()` reads the main consumer, so the KEDA signal is
         // unaffected either way.
         if config.topics.is_empty() {
             info!("Kafka topics are discovered, so the stats sidecar reports no per-partition lag");
@@ -259,24 +326,25 @@ impl KafkaStatsEmitter {
 
         let consumer = std::sync::Arc::new(consumer);
 
-        // Background task: poll consumer (triggers stats callbacks) then emit metrics
-        let consumer_bg = std::sync::Arc::clone(&consumer);
+        // The task holds a weak reference, so the consumer leaves its group when
+        // the emitter drops, not at runtime teardown after the broker has gone.
+        let consumer_bg = std::sync::Arc::downgrade(&consumer);
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
+                let Some(consumer) = consumer_bg.upgrade() else {
+                    return;
+                };
                 // poll triggers internal librdkafka callbacks including stats
-                let _ = consumer_bg.poll(std::time::Duration::from_millis(0));
-                consumer_bg.context().emit_prometheus_metrics();
+                let _ = consumer.poll(std::time::Duration::from_millis(0));
+                consumer.context().emit_prometheus_metrics();
             }
         });
 
         info!("Kafka stats emitter started (statistics.interval.ms=5000)");
 
-        Ok(Self {
-            consumer,
-            _task: task,
-        })
+        Ok(Self { consumer, task })
     }
 
     /// Get the current metrics snapshot.
@@ -297,9 +365,9 @@ impl KafkaStatsEmitter {
 /// Public because the DLQ producer rides the SAME conversion as the consumer
 /// transport -- dead-letters must land on the broker the data came from.
 pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
-    // Force librdkafka statistics on so `transport.stats()` (and hence
-    // `assigned_lag()`) populates -- the unified ScalingPressure's Kafka
-    // inbound term and the `dfe_archiver_kafka_lag` gauge both read it. scalo
+    // Force librdkafka statistics on so `position_lag()` populates -- the
+    // unified ScalingPressure's Kafka inbound term and the
+    // `dfe_archiver_kafka_lag` gauge both read it. scalo
     // already defaults this to 5000ms when unset, but we set it EXPLICITLY (as
     // a highest-priority override) so a future profile/default change can never
     // silently flip it to 0 and zero the lag signal.
@@ -401,5 +469,45 @@ impl MemoryTransportAdapter {
 impl Default for MemoryTransportAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rdkafka::ClientContext;
+    use rdkafka::statistics::{Partition, Statistics, Topic};
+    use scalo::transport::kafka::{StatsContext, total_consumer_lag};
+
+    /// The lag behind `position_lag` counts records past the read position, so
+    /// the records an open file holds uncommitted are never read as backlog.
+    #[test]
+    fn position_lag_counts_unread_records_never_held_ones() {
+        // Committed at 10, read to 60, 100 on the broker: 50 held, 40 unread.
+        let partition = Partition {
+            partition: 0,
+            committed_offset: 10,
+            app_offset: 60,
+            hi_offset: 100,
+            ls_offset: 100,
+            consumer_lag: 90,
+            ..Partition::default()
+        };
+        let mut topic = Topic {
+            topic: "events".to_string(),
+            ..Topic::default()
+        };
+        topic.partitions.insert(0, partition);
+        let mut stats = Statistics::default();
+        stats.topics.insert("events".to_string(), topic);
+
+        let context = StatsContext::new();
+        context.stats(stats);
+
+        assert_eq!(context.total_position_lag(), 40);
+        assert_eq!(
+            total_consumer_lag(&context.get_metrics()),
+            90,
+            "the committed lag counts the held records as backlog"
+        );
     }
 }

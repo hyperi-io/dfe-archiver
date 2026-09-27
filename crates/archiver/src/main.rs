@@ -20,6 +20,7 @@ use dfe_archiver::config::{
 use dfe_archiver::contract::deployment_contract;
 use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
 use dfe_archiver::{Archiver, restart_required_changes};
+use dfe_archiver_core::config::HELD_OFFSET_BYTES;
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
 use scalo::deployment::generate_chart;
 use scalo::logger::security;
@@ -119,6 +120,14 @@ impl ServiceApp for App {
             compression_level = config.compression.level,
             "Configuration loaded"
         );
+        if let Some(roll_interval_secs) = config.long_held_roll_interval() {
+            warn!(
+                roll_interval_secs,
+                bytes_per_held_record = HELD_OFFSET_BYTES,
+                held_bytes_at_10k_records_per_sec = roll_interval_secs * 10_000 * HELD_OFFSET_BYTES,
+                "archive.roll_interval_secs holds every record's offset in memory until its file completes, about 32 bytes a record, so memory grows with intake times the interval"
+            );
+        }
         debug!(
             kafka_batch_size = config.kafka.batch_size,
             kafka_session_timeout_ms = config.kafka.session_timeout_ms,
@@ -127,7 +136,7 @@ impl ServiceApp for App {
             buffer_flush_age_secs = config.buffer.flush_age_secs,
             buffer_writer_parallelism = config.buffer.writer_parallelism,
             archive_roll_size_bytes = config.archive.roll_size_bytes,
-            archive_roll_interval_secs = config.archive.roll_interval_secs,
+            archive_roll_interval_secs = config.roll_interval_secs(),
             archive_path_template = %config.archive.path_template,
             routing_mode = %config.routing.mode,
             metrics_address = %self.common.effective_metrics_addr(),
@@ -253,37 +262,44 @@ impl ServiceApp for App {
         archiver.metrics().set_pipeline_ready(true);
         info!("dfe-archiver ready");
 
-        // Spawn main loop
-        let run_handle = tokio::spawn(async move {
-            if let Err(e) = archiver_run.run().await {
-                tracing::error!(error = %e, "Archiver run failed");
+        let mut run_handle = tokio::spawn(async move { archiver_run.run().await });
+
+        // A loop that ends without a signal cannot go on, so the process exits
+        // with its error and the restart reads again from the committed offsets.
+        let stopped = tokio::select! {
+            () = shutdown_token.cancelled() => {
+                info!("Shutdown signal received");
+                // The loop must have stopped before the drain receives from the source.
+                archiver.shutdown();
+                run_handle.await
             }
-        });
+            finished = &mut run_handle => finished,
+        };
+        let failure = match stopped {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Archiver run failed");
+                Some(e.to_string())
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Archiver loop did not finish cleanly");
+                Some(e.to_string())
+            }
+        };
+        archiver.drain().await;
 
-        // Wait for shutdown signal
-        shutdown_token.cancelled().await;
-        info!("Shutdown signal received");
-
-        // Signal shutdown and wait for drain
-        archiver.shutdown();
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        archiver
-            .drain()
-            .await
-            .map_err(|e| CliError::Service(e.to_string()))?;
-
-        let _ = run_handle.await;
         info!("Shutdown complete");
 
-        Ok(())
+        failure.map_or(Ok(()), |reason| Err(CliError::Service(reason)))
     }
 
     fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
         // Register the archiver's weighted KEDA components on the runtime's
         // unified ScalingPressure. The
-        // pipeline drives these values (kafka_lag from assigned-partition lag,
-        // buffer_depth from hot-buffer count, memory from the cgroup guard) plus
-        // the object-store circuit gate, so KEDA scales on the single composite.
+        // pipeline drives these values (kafka_lag from the consumer's position
+        // lag, buffer_depth from hot-buffer count, memory from the cgroup guard)
+        // plus the object-store circuit gate, so KEDA scales on the single
+        // composite.
         dfe_archiver::scaling_components()
     }
 

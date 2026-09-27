@@ -1,0 +1,17 @@
+# Project:   dfe-archiver
+# File:      osv-scanner.toml
+# Purpose:   Advisories osv-scanner reports that are accepted, each with its reason
+#
+# License:   BUSL-1.1
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+
+# Graded by reachability, per dfe-infra docs/THREAT-MODEL.md: the archiver has
+# no listener an outsider can reach.
+
+[[IgnoredVulns]]
+id = "GHSA-w9wp-h8wv-79jx"
+reason = "opentelemetry_sdk 0.31 through scalo-rs. Not reachable: the unbounded allocation is in W3C Baggage propagation, and neither scalo-rs nor the archiver registers a text-map propagator. Accepted in the dfe-infra THREAT-MODEL.md accepted-risks table. The fix (0.32.1) waits on tracing-opentelemetry supporting 0.32. Revisit on that scalo-rs bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste is unmaintained, with no vulnerability and no replacement. A compile-time proc macro under tikv-jemalloc-ctl 0.7.0, the latest release, behind the jemalloc feature, so it reaches no running code. Drop when tikv-jemalloc-ctl leaves it."

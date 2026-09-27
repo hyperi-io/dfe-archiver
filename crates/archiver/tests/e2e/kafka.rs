@@ -68,14 +68,13 @@ async fn test_kafka_consume() {
     let batch = transport.recv(100).await.expect("recv");
     println!("Received {} messages", batch.messages.len());
 
-    // Commit if we got any
+    // Release what we got, which commits it
     if !batch.messages.is_empty() {
-        let offsets: Vec<_> = batch
-            .messages
-            .iter()
-            .map(std::convert::Into::into)
-            .collect();
-        transport.commit(offsets).await.expect("commit");
+        let tokens: Vec<_> = batch.messages.iter().map(|m| m.token().clone()).collect();
+        transport
+            .release(&tokens, scalo::transport::DeliveryStatus::Delivered)
+            .await
+            .expect("release");
     }
 
     transport.close().await.expect("close");

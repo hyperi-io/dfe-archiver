@@ -6,16 +6,152 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-use crate::Result;
 use crate::compression::Compressor;
 use crate::config::ArchiveConfig;
-use crate::storage::StorageBackend;
+use crate::storage::{Closed, PendingUpload, StorageBackend};
+use crate::types::{KafkaOffset, OffsetSet};
+use crate::{Error, Result};
 use chrono::{DateTime, Utc};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
 
 const MAX_OPEN_RETRIES: u32 = 10_000;
+
+/// A file-name component unique to one writer.
+///
+/// An object-store `create` stages the file locally and never asks the store
+/// whether the key is taken, so two writers on the same destination and window
+/// -- two replicas, or an evicted writer still closing beside its replacement
+/// -- would otherwise pick the same key, and the later upload would replace
+/// the earlier object.
+fn writer_token() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    // RandomState is seeded from the OS, so the value differs between processes as well as writers.
+    let hash = std::hash::RandomState::new().hash_one((std::process::id(), n));
+    format!("{hash:016x}")
+}
+
+/// A file complete on local disk and still to reach the store, with the
+/// records it holds.
+pub struct PendingFile {
+    /// The upload that makes the file durable.
+    pub upload: Box<dyn PendingUpload>,
+    /// Offsets of the records in the file.
+    pub offsets: OffsetSet,
+    /// Records in the file, counted whether or not their offsets are held.
+    pub records: u64,
+    /// The routed destination the file's records were written for.
+    pub destination: String,
+}
+
+impl std::fmt::Debug for PendingFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingFile")
+            .field("path", &self.upload.path())
+            .field("size", &self.upload.size())
+            .field("records", &self.records)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a writer's files came to since its caller last drained them.
+#[derive(Debug, Default)]
+pub struct Settled {
+    /// Records in files that are durable: archived.
+    pub delivered: OffsetSet,
+    /// Records `delivered` covers, counted whether or not offsets are held.
+    pub delivered_records: u64,
+    /// Records in files the store refused for good: dropped.
+    pub dropped: OffsetSet,
+    /// Records `dropped` covers, counted whether or not offsets are held.
+    pub dropped_records: u64,
+    /// Why the store refused the last dropped file.
+    pub dropped_reason: Option<String>,
+    /// Records the store refused for good and the DLQ confirmed it holds.
+    pub rejected: OffsetSet,
+    /// Records `rejected` covers, counted whether or not offsets are held.
+    pub rejected_records: u64,
+    /// Records of a refused file dropped because no DLQ backend can hold
+    /// their dead letter. Their offsets travel with `rejected` or `dropped`.
+    pub too_large_records: u64,
+    /// Records in files whose write or completion failed on local disk: not
+    /// written anywhere, so they must be read again.
+    pub errored: OffsetSet,
+    /// Records `errored` covers, counted whether or not offsets are held, so a
+    /// source that cannot deliver them again still counts them.
+    pub errored_records: u64,
+    /// Files complete on local disk and still to reach the store.
+    pub uploads: Vec<PendingFile>,
+}
+
+impl Settled {
+    /// The records of a file the store holds.
+    #[must_use]
+    pub fn delivered(offsets: OffsetSet, records: u64) -> Self {
+        Self {
+            delivered: offsets,
+            delivered_records: records,
+            ..Self::default()
+        }
+    }
+
+    /// The records of a file the store refused, and why.
+    #[must_use]
+    pub fn dropped(offsets: OffsetSet, records: u64, reason: String) -> Self {
+        Self {
+            dropped: offsets,
+            dropped_records: records,
+            dropped_reason: Some(reason),
+            ..Self::default()
+        }
+    }
+
+    /// The records of a file that will never be durable and must be read
+    /// again.
+    #[must_use]
+    pub fn errored(offsets: OffsetSet, records: u64) -> Self {
+        Self {
+            errored: offsets,
+            errored_records: records,
+            ..Self::default()
+        }
+    }
+
+    /// Move everything `other` settled into this one.
+    pub fn absorb(&mut self, mut other: Self) {
+        self.delivered.append(&mut other.delivered);
+        self.delivered_records += other.delivered_records;
+        self.dropped.append(&mut other.dropped);
+        self.dropped_records += other.dropped_records;
+        if other.dropped_reason.is_some() {
+            self.dropped_reason = other.dropped_reason;
+        }
+        self.rejected.append(&mut other.rejected);
+        self.rejected_records += other.rejected_records;
+        self.too_large_records += other.too_large_records;
+        self.errored.append(&mut other.errored);
+        self.errored_records += other.errored_records;
+        self.uploads.append(&mut other.uploads);
+    }
+
+    /// Whether nothing was settled.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.delivered_records == 0
+            && self.delivered.is_empty()
+            && self.dropped_records == 0
+            && self.dropped.is_empty()
+            && self.rejected_records == 0
+            && self.rejected.is_empty()
+            && self.too_large_records == 0
+            && self.errored_records == 0
+            && self.errored.is_empty()
+            && self.uploads.is_empty()
+    }
+}
 
 /// The placeholders `path_stem` and `generate_path` substitute, and the whole
 /// set an operator may write in `archive.path_template`.
@@ -118,6 +254,8 @@ pub struct ArchiveWriter {
     compressor: Arc<dyn Compressor + Send + Sync>,
     storage: Box<dyn StorageBackend + Send + Sync>,
     state: Option<ArchiveState>,
+    /// Data written since the last flush. Allocated on write and handed to the
+    /// compressor on flush, so an idle writer holds no buffer.
     buffer: Vec<u8>,
     file_seq: u64,
     last_stem: Option<String>,
@@ -128,6 +266,16 @@ pub struct ArchiveWriter {
     /// `files_opened`. A single `write_record` can roll on either half, so one
     /// returned `CloseStats` would drop the other and undercount the closes.
     rolls: Vec<CloseStats>,
+    /// The file-name component no other writer shares.
+    token: String,
+    /// Offsets of the records flushed into the open file.
+    held: OffsetSet,
+    /// Records flushed into the open file.
+    held_records: u64,
+    /// Files completed, pending or failed since the caller last drained them.
+    settled: Settled,
+    /// The routed destination this writer's files hold, carried to uploads.
+    destination: String,
 }
 
 impl ArchiveWriter {
@@ -144,12 +292,114 @@ impl ArchiveWriter {
             compressor: Arc::from(compressor),
             storage,
             state: None,
-            buffer: Vec::with_capacity(1024 * 1024),
+            buffer: Vec::new(),
             file_seq: 0,
             last_stem: None,
             files_opened: 0,
             rolls: Vec::new(),
+            token: writer_token(),
+            held: OffsetSet::default(),
+            held_records: 0,
+            settled: Settled::default(),
+            destination: String::new(),
         }
+    }
+
+    /// Name the routed destination this writer's files hold, so a file that
+    /// has to be dead-lettered carries the same destination a batch does.
+    #[must_use]
+    pub fn with_destination(mut self, destination: impl Into<String>) -> Self {
+        self.destination = destination.into();
+        self
+    }
+
+    /// Hold `offsets` and `records` against the open file until it is durable.
+    ///
+    /// Call once their records are flushed into the file. With no file open
+    /// the offsets are settled errored, so they are read again rather than
+    /// released on a file their records never reached.
+    pub fn hold(&mut self, offsets: impl IntoIterator<Item = KafkaOffset>, records: u64) {
+        if self.state.is_some() {
+            self.held.extend(offsets);
+            self.held_records += records;
+        } else {
+            self.settled.errored.extend(offsets);
+            self.settled.errored_records += records;
+        }
+    }
+
+    /// Take what the writer's files came to since the last call, resetting it.
+    pub fn take_settled(&mut self) -> Settled {
+        std::mem::take(&mut self.settled)
+    }
+
+    /// Complete the file at `path` and settle what it holds: delivered when
+    /// it is durable, a pending upload when it still has to reach the store.
+    async fn finish(&mut self, path: &str) -> Result<()> {
+        let mut offsets = std::mem::take(&mut self.held);
+        let records = std::mem::take(&mut self.held_records);
+        match self.storage.close(path).await {
+            Ok(Closed::Durable) => {
+                self.settled.delivered.append(&mut offsets);
+                self.settled.delivered_records += records;
+                Ok(())
+            }
+            Ok(Closed::Pending(upload)) => {
+                self.settled.uploads.push(PendingFile {
+                    upload,
+                    offsets,
+                    records,
+                    destination: self.destination.clone(),
+                });
+                Ok(())
+            }
+            Err(e) => {
+                self.settle_failed(offsets, records, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Settle the records of a file that will never be durable: dropped when
+    /// the store refused it for good, errored so they are read again otherwise.
+    fn settle_failed(&mut self, mut offsets: OffsetSet, records: u64, error: &Error) {
+        if error.is_refused() {
+            self.settled.dropped.append(&mut offsets);
+            self.settled.dropped_records += records;
+            self.settled.dropped_reason = Some(error.to_string());
+        } else {
+            self.settled.errored.append(&mut offsets);
+            self.settled.errored_records += records;
+        }
+    }
+
+    /// Undo an append that failed: cut the open file back to its last whole
+    /// block and keep it, and the records it holds, so the caller can write the
+    /// same data again. A file that cannot be cut back is given up.
+    async fn roll_back(&mut self, error: &Error, uncompressed: u64) {
+        if let Some(ref state) = self.state {
+            let whole = state.compressed_bytes.load(Ordering::Relaxed);
+            if self.storage.truncate(&state.path, whole).await.is_ok() {
+                state
+                    .uncompressed_bytes
+                    .fetch_sub(uncompressed, Ordering::Relaxed);
+                debug!(path = %state.path, bytes = whole, error = %error, "Cut a file back after a failed append");
+                return;
+            }
+        }
+        self.abandon(error).await;
+    }
+
+    /// Give up the open file after a write into it failed, so the next write
+    /// opens a fresh one instead of appending after the gap.
+    async fn abandon(&mut self, error: &Error) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        self.storage.abort(&state.path).await;
+        let offsets = std::mem::take(&mut self.held);
+        let records = std::mem::take(&mut self.held_records);
+        self.settle_failed(offsets, records, error);
     }
 
     /// Take the number of files opened since the last call, resetting the count.
@@ -217,8 +467,7 @@ impl ArchiveWriter {
 
         let uncompressed_len = self.buffer.len() as u64;
 
-        // Swap buffer with a pre-allocated replacement (avoids re-alloc on next write cycle)
-        let buffer = std::mem::replace(&mut self.buffer, Vec::with_capacity(1024 * 1024));
+        let buffer = std::mem::take(&mut self.buffer);
         let compressor = Arc::clone(&self.compressor);
 
         let compress_start = std::time::Instant::now();
@@ -230,8 +479,15 @@ impl ArchiveWriter {
         let compression_duration = compress_start.elapsed().as_secs_f64();
         let compressed_len = compressed.len() as u64;
 
+        let appended = match self.state {
+            Some(ref state) => self.storage.append(&state.path, &compressed).await,
+            None => Ok(()),
+        };
+        if let Err(e) = appended {
+            self.roll_back(&e, uncompressed_len).await;
+            return Err(e);
+        }
         if let Some(ref state) = self.state {
-            self.storage.append(&state.path, &compressed).await?;
             state
                 .compressed_bytes
                 .fetch_add(compressed_len, Ordering::Relaxed);
@@ -285,7 +541,7 @@ impl ArchiveWriter {
 
         if let Some(state) = self.state.take() {
             let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
-            self.storage.close(&state.path).await?;
+            self.finish(&state.path).await?;
             info!(
                 path = %state.path,
                 file_size = compressed_bytes,
@@ -362,11 +618,15 @@ impl ArchiveWriter {
 
         let ext = &self.config.file_extension;
         let compression_ext = self.compressor.extension();
+        let token = &self.token;
 
         if compression_ext.is_empty() {
-            format!("{path}-{:04}.{ext}", self.file_seq)
+            format!("{path}-{:04}-{token}.{ext}", self.file_seq)
         } else {
-            format!("{path}-{:04}.{ext}.{compression_ext}", self.file_seq)
+            format!(
+                "{path}-{:04}-{token}.{ext}.{compression_ext}",
+                self.file_seq
+            )
         }
     }
 
@@ -376,7 +636,7 @@ impl ArchiveWriter {
 
         let close_stats = if let Some(state) = self.state.take() {
             let compressed_bytes = state.compressed_bytes.load(Ordering::Relaxed);
-            self.storage.close(&state.path).await?;
+            self.finish(&state.path).await?;
             info!(
                 path = %state.path,
                 file_size = compressed_bytes,
@@ -433,6 +693,12 @@ impl ArchiveWriter {
     #[cfg(test)]
     pub fn test_current_path(&self) -> Option<&str> {
         self.state.as_ref().map(|s| s.path.as_str())
+    }
+
+    /// Bytes the write buffer has allocated, for testing
+    #[cfg(test)]
+    pub fn test_buffer_capacity(&self) -> usize {
+        self.buffer.capacity()
     }
 }
 
@@ -497,8 +763,8 @@ mod tests {
             Ok(())
         }
 
-        async fn close(&self, _path: &str) -> Result<()> {
-            Ok(())
+        async fn close(&self, _path: &str) -> Result<Closed> {
+            Ok(Closed::Durable)
         }
 
         async fn exists(&self, path: &str) -> Result<bool> {
@@ -583,7 +849,7 @@ mod tests {
         async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
             self.0.append(path, data).await
         }
-        async fn close(&self, path: &str) -> Result<()> {
+        async fn close(&self, path: &str) -> Result<Closed> {
             self.0.close(path).await
         }
         async fn exists(&self, path: &str) -> Result<bool> {
@@ -638,6 +904,27 @@ mod tests {
         assert!(path.ends_with(".jsonl.zst"), "should have .zst ext: {path}");
     }
 
+    /// A snappy archive is in the snappy framing format, whose extension is `.sz`.
+    #[test]
+    fn a_snappy_archive_key_ends_in_the_framed_format_extension() {
+        let config = ArchiveConfig {
+            path_template: "data/{timestamp}".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let compressor = create_compressor("snappy", 0).expect("compressor");
+        let writer = ArchiveWriter::new(
+            config,
+            RollingPolicy::default(),
+            compressor,
+            Box::new(MemoryBackend::new()),
+        );
+
+        let path = writer.test_generate_path(&Utc::now());
+
+        assert!(path.ends_with(".jsonl.sz"), "{path}");
+    }
+
     #[tokio::test]
     async fn test_new_writer_does_not_truncate_existing_file() {
         let policy = RollingPolicy {
@@ -684,7 +971,7 @@ mod tests {
 
         writer.write_record(b"first").await.expect("write");
         let first = writer.test_current_path().expect("open file").to_string();
-        assert!(first.ends_with("-0001.jsonl"), "expected -0001: {first}");
+        assert!(first.contains("-0001-"), "expected -0001: {first}");
 
         writer.close().await.expect("close");
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
@@ -693,7 +980,7 @@ mod tests {
         let second = writer.test_current_path().expect("open file");
         assert_ne!(first, second, "stem should have changed");
         assert!(
-            second.ends_with("-0001.jsonl"),
+            second.contains("-0001-"),
             "sequence should restart in a new stem, got {second}"
         );
     }
@@ -823,6 +1110,34 @@ mod tests {
         assert_eq!(backend.file_count(), 1);
     }
 
+    /// A writer holds a write buffer only between a write and its flush, so
+    /// 1024 idle writers -- `archive.max_writers` by default -- hold none.
+    #[tokio::test]
+    async fn an_idle_writer_holds_no_write_buffer() {
+        let backend = Arc::new(MemoryBackend::new());
+        let mut writers = Vec::with_capacity(1024);
+        for _ in 0..1024 {
+            let mut writer = test_writer_on(&backend, RollingPolicy::default(), "none");
+            assert_eq!(
+                writer.test_buffer_capacity(),
+                0,
+                "a new writer allocates nothing"
+            );
+            writer.write_record(b"{\"id\":1}").await.expect("write");
+            assert!(
+                writer.test_buffer_capacity() >= 9,
+                "a write buffers its bytes"
+            );
+            writer.flush().await.expect("flush");
+            writers.push(writer);
+        }
+        let held: usize = writers
+            .iter()
+            .map(ArchiveWriter::test_buffer_capacity)
+            .sum();
+        assert_eq!(held, 0, "1024 flushed writers hold {held} buffer bytes");
+    }
+
     #[tokio::test]
     async fn test_flush_empty_is_noop() {
         let (mut writer, _) = test_writer(RollingPolicy::default(), "zstd");
@@ -917,6 +1232,438 @@ mod tests {
         );
         assert!(writer.test_current_path().is_some());
         assert_eq!(backend.file_count(), 1);
+    }
+
+    /// An object-store create never asks the store whether a key is taken, so
+    /// two writers on one destination and window must pick different keys.
+    #[test]
+    fn two_writers_on_one_stem_and_sequence_pick_different_keys() {
+        let backend = Arc::new(MemoryBackend::new());
+        let first = test_writer_on(&backend, RollingPolicy::default(), "none");
+        let second = test_writer_on(&backend, RollingPolicy::default(), "none");
+        let now = Utc::now();
+
+        let (a, b) = (
+            first.test_generate_path(&now),
+            second.test_generate_path(&now),
+        );
+        assert_ne!(a, b, "two writers share a key");
+        assert!(a.contains("-0000-") && b.contains("-0000-"), "{a} / {b}");
+    }
+
+    fn offsets(partition: i32, range: std::ops::Range<i64>) -> Vec<KafkaOffset> {
+        range
+            .map(|offset| {
+                KafkaOffset::from(&crate::types::KafkaMessage::for_test(
+                    Vec::new(),
+                    "events",
+                    partition,
+                    offset,
+                ))
+            })
+            .collect()
+    }
+
+    fn settled_offsets(set: &OffsetSet) -> Vec<i64> {
+        let mut out: Vec<i64> = set.tokens().into_iter().map(|t| t.offset).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Offsets held against an open file are released only when it completes.
+    #[tokio::test]
+    async fn held_offsets_settle_delivered_when_the_file_completes() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "none");
+        writer.write_record(b"one").await.expect("write");
+        writer.hold(offsets(0, 0..3), 3);
+
+        assert!(
+            writer.take_settled().is_empty(),
+            "an open file settles nothing"
+        );
+
+        writer.close().await.expect("close");
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1, 2]);
+        assert_eq!(settled.delivered_records, 3);
+        assert!(settled.errored.is_empty());
+        assert!(
+            writer.take_settled().is_empty(),
+            "draining twice must not release twice"
+        );
+    }
+
+    /// Stands in for a file staged locally for an object store.
+    struct StagedFile(String);
+
+    #[async_trait]
+    impl PendingUpload for StagedFile {
+        fn path(&self) -> &str {
+            &self.0
+        }
+        fn size(&self) -> u64 {
+            0
+        }
+        async fn attempt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _index: usize) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn discard(&self) {}
+    }
+
+    /// Closes every file as staged locally, still to be uploaded.
+    struct StagingBackend(Arc<MemoryBackend>);
+
+    #[async_trait]
+    impl StorageBackend for StagingBackend {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.0.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.0.append(path, data).await
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            Ok(Closed::Pending(Box::new(StagedFile(path.to_string()))))
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.0.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.0.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "staging"
+        }
+    }
+
+    fn writer_on(storage: Box<dyn StorageBackend + Send + Sync>) -> ArchiveWriter {
+        let config = ArchiveConfig {
+            destination: "memory://test".to_string(),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        ArchiveWriter::new(
+            config,
+            RollingPolicy::default(),
+            create_compressor("none", 0).expect("compressor"),
+            storage,
+        )
+    }
+
+    /// A file that still has to reach the store is not delivered at close:
+    /// its offsets and records travel with the upload.
+    #[tokio::test]
+    async fn a_staged_file_hands_its_offsets_to_the_upload() {
+        let mut writer = writer_on(Box::new(StagingBackend(Arc::new(MemoryBackend::new()))));
+        writer.write_record(b"staged").await.expect("write");
+        writer.hold(offsets(1, 4..6), 2);
+
+        writer.close().await.expect("close");
+        let settled = writer.take_settled();
+        assert!(settled.delivered.is_empty(), "nothing is archived yet");
+        assert_eq!(settled.delivered_records, 0);
+        assert_eq!(settled.uploads.len(), 1);
+        assert_eq!(settled_offsets(&settled.uploads[0].offsets), vec![4, 5]);
+        assert_eq!(settled.uploads[0].records, 2);
+    }
+
+    /// Refuses every close for good, as a store does with a key it rejects.
+    struct RefusingClose(Arc<MemoryBackend>);
+
+    #[async_trait]
+    impl StorageBackend for RefusingClose {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.0.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.0.append(path, data).await
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            Err(crate::Error::refused(format!("key rejected: {path}")))
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.0.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.0.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "refusing-close"
+        }
+    }
+
+    /// A file the store refused for good is dropped with its reason, never
+    /// errored.
+    #[tokio::test]
+    async fn a_refused_file_settles_its_records_dropped_with_the_reason() {
+        let mut writer = writer_on(Box::new(RefusingClose(Arc::new(MemoryBackend::new()))));
+        writer.write_record(b"refused").await.expect("write");
+        writer.hold(offsets(2, 0..3), 3);
+
+        writer.close().await.expect_err("close must fail");
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.dropped), vec![0, 1, 2]);
+        assert_eq!(settled.dropped_records, 3);
+        assert!(
+            settled
+                .dropped_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("key rejected")),
+            "{:?}",
+            settled.dropped_reason
+        );
+        assert!(settled.errored.is_empty());
+    }
+
+    /// Fails every append after the first, as a full local disk does.
+    struct FailingAppend {
+        inner: Arc<MemoryBackend>,
+        appends: std::sync::atomic::AtomicU32,
+        aborted: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl StorageBackend for Arc<FailingAppend> {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.inner.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            if self.appends.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.inner.append(path, data).await
+            } else {
+                Err(crate::Error::storage("no space left on device"))
+            }
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            self.inner.close(path).await
+        }
+        async fn abort(&self, path: &str) {
+            self.aborted.lock().expect("lock").push(path.to_string());
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.inner.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.inner.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.inner.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "failing-append"
+        }
+    }
+
+    /// A failed append leaves a gap in the file, so the file is given up, its
+    /// earlier records are read again, and the next write opens a new file.
+    #[tokio::test]
+    async fn a_failed_append_gives_up_the_file_and_the_next_write_opens_another() {
+        let backend = Arc::new(FailingAppend {
+            inner: Arc::new(MemoryBackend::new()),
+            appends: std::sync::atomic::AtomicU32::new(0),
+            aborted: Mutex::new(Vec::new()),
+        });
+        let mut writer = writer_on(Box::new(Arc::clone(&backend)));
+
+        writer.write(b"first\n").await.expect("write");
+        writer.flush().await.expect("first append lands");
+        writer.hold(offsets(0, 0..1), 1);
+        let first = writer.test_current_path().expect("open file").to_string();
+
+        writer.write(b"second\n").await.expect("buffered");
+        writer.flush().await.expect_err("second append fails");
+        assert!(
+            writer.test_current_path().is_none(),
+            "the broken file is given up"
+        );
+        assert_eq!(*backend.aborted.lock().expect("lock"), vec![first.clone()]);
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.errored), vec![0]);
+
+        writer.write(b"third\n").await.expect("write");
+        let next = writer.test_current_path().expect("a new file").to_string();
+        assert_ne!(first, next);
+    }
+
+    /// Tears the second append half way, as a disk that fills mid-write does,
+    /// and cuts a file back on request.
+    struct TornAppend {
+        inner: Arc<MemoryBackend>,
+        appends: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl StorageBackend for Arc<TornAppend> {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.inner.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            if self.appends.fetch_add(1, Ordering::Relaxed) == 1 {
+                self.inner.append(path, &data[..data.len() / 2]).await?;
+                return Err(crate::Error::Io(std::io::Error::from(
+                    std::io::ErrorKind::StorageFull,
+                )));
+            }
+            self.inner.append(path, data).await
+        }
+        async fn truncate(&self, path: &str, len: u64) -> Result<()> {
+            let mut files = self.inner.files.lock().expect("lock");
+            let file = files.get_mut(path).expect("file exists");
+            file.truncate(usize::try_from(len).expect("len"));
+            Ok(())
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            self.inner.close(path).await
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.inner.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.inner.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.inner.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "torn-append"
+        }
+    }
+
+    /// An append that fails part way is cut back off the file, which keeps its
+    /// earlier records held, so writing the same data again leaves one copy.
+    #[tokio::test]
+    async fn a_failed_append_is_cut_back_and_the_file_kept() {
+        let backend = Arc::new(TornAppend {
+            inner: Arc::new(MemoryBackend::new()),
+            appends: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut writer = writer_on(Box::new(Arc::clone(&backend)));
+
+        writer.write(b"first\n").await.expect("write");
+        writer.flush().await.expect("first append lands");
+        writer.hold(offsets(0, 0..1), 1);
+        let path = writer.test_current_path().expect("open file").to_string();
+
+        writer.write(b"second\n").await.expect("buffered");
+        writer.flush().await.expect_err("second append tears");
+        assert_eq!(
+            writer.test_current_path(),
+            Some(path.as_str()),
+            "the file is kept"
+        );
+        assert!(
+            writer.take_settled().is_empty(),
+            "nothing is errored or released"
+        );
+
+        writer.write(b"second\n").await.expect("write again");
+        writer.flush().await.expect("the retry lands");
+        writer.hold(offsets(0, 1..2), 1);
+        writer.close().await.expect("close");
+
+        let content = backend.inner.files.lock().expect("lock")[&path].clone();
+        assert_eq!(content, b"first\nsecond\n", "one whole copy of each block");
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1]);
+        assert!(settled.errored.is_empty());
+    }
+
+    /// A roll completes the old file, so its offsets settle then and the new
+    /// file's do not.
+    #[tokio::test]
+    async fn a_roll_settles_the_offsets_of_the_file_it_completes() {
+        let (mut writer, _) = test_writer(
+            RollingPolicy {
+                max_size_bytes: 1024 * 1024,
+                max_age_secs: 0,
+            },
+            "none",
+        );
+        writer.write(b"first\n").await.expect("write");
+        writer.hold(offsets(0, 0..2), 2);
+
+        writer.write(b"second\n").await.expect("write rolls first");
+        writer.hold(offsets(0, 2..4), 2);
+
+        let settled = writer.take_settled();
+        assert_eq!(settled_offsets(&settled.delivered), vec![0, 1]);
+        assert!(settled.errored.is_empty());
+    }
+
+    /// Refuses every close, as an object store does when the multipart
+    /// completion fails.
+    struct FailingClose(Arc<MemoryBackend>);
+
+    #[async_trait]
+    impl StorageBackend for FailingClose {
+        async fn create(&self, path: &str) -> Result<()> {
+            self.0.create(path).await
+        }
+        async fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+            self.0.append(path, data).await
+        }
+        async fn close(&self, path: &str) -> Result<Closed> {
+            Err(crate::Error::storage(format!(
+                "local flush failed for {path}"
+            )))
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.0.exists(path).await
+        }
+        async fn delete(&self, path: &str) -> Result<()> {
+            self.0.delete(path).await
+        }
+        async fn list_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<String>> {
+            self.0.list_prefix(prefix, limit).await
+        }
+        fn name(&self) -> &'static str {
+            "failing-close"
+        }
+    }
+
+    /// A file that never completed wrote nothing, so its offsets settle
+    /// errored and are read again.
+    #[tokio::test]
+    async fn a_failed_completion_settles_its_offsets_errored() {
+        let config = ArchiveConfig {
+            destination: "memory://test".to_string(),
+            path_template: "{year}/{month}/{day}/{hour}/archive".to_string(),
+            file_extension: "jsonl".to_string(),
+            ..Default::default()
+        };
+        let mut writer = ArchiveWriter::new(
+            config,
+            RollingPolicy::default(),
+            create_compressor("none", 0).expect("compressor"),
+            Box::new(FailingClose(Arc::new(MemoryBackend::new()))),
+        );
+        writer.write_record(b"lost").await.expect("write");
+        writer.hold(offsets(3, 7..9), 2);
+
+        writer.close().await.expect_err("close must fail");
+        let settled = writer.take_settled();
+        assert!(settled.delivered.is_empty());
+        assert_eq!(settled_offsets(&settled.errored), vec![7, 8]);
+    }
+
+    /// Offsets handed over with no file open never reached a file.
+    #[test]
+    fn offsets_held_with_no_file_open_settle_errored() {
+        let (mut writer, _) = test_writer(RollingPolicy::default(), "none");
+        writer.hold(offsets(0, 5..6), 1);
+
+        let settled = writer.take_settled();
+        assert!(settled.delivered.is_empty());
+        assert_eq!(settled_offsets(&settled.errored), vec![5]);
     }
 
     #[test]

@@ -45,7 +45,7 @@ fn init_cascade() {
     }
 }
 
-/// Load configuration with cascade: CLI → ENV → .env → file → defaults
+/// Load configuration with cascade: CLI -> ENV -> .env -> file -> defaults
 ///
 /// Priority (highest to lowest):
 /// 1. CLI arguments (handled by caller, merged after)
@@ -157,7 +157,19 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     if config.buffer.flush_bytes == 0 {
         return Err(Error::Config(
-            "buffer.flush_bytes must be greater than 0".to_string(),
+            "buffer.flush_bytes must be greater than 0: it is the size at which a destination's buffer flushes into its archive file".to_string(),
+        ));
+    }
+
+    if config.buffer.flush_records == 0 {
+        return Err(Error::Config(
+            "buffer.flush_records must be greater than 0: it is the record count at which a destination's buffer flushes into its archive file".to_string(),
+        ));
+    }
+
+    if config.buffer.writer_parallelism == 0 {
+        return Err(Error::Config(
+            "buffer.writer_parallelism must be greater than 0: it is how many object-store uploads run at once".to_string(),
         ));
     }
 
@@ -232,6 +244,22 @@ mod tests {
         config.kafka.brokers = vec!["localhost:9092".to_string()];
 
         validate_config(&config).expect("default config should be valid");
+    }
+
+    /// A key the archiver no longer reads is ignored, so a config file that
+    /// still carries one loads with the rest of its section applied.
+    #[test]
+    fn a_key_the_archiver_does_not_read_still_loads() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "buffer:\n  backpressure_pause_secs: 5\n  flush_bytes: 4096\n",
+        )
+        .expect("write config");
+
+        let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
+        assert_eq!(config.buffer.flush_bytes, 4096);
     }
 
     #[test]
@@ -427,6 +455,21 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 
+    /// A zero record threshold would flush every record on its own, and zero
+    /// upload slots would never upload.
+    #[test]
+    fn zero_flush_records_or_writer_parallelism_fails() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.flush_records = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.buffer.writer_parallelism = 0;
+        assert!(validate_config(&config).is_err());
+    }
+
     #[test]
     fn test_multipart_chunk_size_too_small() {
         let mut config = Config::default();
@@ -532,6 +575,65 @@ mod tests {
             "{year}/{month}/{day}/{hour}/{minute}/{timestamp}/{seq}".to_string();
 
         validate_config(&config).expect("every supported placeholder is valid");
+    }
+
+    /// Both ack-capable sections default on, and each turns off on its own.
+    #[test]
+    fn test_acknowledgements_default_on_and_turn_off_per_transport() {
+        let config = Config::default();
+        assert!(config.kafka.acknowledgements.enabled);
+        assert!(config.grpc.acknowledgements.enabled);
+
+        let parsed: Config =
+            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
+                .expect("parse");
+        assert!(!parsed.kafka.acknowledgements.enabled);
+        assert!(parsed.grpc.acknowledgements.enabled);
+        validate_config(&parsed).expect("acknowledgements off is a valid config");
+    }
+
+    /// Held offsets stay in memory for as long as a file is open, so an unset
+    /// roll interval shortens to 300 s while offsets are held.
+    #[test]
+    fn test_unset_roll_interval_is_300_while_offsets_are_held() {
+        let held = Config::default();
+        assert!(held.holds_offsets());
+        assert_eq!(held.archive.roll_interval_secs, None);
+        assert_eq!(held.roll_interval_secs(), 300);
+        assert_eq!(held.long_held_roll_interval(), None);
+
+        let acks_off: Config =
+            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
+                .expect("parse");
+        assert!(!acks_off.holds_offsets());
+        assert_eq!(acks_off.roll_interval_secs(), 3600);
+
+        let direct = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        assert!(!direct.holds_offsets());
+        assert_eq!(direct.roll_interval_secs(), 3600);
+    }
+
+    /// An operator's roll interval is respected even with offsets held, and a
+    /// long one is flagged for the startup warning.
+    #[test]
+    fn test_a_configured_roll_interval_wins_over_the_held_offsets_default() {
+        let long: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 3600\n").expect("parse");
+        assert!(long.holds_offsets());
+        assert_eq!(long.roll_interval_secs(), 3600);
+        assert_eq!(long.long_held_roll_interval(), Some(3600));
+
+        let short: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 60\n").expect("parse");
+        assert_eq!(short.roll_interval_secs(), 60);
+        assert_eq!(short.long_held_roll_interval(), None);
+
+        let at_the_line: Config =
+            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 900\n").expect("parse");
+        assert_eq!(at_the_line.long_held_roll_interval(), None);
     }
 
     #[test]

@@ -13,15 +13,14 @@ description: |-
 
   ## Hot-reload behavior
 
-  **Hot-reloaded**, because the pipeline re-reads them from the shared config:
-  - `kafka.batch_size` — once per receive
-  - `buffer.backpressure_pause_secs` — on each backpressure pause
+  **Hot-reloaded**, because the pipeline re-reads it from the shared config:
+  - `kafka.batch_size` -- once per receive
 
-  **Requires pod restart** — everything else. `Archiver` snapshots the config
+  **Requires pod restart** -- everything else. `Archiver` snapshots the config
   at construction into `startup_config`, so a reload of `transport`,
-  `kafka.*`, `grpc.*`, `archive.*`, `routing.*`, `compression.*`, `dlq.*` or
-  the `buffer.*` flush thresholds is accepted and validated but does not reach
-  the running pipeline. `restart_required_changes` names those sections, and
+  `kafka.*`, `grpc.*`, `archive.*`, `buffer.*`, `routing.*`, `compression.*`
+  or `dlq.*` is accepted and validated but does not reach the running
+  pipeline. `restart_required_changes` names those sections, and
   the reloader warns instead of reporting a reload.
 type: object
 properties:
@@ -55,6 +54,8 @@ properties:
       batch_size: 10000
       max_poll_interval_ms: 300000
       session_timeout_ms: 30000
+      acknowledgements:
+        enabled: true
   grpc:
     description: Push listener configuration, read when `transport` is `grpc`.
     $ref: '#/$defs/GrpcConfig'
@@ -65,6 +66,8 @@ properties:
       max_message_size: 16777216
       compression: false
       default_topic: default_land
+      acknowledgements:
+        enabled: true
   archive:
     description: Archive output configuration
     $ref: '#/$defs/ArchiveConfig'
@@ -73,7 +76,7 @@ properties:
       path_template: '{year}/{month}/{day}/{hour}'
       file_extension: jsonl
       roll_size_bytes: 1073741824
-      roll_interval_secs: 3600
+      roll_interval_secs: null
       multipart_chunk_size: 8388608
       max_writers: 1024
       s3: null
@@ -84,11 +87,10 @@ properties:
     description: Buffer management configuration
     $ref: '#/$defs/BufferConfig'
     default:
-      flush_bytes: 67108864
+      flush_bytes: 1048576
       flush_age_secs: 60
       flush_records: 100000
-      writer_parallelism: 4
-      backpressure_pause_secs: 5
+      writer_parallelism: 2
       spool_dir: /var/spool/dfe/archiver
   routing:
     description: Routing configuration
@@ -236,6 +238,40 @@ $defs:
         format: uint32
         minimum: 0
         default: 30000
+      acknowledgements:
+        description: |-
+          With `enabled: true` (the default) a record's offset is committed only
+          once the archive file holding it is complete in the store, so a kill
+          re-reads what an open file held: duplicates are possible, loss is not.
+          With `enabled: false` offsets are committed as records are received,
+          and a kill loses what the open files and buffers held.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
+  AcknowledgementsConfig:
+    description: |-
+      The `acknowledgements` section of an ack-capable transport.
+
+      With `enabled: true` (the default) a source releases its acknowledgement --
+      a Kafka offset commit, a gRPC or HTTP response -- only once every piece of
+      work built from the record has been delivered, dead-lettered with the DLQ's
+      confirmation, or dropped by policy. A failed delivery withholds it, so the
+      record is delivered again: duplicates are possible, loss is not.
+
+      With `enabled: false` the source acknowledges at receipt, before the record
+      is processed: a crash or a failed delivery loses what was acknowledged.
+
+      ```yaml
+      kafka:
+        acknowledgements:
+          enabled: true
+      ```
+    type: object
+    properties:
+      enabled:
+        description: Hold the source acknowledgement until every piece is delivered.
+        type: boolean
+        default: true
   GrpcConfig:
     description: |-
       Push listener configuration for the direct transport.
@@ -277,6 +313,17 @@ $defs:
         description: Archive destination key for a record whose sender set no routing key.
         type: string
         default: default_land
+      acknowledgements:
+        description: |-
+          The listener answers each push once its records are queued, with this
+          on or off: a record is released only when its archive file completes, at
+          the roll interval, long after any sender's deadline. So the archive copy
+          on this transport is at-most-once, and `enabled: false` only changes the
+          reason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`
+          to `acks_disabled`.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   ArchiveConfig:
     description: Archive output configuration
     type: object
@@ -308,11 +355,19 @@ $defs:
         minimum: 0
         default: 1073741824
       roll_interval_secs:
-        description: 'Rolling trigger: interval in seconds'
-        type: integer
+        description: |-
+          Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
+          consumer holds offsets (`transport: kafka` with
+          `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
+          because every record in an open file keeps about 32 bytes of held
+          offset in memory until the file completes. A configured value always
+          wins, and one above 900 with offsets held logs a warning at startup.
+        type:
+        - integer
+        - 'null'
         format: uint64
         minimum: 0
-        default: 3600
+        default: null
       multipart_chunk_size:
         description: Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
         type: integer
@@ -463,11 +518,16 @@ $defs:
     type: object
     properties:
       flush_bytes:
-        description: Flush when buffer exceeds this size (bytes)
+        description: |-
+          Flush a destination's in-memory buffer into its archive file once it
+          holds this many bytes, plus one record. A ceiling per destination: up
+          to 64 destinations buffer at once, and all of them together hold no
+          more than a quarter of the memory limit, past which the largest
+          buffers flush first.
         type: integer
         format: uint
         minimum: 0
-        default: 67108864
+        default: 1048576
       flush_age_secs:
         description: Flush when buffer exceeds this age (seconds)
         type: integer
@@ -475,29 +535,26 @@ $defs:
         minimum: 0
         default: 60
       flush_records:
-        description: Maximum records per buffer before flush
+        description: |-
+          Flush a destination's in-memory buffer into its archive file once it
+          holds this many records, whatever its size.
         type: integer
         format: uint
         minimum: 0
         default: 100000
       writer_parallelism:
-        description: Number of concurrent archive writers
+        description: |-
+          Object-store uploads of closed archive files running at once. Each
+          holds four parts of `archive.multipart_chunk_size` in memory. A local
+          destination has no uploads, so this does not apply to it.
         type: integer
         format: uint
         minimum: 0
-        default: 4
-      backpressure_pause_secs:
-        description: |-
-          How long to pause Kafka consumption after a backpressure trigger.
-          Lower values cycle faster but burn more CPU when downstream is slow;
-          higher values let buffers drain but increase tail latency.
-        type: integer
-        format: uint64
-        minimum: 0
-        default: 5
+        default: 2
       spool_dir:
         description: |-
-          Tier 2 spool directory, created at startup. Absolute because a relative
+          Directory holding `uploads/`, where object-store files are staged until
+          the store takes them, created at startup. Absolute because a relative
           path resolves under the container WORKDIR, which appuser cannot write.
         type: string
         default: /var/spool/dfe/archiver
@@ -527,7 +584,10 @@ $defs:
     type: object
     properties:
       codec:
-        description: 'Compression codec: none, zstd, lz4, snappy, gzip'
+        description: |-
+          Compression codec: none, zstd (`.zst`), lz4 (LZ4 frame format, `.lz4`),
+          snappy (snappy framing format, `.sz`), gzip (`.gz`). Each flush appends
+          one frame or gzip member.
         type: string
         default: zstd
       level:
@@ -602,7 +662,9 @@ $defs:
         Default order: Kafka first, file fallback.
       type: string
       const: cascade
-    - description: Write to all enabled backends; report any failures.
+    - description: |-
+        Write every batch to all enabled backends. The write succeeds when at
+        least one backend takes the whole batch, and fails only when none does.
       type: string
       const: fan_out
     - description: File backend only (no Kafka dependency).
@@ -672,7 +734,12 @@ $defs:
         type: string
         default: dfe.dlq
       send_timeout_ms:
-        description: Send timeout in milliseconds.
+        description: |-
+          How long a `flush` or the shutdown waits for the broker to ack the
+          entries queued to Kafka, in milliseconds. Entries still unacked then
+          are purged and counted as dropped. The purge adds a wait of up to 5 s
+          for the purged entries' delivery reports, so `0` skips the ack wait
+          but not that one. Default 5000.
         type: integer
         format: uint64
         minimum: 0

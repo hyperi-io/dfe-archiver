@@ -16,7 +16,7 @@
 //! - **Compression**: Zstd, LZ4, Snappy, Gzip (configurable)
 //! - **Smart routing**: By topic or JSON field expressions
 //! - **Rolling archives**: By size or time interval
-//! - **At-least-once delivery**: Kafka offset commit after successful archive
+//! - **At-least-once delivery**: Kafka offset commit once the archive file is complete
 //! - **Memory-capped**: Configurable memory limits with backpressure
 //!
 //! ## Architecture
@@ -71,8 +71,9 @@ pub fn version_check_defaults() -> scalo::version_check::VersionCheckConfig {
 /// and the `Archiver`'s standalone fallback engine (built only when the
 /// `scaling` feature is compiled out). Both MUST register the same component
 /// set so the two agree. Weights/saturations mirror the legacy archiver model:
-/// `kafka_lag` (assigned-partition lag), `buffer_depth` (hot-buffer count), and
-/// `memory` (cgroup guard pressure ratio).
+/// `kafka_lag` (records past the consumer's read position, which the commit an
+/// open archive file holds does not inflate), `buffer_depth` (hot-buffer
+/// count), and `memory` (cgroup guard pressure ratio).
 #[must_use]
 pub fn scaling_components() -> Vec<scalo::scaling::ScalingComponent> {
     use scalo::scaling::ScalingComponent;

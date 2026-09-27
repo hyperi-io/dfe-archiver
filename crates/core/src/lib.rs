@@ -16,7 +16,7 @@ pub mod storage;
 pub mod types;
 
 pub use error::{Error, ErrorCategory, Result};
-pub use types::{KafkaMessage, KafkaOffset};
+pub use types::{KafkaMessage, KafkaOffset, OffsetSet};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

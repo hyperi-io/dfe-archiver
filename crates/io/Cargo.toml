@@ -32,8 +32,6 @@ rdkafka = { workspace = true }
 
 # Cloud storage
 object_store = { workspace = true }
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
 
 # Async
 tokio = { workspace = true }
@@ -44,10 +42,19 @@ futures = { workspace = true }
 compact_str = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = { workspace = true }
+# The manifest a completed staged file carries, so a restart can upload it.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
+# Read uploaded archive objects back with each codec's own decoder rather than
+# the archiver's, to prove the objects are standard framed streams.
+zstd = { workspace = true }
+flate2 = { workspace = true }
+lz4_flex = { workspace = true }
+snap = { workspace = true }
 
 [features]
 default = []

@@ -9,11 +9,11 @@
 // Covers the `minio://` destination and `ObjectStoreBackend::new_minio` -- the
 // S3-compatible variant with path-style addressing, static keys and plain HTTP.
 //
-// MinIO here is the DEV stack, shared by the whole suite and owned by whoever
-// ran `docker compose up`. It is a precondition, not a fixture, so these stay
-// #[ignore]d: bring the stack up first, then
+// The store here is the DEV stack's S3 endpoint, shared by the whole suite and
+// owned by whoever ran `docker compose up`. It is a precondition, not a fixture,
+// so these stay #[ignore]d: bring the stack up first, then
 //
-//     docker compose -f docker-compose.dev.yaml up -d minio minio-init
+//     docker compose -f docker-compose.dev.yaml up -d s3
 //     cargo nextest run --test e2e --run-ignored all -E 'test(minio)'
 //
 // With the stack absent these skip locally with the reason printed, and FAIL in
@@ -44,16 +44,21 @@ fn get_minio_config() -> MinioConfig {
 
 /// Test `MinIO` backend basic operations
 #[tokio::test]
-#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d s3"]
 async fn test_minio_basic_operations() {
+    let (_staging_dir, staging) = common::staging();
     if !common::ensure_minio() {
         return; // `ensure_minio` prints why, and fails the run in CI
     }
 
     let config = get_minio_config();
-    let backend =
-        ObjectStoreBackend::new_minio(&config, "test-prefix".to_string(), 8 * 1024 * 1024)
-            .expect("create MinIO backend");
+    let backend = ObjectStoreBackend::new_minio(
+        &config,
+        "test-prefix".to_string(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create MinIO backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -66,7 +71,7 @@ async fn test_minio_basic_operations() {
         .append(&test_path, b"MinIO!")
         .await
         .expect("append 2");
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -78,10 +83,11 @@ async fn test_minio_basic_operations() {
 
 /// Test `MinIO` backend with archive writer
 #[tokio::test]
-#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d s3"]
 async fn test_minio_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     if !common::ensure_minio() {
         return;
@@ -103,7 +109,7 @@ async fn test_minio_archive_roundtrip() {
     };
 
     let compressor = create_compressor("zstd", 3).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -113,21 +119,24 @@ async fn test_minio_archive_roundtrip() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
     println!("MinIO archive roundtrip test passed");
 }
 
 /// Test `MinIO` backend large file (rolling test)
 #[tokio::test]
-#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d s3"]
 async fn test_minio_large_file_upload() {
+    let (_staging_dir, staging) = common::staging();
     if !common::ensure_minio() {
         return;
     }
 
     let config = get_minio_config();
-    let backend = ObjectStoreBackend::new_minio(&config, "large-test".to_string(), 8 * 1024 * 1024)
-        .expect("create MinIO backend");
+    let backend =
+        ObjectStoreBackend::new_minio(&config, "large-test".to_string(), 8 * 1024 * 1024, &staging)
+            .expect("create MinIO backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -141,7 +150,7 @@ async fn test_minio_large_file_upload() {
             .unwrap_or_else(|_| panic!("append chunk {i}"));
     }
 
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -152,10 +161,11 @@ async fn test_minio_large_file_upload() {
 
 /// Test `MinIO` rolling by size
 #[tokio::test]
-#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d s3"]
 async fn test_minio_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     if !common::ensure_minio() {
         return;
@@ -178,7 +188,7 @@ async fn test_minio_rolling_by_size() {
     };
 
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -192,10 +202,15 @@ async fn test_minio_rolling_by_size() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
-    let verify_backend =
-        ObjectStoreBackend::new_minio(&minio_config, test_prefix.clone(), 8 * 1024 * 1024)
-            .expect("create verify backend");
+    let verify_backend = ObjectStoreBackend::new_minio(
+        &minio_config,
+        test_prefix.clone(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create verify backend");
 
     let objects = verify_backend
         .list_prefix("data/", None)
@@ -224,8 +239,9 @@ async fn test_minio_rolling_by_size() {
 
 /// Test `create_backend` with minio:// URL
 #[tokio::test]
-#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d minio minio-init"]
+#[ignore = "needs the dev stack: docker compose -f docker-compose.dev.yaml up -d s3"]
 async fn test_create_backend_minio_url() {
+    let (_staging_dir, staging) = common::staging();
     if !common::ensure_minio() {
         return;
     }
@@ -238,7 +254,7 @@ async fn test_create_backend_minio_url() {
         ..Default::default()
     };
 
-    let backend = create_backend(&archive_config).expect("create backend");
+    let backend = create_backend(&archive_config, &staging).expect("create backend");
     assert_eq!(backend.name(), "minio");
 
     println!("create_backend with minio:// URL test passed");

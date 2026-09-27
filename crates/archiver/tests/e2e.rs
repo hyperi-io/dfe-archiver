@@ -20,6 +20,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "e2e/at_least_once.rs"]
+mod at_least_once;
 #[path = "e2e/azure.rs"]
 mod azure;
 #[path = "e2e/container_hygiene.rs"]

@@ -16,6 +16,7 @@ use tempfile::TempDir;
 /// Test file archive with compression
 #[tokio::test]
 async fn test_file_archive_roundtrip() {
+    let (_staging_dir, staging) = common::staging();
     let temp_dir = TempDir::new().expect("create temp dir");
     let base_path = temp_dir.path().to_str().expect("path").to_string();
 
@@ -32,7 +33,7 @@ async fn test_file_archive_roundtrip() {
     };
 
     let compressor = create_compressor("zstd", 3).expect("create compressor");
-    let storage = create_backend(&config).expect("create storage");
+    let storage = create_backend(&config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(config, policy, compressor, storage);
 
@@ -88,7 +89,7 @@ async fn test_file_archive_roundtrip() {
     }
 }
 
-/// Test rolling by size — verifies that the writer creates multiple files
+/// Test rolling by size -- verifies that the writer creates multiple files
 /// when the compressed file size exceeds the rolling threshold.
 ///
 /// Key detail: `should_roll()` checks `compressed_bytes` which only gets
@@ -96,6 +97,7 @@ async fn test_file_archive_roundtrip() {
 /// so the rolling trigger can fire on the next `write()` call.
 #[tokio::test]
 async fn test_rolling_by_size() {
+    let (_staging_dir, staging) = common::staging();
     let temp_dir = TempDir::new().expect("create temp dir");
     let base_path = temp_dir.path().to_str().expect("path").to_string();
 
@@ -114,7 +116,7 @@ async fn test_rolling_by_size() {
 
     // No compression so sizes are predictable
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&config).expect("create storage");
+    let storage = create_backend(&config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(config, policy, compressor, storage);
 
@@ -148,10 +150,11 @@ async fn test_rolling_by_size() {
     println!("Rolling by size created {file_count} files (500 byte threshold, no compression)");
 }
 
-/// Test rolling by time — verifies that the writer creates a new file
+/// Test rolling by time -- verifies that the writer creates a new file
 /// when the max age is exceeded.
 #[tokio::test]
 async fn test_rolling_by_time() {
+    let (_staging_dir, staging) = common::staging();
     let temp_dir = TempDir::new().expect("create temp dir");
     let base_path = temp_dir.path().to_str().expect("path").to_string();
 
@@ -169,7 +172,7 @@ async fn test_rolling_by_time() {
     };
 
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&config).expect("create storage");
+    let storage = create_backend(&config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(config, policy, compressor, storage);
 
@@ -183,7 +186,7 @@ async fn test_rolling_by_time() {
     // Wait for the age threshold to expire
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Write second batch — should trigger time-based roll
+    // Write second batch -- should trigger time-based roll
     for i in 5..10 {
         let record = common::test_json_message(i, "test-org", "test-event");
         writer.write_record(&record).await.expect("write record");

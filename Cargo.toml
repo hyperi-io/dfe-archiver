@@ -44,9 +44,9 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime. Floored at 2.12.6 for the deployment contract's
-# port listener declarations and KafkaLagTrigger, which contract.rs builds on.
-scalo = { version = ">=2.12.6, <3" }
+# scalo data-plane runtime. Floored at 2.13.0 for the held source
+# acknowledgements, Dlq::write_confirmed and Dlq::refusal the pipeline builds on.
+scalo = { version = ">=2.13.0, <3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
@@ -73,7 +73,7 @@ flate2 = ">=1.1.9, <2"
 
 # Cloud storage backends
 object_store = { version = ">=0.14.0, <0.15", features = ["aws", "gcp", "azure"] }
-aws-config = ">=1.8, <2"
+# The e2e MinIO fixture's client only: every backend goes through object_store.
 # default-features off to drop the `rustls` feature, which is the legacy
 # hyper-0.14 TLS backend and the only thing pulling rustls 0.21 -> the
 # unmaintained rustls-webpki 0.101. Everything else in the default set is

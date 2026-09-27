@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project:   dfe-archiver
 # File:      scripts/pgo-workload.sh
-# Purpose:   PGO workload orchestrator — Redpanda + archiver + producer
+# Purpose:   PGO workload orchestrator -- Redpanda + archiver + producer
 # Language:  Bash
 #
 # License:   BUSL-1.1
@@ -12,8 +12,8 @@
 # Usage:
 #   scripts/pgo-workload.sh <path-to-dfe-archiver-binary>
 #
-# Drives the archiver's hot path (Redpanda consume → SIMD JSON route → buffer
-# accumulate → zstd compress → file write + roll) under representative
+# Drives the archiver's hot path (Redpanda consume -> SIMD JSON route -> buffer
+# accumulate -> zstd compress -> file write + roll) under representative
 # load so a PGO-instrumented binary accumulates useful profile data.
 #
 # Environment variables (all optional):
@@ -29,7 +29,7 @@
 #   - pgo-driver binary built with --features pgo-driver (auto-built if missing)
 #
 # Behaviour:
-#   - Starts single-node Kafka (KRaft) — no MinIO, file:// destination is
+#   - Starts single-node Kafka (KRaft) -- no MinIO, file:// destination is
 #     adequate to drive compress + write hot paths
 #   - Writes ephemeral archiver config pointing at Kafka + a temp dir
 #   - Starts the passed-in archiver binary in background
@@ -65,7 +65,7 @@ KAFKA_TAG="v26.2.1"
 KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
-# Floor of 60s — shorter workloads produce bad PGO profiles
+# Floor of 60s -- shorter workloads produce bad PGO profiles
 if [[ "$DURATION" -lt 60 ]]; then
     echo "error: PGO_WORKLOAD_DURATION_SECS must be >= 60 (got $DURATION)" >&2
     echo "  short workloads produce NEGATIVE PGO gains by biasing the" >&2
@@ -110,7 +110,7 @@ WORK_DIR=""
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
-        echo "PGO_WORKLOAD_KEEP=1 — skipping cleanup" >&2
+        echo "PGO_WORKLOAD_KEEP=1 -- skipping cleanup" >&2
         echo "  archiver PID: $ARCHIVER_PID" >&2
         echo "  kafka CID:    $KAFKA_CID" >&2
         echo "  work dir:     $WORK_DIR" >&2
@@ -147,7 +147,7 @@ echo "pgo-workload: starting Redpanda ($KAFKA_IMAGE)"
 # free OSS runners we target post-OSS). dev-container mode bundles
 # --overprovisioned, --reserve-memory 0M, --check=false, --unsafe-bypass-fsync
 # and auto-creates topics; the explicit --memory cap leaves headroom for the
-# instrumented binary + load driver. Same Kafka wire protocol — app config and
+# instrumented binary + load driver. Same Kafka wire protocol -- app config and
 # the localhost:19092 endpoint are unchanged.
 KAFKA_CID=$(docker run -d --rm \
     -p 19092:9092 \
@@ -215,10 +215,10 @@ archive:
   destination: "file://$ARCHIVE_DIR"
   path_template: "{year}/{month}/{day}/{hour}"
   file_extension: "jsonl"
-  roll_size_bytes: 67108864       # 64MB — keeps roll path hot during 5-min runs
+  roll_size_bytes: 67108864       # 64MB -- keeps roll path hot during 5-min runs
   roll_interval_secs: 60
   multipart_chunk_size: 8388608
-  max_writers: 64                 # pgo-driver uses 32 orgs → exercises but doesn't saturate
+  max_writers: 64                 # pgo-driver uses 32 orgs -> exercises but doesn't saturate
 
 routing:
   mode: "expression"
@@ -231,7 +231,7 @@ compression:
   level: 3
 
 buffer:
-  flush_bytes: 4194304            # 4MB — tighter than default to keep flushes frequent
+  flush_bytes: 4194304            # 4MB -- tighter than default to keep flushes frequent
   flush_age_secs: 5
   writer_parallelism: 4
 
@@ -283,8 +283,8 @@ for attempt in $(seq 1 60); do
     # Primary signal: the archiver logs "<service> ready" once the pipeline
     # is up (main.rs). Rust line-buffers stdout, so the line hits archiver.log
     # immediately. The HTTP /readyz probe is kept as a fallback but proved
-    # unreliable in this metrics-only config — the readiness route is not
-    # served on the metrics port (9091) here — so the log line is the
+    # unreliable in this metrics-only config -- the readiness route is not
+    # served on the metrics port (9091) here -- so the log line is the
     # authoritative readiness check.
     if grep -q ' ready"' "$WORK_DIR/archiver.log" 2>/dev/null \
         || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9091/readyz" \

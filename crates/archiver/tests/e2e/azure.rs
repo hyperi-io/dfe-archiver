@@ -24,14 +24,19 @@ use dfe_archiver::storage::StorageBackend;
 /// Test Azure backend basic operations (create, append, close, exists, delete)
 #[tokio::test]
 async fn test_azure_basic_operations() {
+    let (_staging_dir, staging) = common::staging();
     let Some(azure) = common::acquire_azure("test_azure_basic_operations", "archive-test").await
     else {
         return; // reason printed by acquire_azure, and a hard failure in CI
     };
 
-    let backend =
-        ObjectStoreBackend::new_azure(&azure.config, "test-basic".to_string(), 8 * 1024 * 1024)
-            .expect("create Azure backend");
+    let backend = ObjectStoreBackend::new_azure(
+        &azure.config,
+        "test-basic".to_string(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create Azure backend");
 
     let test_path = format!("test-{}.txt", std::process::id());
 
@@ -44,7 +49,7 @@ async fn test_azure_basic_operations() {
         .append(&test_path, b"Azure!")
         .await
         .expect("append 2");
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -59,15 +64,20 @@ async fn test_azure_basic_operations() {
 /// correctly at close is genuinely covered here.
 #[tokio::test]
 async fn test_azure_multipart_large_file() {
+    let (_staging_dir, staging) = common::staging();
     let Some(azure) =
         common::acquire_azure("test_azure_multipart_large_file", "archive-test").await
     else {
         return;
     };
 
-    let backend =
-        ObjectStoreBackend::new_azure(&azure.config, "test-multipart".to_string(), 5 * 1024 * 1024)
-            .expect("create Azure backend");
+    let backend = ObjectStoreBackend::new_azure(
+        &azure.config,
+        "test-multipart".to_string(),
+        5 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create Azure backend");
 
     let test_path = format!("large-{}.bin", std::process::id());
 
@@ -80,7 +90,7 @@ async fn test_azure_multipart_large_file() {
         backend.append(&test_path, &chunk).await.expect("append");
     }
 
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
 
     assert!(backend.exists(&test_path).await.expect("exists check"));
 
@@ -105,6 +115,7 @@ async fn test_azure_multipart_large_file() {
 async fn test_azure_archive_roundtrip() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     let Some(azure) = common::acquire_azure("test_azure_archive_roundtrip", "archive-test").await
     else {
@@ -125,7 +136,7 @@ async fn test_azure_archive_roundtrip() {
     };
 
     let compressor = create_compressor("zstd", 3).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -135,12 +146,17 @@ async fn test_azure_archive_roundtrip() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
     // The writer reports success on a failed upload if nothing reads the object
     // back, so confirm an archive actually landed in the container.
-    let verify =
-        ObjectStoreBackend::new_azure(&azure.config, "test-archive".to_string(), 8 * 1024 * 1024)
-            .expect("create verify backend");
+    let verify = ObjectStoreBackend::new_azure(
+        &azure.config,
+        "test-archive".to_string(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create verify backend");
     let objects = verify
         .list_prefix("data/", None)
         .await
@@ -156,6 +172,7 @@ async fn test_azure_archive_roundtrip() {
 async fn test_azure_rolling_by_size() {
     use dfe_archiver::archive::{ArchiveWriter, RollingPolicy};
     use dfe_archiver::compression::create_compressor;
+    let (_staging_dir, staging) = common::staging();
 
     let Some(azure) = common::acquire_azure("test_azure_rolling_by_size", "archive-test").await
     else {
@@ -178,7 +195,7 @@ async fn test_azure_rolling_by_size() {
     };
 
     let compressor = create_compressor("none", 0).expect("create compressor");
-    let storage = create_backend(&archive_config).expect("create storage");
+    let storage = create_backend(&archive_config, &staging).expect("create storage");
 
     let mut writer = ArchiveWriter::new(archive_config, policy, compressor, storage);
 
@@ -192,10 +209,15 @@ async fn test_azure_rolling_by_size() {
     }
 
     writer.close().await.expect("close");
+    common::upload_closed(&mut writer).await;
 
-    let verify_backend =
-        ObjectStoreBackend::new_azure(&azure.config, test_prefix.clone(), 8 * 1024 * 1024)
-            .expect("create verify backend");
+    let verify_backend = ObjectStoreBackend::new_azure(
+        &azure.config,
+        test_prefix.clone(),
+        8 * 1024 * 1024,
+        &staging,
+    )
+    .expect("create verify backend");
 
     let objects = verify_backend
         .list_prefix("data/", None)
@@ -220,6 +242,7 @@ async fn test_azure_rolling_by_size() {
 /// Test `create_backend` with az:// URL
 #[tokio::test]
 async fn test_create_backend_azure_url() {
+    let (_staging_dir, staging) = common::staging();
     let Some(azure) = common::acquire_azure("test_create_backend_azure_url", "archive-test").await
     else {
         return;
@@ -231,7 +254,7 @@ async fn test_create_backend_azure_url() {
         ..Default::default()
     };
 
-    let backend = create_backend(&archive_config).expect("create backend");
+    let backend = create_backend(&archive_config, &staging).expect("create backend");
     assert_eq!(backend.name(), "azure");
 
     // `name()` alone would pass on a backend that cannot reach anything, so put
@@ -242,7 +265,7 @@ async fn test_create_backend_azure_url() {
         .append(&test_path, b"routed via az:// URL")
         .await
         .expect("append");
-    backend.close(&test_path).await.expect("close");
+    common::finish(backend.close(&test_path).await.expect("close")).await;
     assert!(backend.exists(&test_path).await.expect("exists check"));
     backend.delete(&test_path).await.expect("delete");
 }

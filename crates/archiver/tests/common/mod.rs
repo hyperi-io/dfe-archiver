@@ -8,11 +8,38 @@
 
 #![allow(dead_code, clippy::expect_used)]
 
+use dfe_archiver::archive::ArchiveWriter;
+use dfe_archiver::io::Staging;
+use dfe_archiver::storage::Closed;
 use std::env;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
-// ── Reachability ─────────────────────────────────────────────────────
+// -- Staged uploads ---------------------------------------------------
+
+/// A staging area removed with the returned directory.
+pub fn staging() -> (tempfile::TempDir, Staging) {
+    let dir = tempfile::TempDir::new().expect("staging dir");
+    let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+    (dir, staging)
+}
+
+/// Upload a closed file now if it was staged, as the archiver's upload task
+/// does in the background.
+pub async fn finish(closed: Closed) {
+    if let Closed::Pending(upload) = closed {
+        upload.attempt().await.expect("upload");
+    }
+}
+
+/// Upload every file `writer` closed, as the archiver's upload tasks do.
+pub async fn upload_closed(writer: &mut ArchiveWriter) {
+    for file in writer.take_settled().uploads {
+        file.upload.attempt().await.expect("upload");
+    }
+}
+
+// -- Reachability -----------------------------------------------------
 
 /// Is `host_port` accepting TCP connections?
 ///
@@ -108,8 +135,8 @@ pub fn require_container_in_ci(service: &str, reason: &str) {
 /// Test backend mode.
 ///
 /// Controlled by `TEST_MODE` in `.env`:
-/// - `"remote"` (default) — use devex cluster endpoints from env vars
-/// - `"docker"` — use dfe-docker infra profile (localhost, no auth, no TLS)
+/// - `"remote"` (default) -- use devex cluster endpoints from env vars
+/// - `"docker"` -- use dfe-docker infra profile (localhost, no auth, no TLS)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
     Remote,
@@ -130,7 +157,7 @@ pub fn load_dotenv() {
     let _ = dotenvy::dotenv();
 }
 
-// ── Kafka ────────────────────────────────────────────────────────────
+// -- Kafka ------------------------------------------------------------
 
 /// Kafka connection config for the active test mode.
 ///
@@ -193,7 +220,7 @@ macro_rules! skip_if_no_kafka {
     };
 }
 
-// ── Docker lifecycle ─────────────────────────────────────────────────
+// -- Docker lifecycle -------------------------------------------------
 
 /// Start dfe-docker infra profile if `TEST_MODE=docker` and containers aren't running.
 ///
@@ -239,7 +266,7 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     }
 
     // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
-    // up to a 30s ceiling. Avoids blind 1s sleeps between probes — fast
+    // up to a 30s ceiling. Avoids blind 1s sleeps between probes -- fast
     // services no longer pay the worst-case wait.
     let kf = kafka_test_config();
     for _ in 0..120 {
@@ -252,9 +279,10 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     Err("Kafka did not become healthy within 30s".into())
 }
 
-// ── MinIO: the shared dev stack, a precondition rather than a fixture ─
+// -- The dev stack's S3 store: a precondition rather than a fixture -----
 
-/// Host:port the `MinIO` tests talk to, from `MINIO_ENDPOINT` or the dev default.
+/// Host:port the `minio://` tests talk to, from `MINIO_ENDPOINT` or the dev
+/// default.
 fn minio_host_port() -> String {
     load_dotenv();
     let endpoint =
@@ -273,24 +301,22 @@ fn minio_host_port() -> String {
     }
 }
 
-/// Is the shared dev-stack `MinIO` up? Returns false having said why, and having
-/// failed the run outright in CI.
+/// Is the shared dev-stack S3 store up? Returns false having said why, and
+/// having failed the run outright in CI.
 ///
-/// `archiver-minio` in `docker-compose.dev.yaml` is the DEVELOPER's stack, and
-/// it is genuinely shared -- one `MinIO` serves the whole suite, and the bucket
-/// prefixes keep the tests out of each other's way. That makes it a
-/// PRECONDITION, not a fixture: bring it up with
+/// `archiver-s3` in `docker-compose.dev.yaml` is the DEVELOPER's stack, and it
+/// is shared -- one store serves the whole suite, and the bucket prefixes keep
+/// the tests out of each other's way. That makes it a PRECONDITION, not a
+/// fixture: bring it up with
 ///
-///     docker compose -f docker-compose.dev.yaml up -d minio minio-init
+///     docker compose -f docker-compose.dev.yaml up -d s3
 ///
-/// This used to start `MinIO` itself and hand back an RAII guard that ran
-/// `compose down` on drop. Two things were wrong with that and neither survives
-/// process-per-test. nextest runs every test in its own PROCESS, so all six
-/// `MinIO` tests raced to `compose up` and several came away believing they owned
-/// the container -- then the first to finish tore it down under the other five.
-/// And there is no end-of-suite hook to tear a shared container down from, so
-/// the honest options were "leak it" or "do not start it". Starting a container
-/// nothing can clean up is what left `archiver-minio` running after the suite.
+/// Starting it from a test would need a `compose down` on drop, and nextest
+/// runs every test in its own PROCESS: all the `minio://` tests would race to
+/// `compose up`, several would believe they owned the container, and the first
+/// to finish would tear it down under the rest. There is no end-of-suite hook to
+/// tear a shared container down from, so the honest options are "leak it" or
+/// "do not start it".
 ///
 /// Where a test genuinely needs a container of its own it starts one via
 /// testcontainers under [`container_name`], which is per-test, labelled, and
@@ -302,16 +328,16 @@ pub fn ensure_minio() -> bool {
         return true;
     }
     require_service_in_ci(
-        "MinIO",
+        "the dev stack's S3 store",
         &format!(
             "nothing accepting TCP on {host_port} -- start the dev stack with \
-             `docker compose -f docker-compose.dev.yaml up -d minio minio-init`"
+             `docker compose -f docker-compose.dev.yaml up -d s3`"
         ),
     );
     false
 }
 
-// ── Container naming and cleanup ──────────────────────────────────────
+// -- Container naming and cleanup --------------------------------------
 //
 // Every container this suite starts carries a name saying which repo, which
 // suite and which service it is, so an operator reading `docker ps` can tell
@@ -326,7 +352,7 @@ pub fn ensure_minio() -> bool {
 // Random names already meant one container per test, so per-test naming costs
 // nothing; a shared name would be the regression.
 //
-// The dev-stack containers (`archiver-minio` and friends in
+// The dev-stack containers (`archiver-s3` and friends in
 // docker-compose.dev.yaml) are deliberately NOT renamed to this scheme. They
 // belong to the developer who ran `docker compose up` and are correctly named
 // for that -- see `ensure_minio`.
@@ -435,7 +461,7 @@ pub fn reap_stale(name: &str) {
         .status();
 }
 
-// ── Azurite (Azure Blob emulator) ─────────────────────────────────────
+// -- Azurite (Azure Blob emulator) -------------------------------------
 
 /// Azurite, the Microsoft-published Azure Blob emulator. Pinned rather than
 /// `latest`: a floating tag retargets the suite on every image refresh, so a
@@ -720,7 +746,7 @@ pub async fn azurite_blob_len(
         .ok_or_else(|| format!("HEAD {resource} returned no usable Content-Length"))
 }
 
-// ── LocalStack (AWS S3 emulator) ──────────────────────────────────────
+// -- LocalStack (AWS S3 emulator) --------------------------------------
 
 /// `LocalStack`, on the SEMVER line only -- do NOT move this to the `CalVer` tags
 /// (`2026.07.0` etc). Those require a licence: they exit 55 with "License
@@ -950,7 +976,7 @@ pub async fn localstack_object_len(
         .ok_or_else(|| format!("HEAD {url} returned no usable Content-Length"))
 }
 
-// ── fake-gcs-server (Google Cloud Storage emulator) ───────────────────
+// -- fake-gcs-server (Google Cloud Storage emulator) -------------------
 
 /// `fsouza/fake-gcs-server`, the maintained GCS emulator (1.55.1 published
 /// 2026-07-19). Pinned, not `latest`, for the same reason as Azurite.
@@ -1245,7 +1271,632 @@ pub async fn fake_gcs_object_len(
         .ok_or_else(|| format!("no usable size in {meta}"))
 }
 
-// ── Test data helpers ────────────────────────────────────────────────
+// -- Fixed host ports below the ephemeral range --
+
+/// First port probed for a fixed host mapping.
+const LOW_PORT_FIRST: u16 = 5100;
+
+/// How many ports past [`LOW_PORT_FIRST`] are probed.
+const LOW_PORT_SPAN: u16 = 900;
+
+/// A host port below 10240, where this host's ephemeral range starts, that
+/// nothing listens on right now.
+///
+/// Docker publishes a random mapping from the ephemeral range, so a container
+/// these tests start is mapped to a fixed port from here instead. The probe
+/// starts at an offset from the process id, so the two test processes nextest
+/// runs at once rarely try the same port first. `taken` skips ports an earlier
+/// attempt found Docker could not bind.
+pub fn free_low_port(taken: &[u16]) -> u16 {
+    let offset = u16::try_from(std::process::id() % u32::from(LOW_PORT_SPAN)).unwrap_or(0);
+    (0..LOW_PORT_SPAN)
+        .map(|step| LOW_PORT_FIRST + (offset + step) % LOW_PORT_SPAN)
+        .find(|port| {
+            !taken.contains(port) && std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok()
+        })
+        .expect("a free host port between 5100 and 6000")
+}
+
+/// How long a container these tests start may take to report it is up.
+const CONTAINER_STARTUP: Duration = Duration::from_secs(40);
+
+/// Whether a fresh container can clear a failed start: the fixed host port was
+/// taken between the probe and the bind, or the process exited before it
+/// reported ready, as the Kafka native image does when it segfaults on start.
+fn worth_a_retry(error: &str) -> bool {
+    error.contains("port is already allocated")
+        || error.contains("address already in use")
+        || error.contains("End of stream reached before finding message")
+}
+
+// -- S3-compatible store (LocalStack), owned per test --
+
+/// Credentials the store is addressed with. `LocalStack` accepts any pair.
+const S3_STORE_USER: &str = "test";
+const S3_STORE_PASSWORD: &str = "test";
+
+/// An S3-compatible store this test owns, `LocalStack` mapped to a port below
+/// 10240. The archiver reaches it through its `minio://` destination, the S3
+/// client for an endpoint of the operator's choosing. Dropping it stops and
+/// removes the container.
+pub struct S3StoreFixture {
+    /// `http://127.0.0.1:<port>`.
+    pub endpoint: String,
+    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+}
+
+impl S3StoreFixture {
+    /// The archiver's `minio` section for `bucket` on this store.
+    #[must_use]
+    pub fn config(&self, bucket: &str) -> dfe_archiver::config::MinioConfig {
+        dfe_archiver::config::MinioConfig {
+            endpoint: self.endpoint.clone(),
+            access_key: S3_STORE_USER.to_string(),
+            secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
+                S3_STORE_PASSWORD.to_string(),
+            ),
+            bucket: bucket.to_string(),
+            use_ssl: false,
+        }
+    }
+
+    /// A signed S3 client, for the bucket, listing and read calls
+    /// `object_store` does not offer.
+    #[must_use]
+    pub fn s3(&self) -> aws_sdk_s3::Client {
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .endpoint_url(&self.endpoint)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                S3_STORE_USER,
+                S3_STORE_PASSWORD,
+                None,
+                None,
+                "s3-store-fixture",
+            ))
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(config)
+    }
+
+    /// Create `bucket`.
+    pub async fn create_bucket(&self, bucket: &str) {
+        self.s3()
+            .create_bucket()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("create bucket {bucket}: {e:?}"));
+    }
+
+    /// Every object key in `bucket`.
+    pub async fn keys(&self, bucket: &str) -> Vec<String> {
+        let listed = self
+            .s3()
+            .list_objects_v2()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("list {bucket}: {e:?}"));
+        listed
+            .contents()
+            .iter()
+            .filter_map(|object| object.key().map(ToString::to_string))
+            .collect()
+    }
+
+    /// The bytes of `key` in `bucket`.
+    pub async fn read(&self, bucket: &str, key: &str) -> Vec<u8> {
+        self.s3()
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("get {bucket}/{key}: {e:?}"))
+            .body
+            .collect()
+            .await
+            .expect("read object body")
+            .into_bytes()
+            .to_vec()
+    }
+
+    /// Every NDJSON line across every object in `bucket`.
+    pub async fn lines(&self, bucket: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        for key in self.keys(bucket).await {
+            let body = self.read(bucket, &key).await;
+            lines.extend(
+                String::from_utf8_lossy(&body)
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(ToString::to_string),
+            );
+        }
+        lines
+    }
+
+    /// Multipart uploads started in `bucket` and not yet completed.
+    pub async fn open_uploads(&self, bucket: &str) -> usize {
+        self.s3()
+            .list_multipart_uploads()
+            .bucket(bucket)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("list uploads in {bucket}: {e:?}"))
+            .uploads()
+            .len()
+    }
+
+    /// A proxy to this store that refuses every upload whose key contains
+    /// `refused`, as a store refuses an object it can never accept, and passes
+    /// every other request through. `LocalStack` itself refuses no key the
+    /// archiver's own 1024-byte check lets through.
+    pub async fn refusing_uploads(&self, refused: &str) -> RefusingProxy {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the refusing proxy");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("the proxy's address")
+        );
+        let upstream = self.endpoint.clone();
+        let refused = refused.to_string();
+        let task = tokio::spawn(async move {
+            // Dropped with the accept loop, which ends every open connection.
+            let mut connections = tokio::task::JoinSet::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                connections.spawn(relay_requests(socket, upstream.clone(), refused.clone()));
+            }
+        });
+        RefusingProxy { endpoint, task }
+    }
+}
+
+/// The answer a store gives for an object key it can never accept.
+const KEY_REFUSAL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>KeyTooLongError</Code><Message>Your key is too long</Message></Error>";
+
+/// A proxy in front of an [`S3StoreFixture`] that refuses some uploads. It
+/// stops when this is dropped.
+pub struct RefusingProxy {
+    /// `http://127.0.0.1:<port>`.
+    pub endpoint: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RefusingProxy {
+    /// The archiver's `minio` section for `bucket`, through this proxy.
+    #[must_use]
+    pub fn config(&self, bucket: &str) -> dfe_archiver::config::MinioConfig {
+        dfe_archiver::config::MinioConfig {
+            endpoint: self.endpoint.clone(),
+            access_key: S3_STORE_USER.to_string(),
+            secret_key: dfe_archiver::config::sensitive::SensitiveString::from(
+                S3_STORE_PASSWORD.to_string(),
+            ),
+            bucket: bucket.to_string(),
+            use_ssl: false,
+        }
+    }
+}
+
+impl Drop for RefusingProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// One HTTP/1.1 request, as a client sent it.
+struct ProxiedRequest {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+/// Read the next request from `conn`, or `None` once the client is done.
+async fn read_request(
+    conn: &mut tokio::io::BufReader<tokio::net::TcpStream>,
+) -> Option<ProxiedRequest> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let mut request_line = String::new();
+    if conn.read_line(&mut request_line).await.ok()? == 0 {
+        return None;
+    }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut headers = Vec::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if conn.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.trim().to_string(), value.trim().to_string());
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().ok()?;
+            }
+            headers.push((name, value));
+        }
+    }
+    let mut body = vec![0u8; length];
+    conn.read_exact(&mut body).await.ok()?;
+    Some(ProxiedRequest {
+        method,
+        target,
+        headers,
+        body,
+    })
+}
+
+/// Serve one client connection: a request uploading a key that contains
+/// `refused` gets [`KEY_REFUSAL`], and any other goes to `upstream`.
+async fn relay_requests(socket: tokio::net::TcpStream, upstream: String, refused: String) {
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return;
+    };
+    let mut conn = tokio::io::BufReader::new(socket);
+    while let Some(request) = read_request(&mut conn).await {
+        let uploads = matches!(request.method.as_str(), "POST" | "PUT");
+        let answer = if uploads && request.target.contains(&refused) {
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{KEY_REFUSAL}",
+                KEY_REFUSAL.len()
+            )
+            .into_bytes()
+        } else {
+            match forward(&client, &upstream, request).await {
+                Ok(answer) => answer,
+                Err(_) => return,
+            }
+        };
+        if conn.get_mut().write_all(&answer).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Send `request` on to `upstream`, and return its answer as HTTP/1.1 bytes.
+async fn forward(
+    client: &reqwest::Client,
+    upstream: &str,
+    request: ProxiedRequest,
+) -> Result<Vec<u8>, reqwest::Error> {
+    use std::fmt::Write as _;
+
+    // reqwest frames the body and the connection itself.
+    const HOP_HEADERS: [&str; 3] = ["content-length", "transfer-encoding", "connection"];
+    let method =
+        reqwest::Method::from_bytes(request.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut outbound = client
+        .request(method.clone(), format!("{upstream}{}", request.target))
+        .body(request.body);
+    for (name, value) in &request.headers {
+        if !HOP_HEADERS.iter().any(|hop| name.eq_ignore_ascii_case(hop)) {
+            outbound = outbound.header(name.as_str(), value.as_str());
+        }
+    }
+    let response = outbound.send().await?;
+    let status = response.status();
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\n",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    );
+    let object_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("0")
+        .to_string();
+    for (name, value) in response.headers() {
+        if !HOP_HEADERS.contains(&name.as_str()) {
+            let _ = write!(head, "{name}: {}\r\n", value.to_str().unwrap_or(""));
+        }
+    }
+    let body = response.bytes().await?;
+    // A HEAD answer carries the object's length and no body.
+    let head_only = method == reqwest::Method::HEAD;
+    let length = if head_only {
+        object_length
+    } else {
+        body.len().to_string()
+    };
+    let _ = write!(head, "Content-Length: {length}\r\n\r\n");
+    let mut answer = head.into_bytes();
+    if !head_only {
+        answer.extend_from_slice(&body);
+    }
+    Ok(answer)
+}
+
+/// Start an S3-compatible store for `test` on a fixed port below 10240.
+///
+/// Returns `None` only when Docker is absent, having failed the run in CI.
+pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    let name = container_name(Some(test), "localstack");
+    let mut taken = Vec::new();
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        reap_stale(&name);
+        let port = free_low_port(&taken);
+        let image = GenericImage::new("localstack/localstack", LOCALSTACK_TAG)
+            .with_exposed_port(4566u16.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready."))
+            .with_env_var("SERVICES", "s3")
+            .with_mapped_port(port, 4566u16.tcp())
+            .with_container_name(&name)
+            .with_labels(test_labels("localstack"))
+            .with_startup_timeout(CONTAINER_STARTUP);
+        match image.start().await {
+            Ok(container) => {
+                let endpoint = format!("http://127.0.0.1:{port}");
+                if let Err(e) = wait_for_port(&format!("127.0.0.1:{port}"), 120).await {
+                    require_container_in_ci("LocalStack", &e);
+                    return None;
+                }
+                if let Err(e) = wait_for_localstack_s3(&endpoint).await {
+                    require_container_in_ci("LocalStack", &e);
+                    return None;
+                }
+                return Some(S3StoreFixture {
+                    endpoint,
+                    _container: container,
+                });
+            }
+            Err(e) => {
+                last_error = format!("container start on port {port} failed: {e}");
+                if !worth_a_retry(&last_error) {
+                    break;
+                }
+                taken.push(port);
+            }
+        }
+    }
+    require_container_in_ci("LocalStack", &last_error);
+    None
+}
+
+// -- Kafka, owned per test --
+
+/// Kafka to test against, pinned by digest, the same pin scalo's own tests use.
+///
+/// renovate: datasource=docker depName=apache/kafka-native
+const KAFKA_TAG: &str =
+    "4.3.1@sha256:2885898ba17065023f1bd605f3a81efcfa986014f062b73b91ef5462485f9060";
+
+/// A single-node `KRaft` broker this test owns, advertised on a fixed port below
+/// 10240. Dropping it stops and removes the container.
+pub struct KafkaFixture {
+    /// `127.0.0.1:<port>`.
+    pub bootstrap: String,
+    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+}
+
+impl KafkaFixture {
+    fn client(&self) -> rdkafka::config::ClientConfig {
+        let mut config = rdkafka::config::ClientConfig::new();
+        config.set("bootstrap.servers", &self.bootstrap);
+        config
+    }
+
+    /// Create `topic` with one partition and the given topic configs.
+    pub async fn create_topic(&self, topic: &str, configs: &[(&str, &str)]) {
+        use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+        use rdkafka::client::DefaultClientContext;
+
+        let admin: AdminClient<DefaultClientContext> =
+            self.client().create().expect("kafka admin client");
+        let mut spec = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+        for (key, value) in configs {
+            spec = spec.set(key, value);
+        }
+        for result in admin
+            .create_topics(&[spec], &AdminOptions::new())
+            .await
+            .expect("create topics")
+        {
+            result.unwrap_or_else(|(name, code)| panic!("create topic {name}: {code}"));
+        }
+    }
+
+    /// Produce `payloads` to `topic` and wait for every delivery report.
+    pub async fn produce(&self, topic: &str, payloads: &[Vec<u8>]) {
+        use rdkafka::producer::{FutureProducer, FutureRecord};
+
+        let producer: FutureProducer = self
+            .client()
+            .set("message.timeout.ms", "30000")
+            .set(
+                "message.max.bytes",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
+            .create()
+            .expect("kafka producer");
+        for payload in payloads {
+            producer
+                .send(
+                    FutureRecord::<(), [u8]>::to(topic).payload(payload.as_slice()),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap_or_else(|(e, _)| panic!("produce to {topic}: {e}"));
+        }
+    }
+
+    /// How many records partition 0 of `topic` holds: its high watermark.
+    pub fn records_in(&self, topic: &str) -> i64 {
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", "watermark-probe")
+            .create()
+            .expect("kafka consumer");
+        let (_, high) = consumer
+            .fetch_watermarks(topic, 0, Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("watermarks of {topic}: {e}"));
+        high
+    }
+
+    /// Every record on partition 0 of `topic`, oldest first.
+    pub fn read_all(&self, topic: &str) -> Vec<Vec<u8>> {
+        use rdkafka::Message;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let end = self.records_in(topic);
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", "read-all-probe")
+            .set("enable.auto.commit", "false")
+            .set(
+                "fetch.message.max.bytes",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
+            .create()
+            .expect("kafka consumer");
+        let mut from = TopicPartitionList::new();
+        from.add_partition_offset(topic, 0, Offset::Beginning)
+            .expect("partition offset");
+        consumer.assign(&from).expect("assign");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut records = Vec::new();
+        while i64::try_from(records.len()).unwrap_or(i64::MAX) < end {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "read {} of {end} records from {topic}",
+                records.len()
+            );
+            if let Some(message) = consumer.poll(Duration::from_millis(500)) {
+                let message = message.unwrap_or_else(|e| panic!("read {topic}: {e}"));
+                records.push(message.payload().unwrap_or_default().to_vec());
+            }
+        }
+        records
+    }
+
+    /// The offset `group` has committed on partition 0 of `topic`, or `None`
+    /// when it has committed nothing there.
+    pub fn committed(&self, group: &str, topic: &str) -> Option<i64> {
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let consumer: BaseConsumer = self
+            .client()
+            .set("group.id", group)
+            .set("enable.auto.commit", "false")
+            .create()
+            .expect("kafka consumer");
+        let mut wanted = TopicPartitionList::new();
+        wanted.add_partition(topic, 0);
+        let committed = consumer
+            .committed_offsets(wanted, Duration::from_secs(10))
+            .expect("committed offsets");
+        committed
+            .elements_for_topic(topic)
+            .first()
+            .and_then(|element| match element.offset() {
+                Offset::Offset(offset) => Some(offset),
+                _ => None,
+            })
+    }
+}
+
+/// Start a single-node Kafka for `test` on a fixed port below 10240.
+///
+/// Returns `None` only when Docker is absent, having failed the run in CI.
+pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    let name = container_name(Some(test), "kafka");
+    let mut taken = Vec::new();
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        reap_stale(&name);
+        let port = free_low_port(&taken);
+        let image = GenericImage::new("apache/kafka-native", KAFKA_TAG)
+            .with_exposed_port(9092u16.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
+            .with_env_var("KAFKA_NODE_ID", "1")
+            .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
+            .with_env_var(
+                "KAFKA_LISTENERS",
+                "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+            )
+            // The broker advertises the host mapping, so a client on the host
+            // reaches it by the address the metadata names.
+            .with_env_var(
+                "KAFKA_ADVERTISED_LISTENERS",
+                format!("PLAINTEXT://127.0.0.1:{port}"),
+            )
+            .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
+            .with_env_var(
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+            )
+            .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
+            .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+            .with_env_var(
+                "KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR",
+                "1",
+            )
+            .with_env_var("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR", "1")
+            .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+            // The record ceiling broker, topic and producer agree on in a deployment.
+            .with_env_var(
+                "KAFKA_MESSAGE_MAX_BYTES",
+                scalo::transport::kafka::MESSAGE_MAX_BYTES.to_string(),
+            )
+            .with_mapped_port(port, 9092u16.tcp())
+            .with_container_name(&name)
+            .with_labels(test_labels("kafka"))
+            .with_startup_timeout(CONTAINER_STARTUP);
+        match image.start().await {
+            Ok(container) => {
+                let bootstrap = format!("127.0.0.1:{port}");
+                if let Err(e) = wait_for_port(&bootstrap, 120).await {
+                    require_container_in_ci("Kafka", &e);
+                    return None;
+                }
+                return Some(KafkaFixture {
+                    bootstrap,
+                    _container: container,
+                });
+            }
+            Err(e) => {
+                last_error = format!("container start on port {port} failed: {e}");
+                if !worth_a_retry(&last_error) {
+                    break;
+                }
+                taken.push(port);
+            }
+        }
+    }
+    require_container_in_ci("Kafka", &last_error);
+    None
+}
+
+// -- Test data helpers ------------------------------------------------
 
 /// Generate unique topic name for tests
 pub fn test_topic_name(prefix: &str) -> String {

@@ -85,17 +85,35 @@ impl Compressor for ZstdCompressor {
     }
 }
 
-/// LZ4 compression
+/// LZ4 compression, one LZ4 frame per call, so a file of appended calls is a
+/// standard concatenated-frame `.lz4` stream.
 pub struct Lz4Compressor;
 
 impl Compressor for Lz4Compressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        Ok(lz4_flex::compress_prepend_size(data))
+        use std::io::Write;
+
+        let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+        encoder
+            .write_all(data)
+            .map_err(|e| Error::Compression(format!("lz4 compress failed: {e}")))?;
+        encoder
+            .finish()
+            .map_err(|e| Error::Compression(format!("lz4 compress finish failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        lz4_flex::decompress_size_prepended(data)
-            .map_err(|e| Error::Compression(format!("lz4 decompress failed: {e}")))
+        use std::io::Read;
+
+        // The decoder ends its stream at each frame's end, and a file holds one frame a flush.
+        let mut rest = data;
+        let mut decompressed = Vec::new();
+        while !rest.is_empty() {
+            lz4_flex::frame::FrameDecoder::new(&mut rest)
+                .read_to_end(&mut decompressed)
+                .map_err(|e| Error::Compression(format!("lz4 decompress failed: {e}")))?;
+        }
+        Ok(decompressed)
     }
 
     fn extension(&self) -> &'static str {
@@ -107,26 +125,36 @@ impl Compressor for Lz4Compressor {
     }
 }
 
-/// Snappy compression
+/// Snappy compression in the snappy framing format, one framed stream per
+/// call, so a file of appended calls is still one readable framed stream.
 pub struct SnappyCompressor;
 
 impl Compressor for SnappyCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = snap::raw::Encoder::new();
+        use std::io::Write;
+
+        let mut encoder = snap::write::FrameEncoder::new(Vec::new());
         encoder
-            .compress_vec(data)
-            .map_err(|e| Error::Compression(format!("snappy compress failed: {e}")))
+            .write_all(data)
+            .map_err(|e| Error::Compression(format!("snappy compress failed: {e}")))?;
+        encoder
+            .into_inner()
+            .map_err(|e| Error::Compression(format!("snappy compress finish failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut decoder = snap::raw::Decoder::new();
-        decoder
-            .decompress_vec(data)
-            .map_err(|e| Error::Compression(format!("snappy decompress failed: {e}")))
+        use std::io::Read;
+
+        let mut decompressed = Vec::new();
+        snap::read::FrameDecoder::new(data)
+            .read_to_end(&mut decompressed)
+            .map_err(|e| Error::Compression(format!("snappy decompress failed: {e}")))?;
+        Ok(decompressed)
     }
 
+    /// The snappy framing format's own extension.
     fn extension(&self) -> &'static str {
-        "snappy"
+        "sz"
     }
 
     fn name(&self) -> &'static str {
@@ -171,10 +199,11 @@ impl Compressor for GzipCompressor {
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::read::GzDecoder;
+        use flate2::read::MultiGzDecoder;
         use std::io::Read;
 
-        let mut decoder = GzDecoder::new(data);
+        // Every flush appends a gzip member, and a file holds many.
+        let mut decoder = MultiGzDecoder::new(data);
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
@@ -370,6 +399,31 @@ mod tests {
         }
     }
 
+    /// A file is one compressed call per flush appended end to end, and every
+    /// codec reads the whole of it back, not just the first flush.
+    #[test]
+    fn every_codec_reads_back_a_file_of_appended_flushes() {
+        let flushes: [&[u8]; 4] = [
+            b"{\"id\":0}\n",
+            b"",
+            b"{\"id\":1}\n{\"id\":2}\n",
+            b"{\"id\":3}\n",
+        ];
+        for codec in ["zstd", "lz4", "snappy", "gzip", "none"] {
+            let c = create_compressor(codec, 3).expect(codec);
+            let file: Vec<u8> = flushes
+                .iter()
+                .flat_map(|flush| c.compress(flush).expect("compress"))
+                .collect();
+            assert_eq!(
+                c.decompress(&file)
+                    .unwrap_or_else(|e| panic!("{codec}: {e}")),
+                flushes.concat(),
+                "{codec} reads every flush"
+            );
+        }
+    }
+
     #[test]
     fn test_compressor_extensions() {
         assert_eq!(
@@ -379,7 +433,7 @@ mod tests {
         assert_eq!(create_compressor("lz4", 0).expect("lz4").extension(), "lz4");
         assert_eq!(
             create_compressor("snappy", 0).expect("snappy").extension(),
-            "snappy"
+            "sz"
         );
         assert_eq!(
             create_compressor("gzip", 0).expect("gzip").extension(),

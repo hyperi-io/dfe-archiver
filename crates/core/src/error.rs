@@ -11,7 +11,7 @@ use thiserror::Error;
 /// Result type alias for archiver operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Boxed dynamic error source — preserves the original error chain so
+/// Boxed dynamic error source -- preserves the original error chain so
 /// `tracing::error!(error = %e, ...)` plus `e.source()` walks reach the
 /// underlying scalo / `object_store` / rdkafka diagnostic.
 pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -34,10 +34,27 @@ pub enum Error {
     },
 
     /// Storage backend error. `source` carries the underlying
-    /// `object_store::Error`, `aws_sdk_s3` error, or filesystem error when
-    /// available.
+    /// `object_store::Error` or filesystem error when available.
     #[error("storage error: {message}")]
     Storage {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
+
+    /// The store refused this object for good: retrying the same object gets
+    /// the same answer, so its records are dropped rather than retried.
+    #[error("refused by the store: {message}")]
+    Refused {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
+
+    /// A staged file's local copy cannot be read back -- gone, not readable,
+    /// or shorter than what was written -- which no retry of its upload changes.
+    #[error("staged copy unreadable: {message}")]
+    Unreadable {
         message: String,
         #[source]
         source: Option<BoxSource>,
@@ -67,9 +84,21 @@ pub enum Error {
     #[error("routing error: {0}")]
     Routing(String),
 
+    /// The record nests deeper than routing will parse, so the same bytes are
+    /// refused every time. The message is the reason its dead letter carries.
+    #[error("payload nesting exceeds the maximum parse depth of {max}")]
+    TooDeep { max: usize },
+
     /// Runtime error
     #[error("runtime error: {0}")]
     Runtime(String),
+
+    /// Records neither archived nor dead-lettered hold the commit below them,
+    /// and only a restart or rebalance reads them again.
+    #[error(
+        "{records} records were neither archived nor dead-lettered and hold the commit below them"
+    )]
+    Withheld { records: u64 },
 
     /// Shutdown requested
     #[error("shutdown requested")]
@@ -108,6 +137,50 @@ impl Error {
             source: Some(source.into()),
         }
     }
+
+    /// Construct a refusal without an underlying source.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::Refused {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Construct a refusal wrapping the underlying error chain.
+    pub fn refused_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Refused {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Construct an unreadable-copy error wrapping the underlying error chain.
+    pub fn unreadable_with(message: impl Into<String>, source: impl Into<BoxSource>) -> Self {
+        Self::Unreadable {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Whether the store refused the object for good.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Self::Refused { .. })
+    }
+
+    /// Whether a staged file's local copy cannot be read back.
+    #[must_use]
+    pub fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unreadable { .. })
+    }
+
+    /// Whether a write failed for a reason no retry of the same records
+    /// changes: the store refused their object, or the writer could not encode
+    /// them. Every other failure, a full or failing disk included, can clear.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Refused { .. } | Self::Compression(_))
+    }
 }
 
 /// Error category for retry/DLQ decisions
@@ -130,11 +203,17 @@ impl Error {
             Self::Transport { .. }
             | Self::Storage { .. }
             | Self::Runtime(_)
+            | Self::Withheld { .. }
             | Self::AlreadyExists { .. }
             | Self::BufferOverflow { .. } => ErrorCategory::Transient,
 
             // Data - DLQ
-            Self::Serialization(_) | Self::Routing(_) | Self::Compression(_) => ErrorCategory::Data,
+            Self::Serialization(_)
+            | Self::Routing(_)
+            | Self::TooDeep { .. }
+            | Self::Compression(_)
+            | Self::Refused { .. }
+            | Self::Unreadable { .. } => ErrorCategory::Data,
 
             // Fatal - fail
             Self::Config(_) | Self::Shutdown => ErrorCategory::Fatal,
@@ -182,6 +261,18 @@ mod tests {
             message: "exceeded 64MB".to_string(),
         };
         assert_eq!(format!("{e}"), "buffer overflow: exceeded 64MB");
+
+        let e = Error::Withheld { records: 20 };
+        assert_eq!(
+            format!("{e}"),
+            "20 records were neither archived nor dead-lettered and hold the commit below them"
+        );
+
+        let e = Error::TooDeep { max: 64 };
+        assert_eq!(
+            format!("{e}"),
+            "payload nesting exceeds the maximum parse depth of 64"
+        );
     }
 
     #[test]
@@ -199,6 +290,10 @@ mod tests {
             ErrorCategory::Transient
         );
         assert_eq!(
+            Error::Withheld { records: 1 }.category(),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
             Error::BufferOverflow {
                 message: "oom".into()
             }
@@ -210,10 +305,31 @@ mod tests {
             Error::Routing("no field".into()).category(),
             ErrorCategory::Data
         );
+        assert_eq!(Error::TooDeep { max: 64 }.category(), ErrorCategory::Data);
+        assert!(!Error::TooDeep { max: 64 }.is_retryable());
         assert_eq!(
             Error::Compression("corrupt".into()).category(),
             ErrorCategory::Data
         );
+        assert_eq!(
+            Error::refused("key too long").category(),
+            ErrorCategory::Data
+        );
+        assert!(Error::refused("key too long").is_refused());
+        assert!(!Error::storage("503").is_refused());
+
+        assert!(Error::refused("key too long").is_permanent());
+        assert!(Error::Compression("cannot encode".into()).is_permanent());
+        for can_clear in [
+            Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+            Error::Io(std::io::Error::from_raw_os_error(5)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::NotADirectory)),
+            Error::storage("staging failed"),
+        ] {
+            assert!(!can_clear.is_permanent(), "{can_clear}");
+        }
 
         assert_eq!(
             Error::Config("missing".into()).category(),
