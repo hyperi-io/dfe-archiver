@@ -135,7 +135,7 @@ pub fn require_container_in_ci(service: &str, reason: &str) {
 /// Test backend mode.
 ///
 /// Controlled by `TEST_MODE` in `.env`:
-/// - `"remote"` (default) -- use devex cluster endpoints from env vars
+/// - `"remote"` (default) -- use remote cluster endpoints from env vars
 /// - `"docker"` -- use dfe-docker infra profile (localhost, no auth, no TLS)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
