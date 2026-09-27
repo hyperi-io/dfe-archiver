@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.26](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.25...v1.7.26) (2026-09-27)
+
+### Bug Fixes
+
+* **archiver:** hold Kafka offsets until the archive file is durable ([#98](https://github.com/hyperi-io/dfe-archiver/issues/98)) ([e8fd4f7](https://github.com/hyperi-io/dfe-archiver/commit/e8fd4f7314090e45e93dd1df998cfa0a5e393808))
+* **metrics:** count records and bytes written once ([#97](https://github.com/hyperi-io/dfe-archiver/issues/97)) ([6d77b54](https://github.com/hyperi-io/dfe-archiver/commit/6d77b54ce826a62fb4e3a8b1de4e7e82314a738f))
+
 ## [1.7.25](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.24...v1.7.25) (2026-09-24)
 
 ### Bug Fixes
