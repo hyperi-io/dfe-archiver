@@ -37,7 +37,7 @@ use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::storage::create_backend;
-use dfe_archiver_io::{KafkaStatsEmitter, ReceivedBatch, SourceTransport, Staging};
+use dfe_archiver_io::{ReceivedBatch, SourceTransport, Staging};
 use lru::LruCache;
 use rayon::prelude::*;
 use scalo::dlq::{Dlq, DlqEntry, DlqSource};
@@ -572,8 +572,6 @@ pub struct Archiver {
     /// governor reads, so the bytes accounted here (`add_bytes` on recv,
     /// `release` after write) drive the inbound pause-partitions brake.
     memory_guard: Arc<MemoryGuard>,
-    /// rdkafka stats emitter (sidecar consumer for broker/partition metrics)
-    _stats_emitter: Option<KafkaStatsEmitter>,
     /// Dead letter queue for failed messages
     dlq: Arc<Dlq>,
     /// Log-spam guards (per-instance -- see `LogSpamGuards` doc)
@@ -1029,20 +1027,6 @@ impl Archiver {
             ))
         });
 
-        // Start rdkafka stats sidecar (non-fatal if it fails). Skipped on the
-        // direct transport, which reaches no broker to collect stats from.
-        let stats_emitter = if config.is_direct() {
-            None
-        } else {
-            match KafkaStatsEmitter::new(&config.kafka) {
-                Ok(emitter) => Some(emitter),
-                Err(e) => {
-                    warn!(error = %e, "Failed to start Kafka stats emitter (non-fatal)");
-                    None
-                }
-            }
-        };
-
         let cancel = CancellationToken::new();
 
         let dlq = Arc::new(spawn_dlq(&config)?);
@@ -1103,7 +1087,6 @@ impl Archiver {
             scaling,
             sink,
             memory_guard,
-            _stats_emitter: stats_emitter,
             dlq,
             log_guards: LogSpamGuards::default(),
             routing_fallback_guards,

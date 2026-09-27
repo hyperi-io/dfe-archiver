@@ -12,7 +12,7 @@ pub mod storage;
 pub mod transport;
 
 pub use grpc::PushTransportAdapter;
-pub use kafka::{KafkaStatsEmitter, TransportAdapter};
+pub use kafka::TransportAdapter;
 pub use storage::{
     FileBackend, ObjectStoreBackend, Quarantined, Recovery, Staging, create_backend,
 };

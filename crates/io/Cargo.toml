@@ -28,7 +28,6 @@ dfe-archiver-core = { workspace = true }
 # compiling scalo's file/pipe/http/memory backends in would add image
 # weight for a `transport:` value the archiver refuses to boot on.
 scalo = { workspace = true, features = ["transport-kafka", "transport-grpc", "metrics", "governor"] }
-rdkafka = { workspace = true }
 
 # Cloud storage
 object_store = { workspace = true }
@@ -49,6 +48,8 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
+# Builds the librdkafka statistics the position-lag unit test feeds to scalo.
+rdkafka = { workspace = true }
 # Read uploaded archive objects back with each codec's own decoder rather than
 # the archiver's, to prove the objects are standard framed streams.
 zstd = { workspace = true }
