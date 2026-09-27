@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.27](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.26...v1.7.27) (2026-09-27)
+
+### Bug Fixes
+
+* rebuild on scalo 2.13.1 ([ea60192](https://github.com/hyperi-io/dfe-archiver/commit/ea60192859f67a8de6ca7d468806b68f2594f3f4))
+* stop naming our dev cluster in test docs ([#101](https://github.com/hyperi-io/dfe-archiver/issues/101)) ([def59d8](https://github.com/hyperi-io/dfe-archiver/commit/def59d82cafe3eb4ced1b9cbdaf82d13d60f6ddc))
+* **test:** retry committed offsets until the group coordinator is ready ([#104](https://github.com/hyperi-io/dfe-archiver/issues/104)) ([d897793](https://github.com/hyperi-io/dfe-archiver/commit/d897793a2931e27f38b0bc605f9c2a1d43aba882))
+
 ## [1.7.26](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.25...v1.7.26) (2026-09-27)
 
 ### Bug Fixes
