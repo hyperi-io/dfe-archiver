@@ -424,8 +424,94 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use scalo::version_check::VersionCheckConfig;
+
+    /// The env opt-out the charts render from the app's own prefix.
+    const ENABLED_VAR: &str = "ARCHIVER_VERSION_CHECK__ENABLED";
+
+    /// A config that passes `validate_config`, plus `extra` top-level YAML.
+    fn config_yaml(extra: &str) -> String {
+        format!("kafka:\n  brokers: [\"localhost:9092\"]\n{extra}")
+    }
+
+    /// The version check `ServiceRuntime::build` resolves after `load_config`
+    /// reads `yaml` as the config file, with the env opt-out at `enabled`.
+    ///
+    /// `via_env` names the file by `ARCHIVER_CONFIG` instead of `--config`. The
+    /// cascade is a process-global `OnceLock`, so each caller needs its own
+    /// process, which nextest gives every test.
+    fn resolved_version_check(
+        yaml: &str,
+        enabled: Option<&str>,
+        via_env: bool,
+    ) -> VersionCheckConfig {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).expect("write config");
+        let path = path.to_str().expect("utf-8 path");
+        let named_by = if via_env { Some(path) } else { None };
+
+        temp_env::with_vars(
+            [(ENABLED_VAR, enabled), ("ARCHIVER_CONFIG", named_by)],
+            || {
+                assert!(
+                    scalo::config::try_get().is_none(),
+                    "the cascade is already set in this process; run under cargo nextest"
+                );
+                let app = if via_env {
+                    App::parse_from(["dfe-archiver"])
+                } else {
+                    App::parse_from(["dfe-archiver", "--config", path])
+                };
+                app.load_config(app.common_args().config.as_deref())
+                    .expect("config loads");
+                VersionCheckConfig::from_cascade_or(
+                    app.name(),
+                    "0.0.0",
+                    app.version_check_defaults(),
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn version_check_env_opt_out_stops_the_check() {
+        let resolved = resolved_version_check(&config_yaml(""), Some("false"), false);
+        assert!(
+            !resolved.enabled,
+            "{ENABLED_VAR}=false must stop the check under --config"
+        );
+    }
+
+    #[test]
+    fn version_check_config_file_opt_out_stops_the_check() {
+        let yaml = config_yaml("version_check:\n  enabled: false\n");
+        let resolved = resolved_version_check(&yaml, None, false);
+        assert!(
+            !resolved.enabled,
+            "version_check.enabled: false in the --config file must stop the check"
+        );
+    }
+
+    #[test]
+    fn version_check_opt_out_in_the_archiver_config_file_stops_the_check() {
+        let yaml = config_yaml("version_check:\n  enabled: false\n");
+        let resolved = resolved_version_check(&yaml, None, true);
+        assert!(
+            !resolved.enabled,
+            "version_check.enabled: false in the ARCHIVER_CONFIG file must stop the check"
+        );
+    }
+
+    #[test]
+    fn version_check_stays_on_by_default() {
+        let resolved = resolved_version_check(&config_yaml(""), None, false);
+        assert!(resolved.enabled, "phone-home is on unless opted out");
+        assert_eq!(resolved.api_url, "https://releases.hyperi.io/api/v1/check");
+    }
 
     /// `metrics-manifest` builds a manager, calls `register_metrics` and prints
     /// the registry, so an app that leaves the no-op default in place emits an

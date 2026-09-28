@@ -692,11 +692,7 @@ Configuration follows a cascade (highest to lowest priority):
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard, the metrics listener and the scaling-pressure engine are built
-by the scalo runtime before the config file is read, so they take the variables
-above and never a `memory:`, `metrics:` or `scaling:` block in the config file.
-The single-underscore names are read directly; the double-underscore ones nest
-into the config cascade (`ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
+The memory guard is built by the scalo runtime from the `ARCHIVER_MEMORY_*` variables above and never reads a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`, `worker_pool`) resolve from the config cascade, where the config file is the settings layer and env outranks it. The single-underscore names are read directly; the double-underscore ones nest into the cascade (`ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
 
 ### Full Config Example
 

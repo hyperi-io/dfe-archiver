@@ -65,13 +65,12 @@ compression:
   level: 3
   enabled: true
 
-# The metrics listener and the scaling-pressure engine are scalo's, built
-# before this file is read. Their settings come from the config cascade, which
-# discovers config files by name (settings.yaml) and cannot ingest an arbitrary
-# --config path, so set them by env instead:
+# The metrics listener and the scaling-pressure engine are scalo's. Their
+# `metrics:` and `scaling:` sections resolve from the config cascade, where this
+# file is the settings layer and env outranks it:
 #
-#   --metrics-addr / METRICS_ADDR / ARCHIVER_METRICS__ADDRESS
-#   ARCHIVER_SCALING__ENABLED
+#   --metrics-addr / METRICS_ADDR / ARCHIVER_METRICS__ADDRESS / metrics.address
+#   ARCHIVER_SCALING__ENABLED / scaling.enabled
 #   ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD   (0.0-1.0; forces pressure to 100)
 #
 # The composite KEDA scales on is the weighted kafka_lag + buffer_depth +
