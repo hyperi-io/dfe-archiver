@@ -10,7 +10,7 @@ use dfe_archiver_core::archive::{PATH_TEMPLATE_PLACEHOLDERS, unknown_placeholder
 use dfe_archiver_core::config::{Config, TRANSPORT_GRPC, TRANSPORT_KAFKA};
 use dfe_archiver_core::{Error, Result};
 use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// The env prefix for the scalo config cascade. Must equal the contract's
@@ -18,19 +18,30 @@ use tracing::info;
 /// build their `<PREFIX>_SECTION__KEY` variables from.
 const ENV_PREFIX: &str = "ARCHIVER";
 
-/// Initialise scalo's global config cascade.
+/// Where the config file is looked for when neither `--config` nor
+/// `ARCHIVER_CONFIG` names one, first match wins.
+const DEFAULT_CONFIG_PATHS: [&str; 3] = [
+    "config.yaml",
+    "config/settings.yaml",
+    "/etc/dfe-archiver/config.yaml",
+];
+
+/// Initialise scalo's global config cascade with `config_file` as its
+/// settings layer.
 ///
 /// `ServiceRuntime` resolves `version_check`, `metrics`, `logger`,
 /// `self_regulation`, `scaling` and `worker_pool` through `from_cascade()`,
 /// which returns each type's own default when the cascade was never set up --
 /// indistinguishable from a cascade that says "default", and silent. Without
-/// this call no `ARCHIVER_*__*` variable a chart renders reaches anything.
+/// this call no `ARCHIVER_*__*` variable a chart renders reaches anything, and
+/// without `config_file` in it no scalo section in that file does.
 ///
 /// The config reloader re-enters on SIGHUP and on every file change, and the
 /// cascade is a `OnceLock`, so a repeat setup is a no-op rather than an error.
-fn init_cascade() {
+fn init_cascade(config_file: Option<&str>) {
     let opts = scalo::config::ConfigOptions {
         env_prefix: ENV_PREFIX.to_string(),
+        config_paths: config_file.map(PathBuf::from).into_iter().collect(),
         // `main` runs dotenvy before arg parsing, so `.env` is already in the
         // process environment; re-loading it here would tie every test that
         // loads config to whatever `.env` sits in the working tree.
@@ -54,36 +65,23 @@ fn init_cascade() {
 /// 4. Config file (YAML)
 /// 5. Hard-coded defaults
 ///
-/// The app's own sections are read straight from `config_path`. Sections scalo
-/// owns (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`,
-/// `worker_pool`) come from the cascade `init_cascade` sets up, so they are set
-/// by `<PREFIX>_SECTION__KEY` env vars or a `settings.yaml`, NOT by this file --
-/// scalo's cascade discovers config files by name and cannot ingest an
-/// arbitrary `--config` path (scalo-rs#50).
+/// The app's own sections are read straight from the config file. Sections
+/// scalo owns (`version_check`, `metrics`, `logger`, `self_regulation`,
+/// `scaling`, `worker_pool`) come from the cascade `init_cascade` sets up, where
+/// the same file is the settings layer and a `<PREFIX>_SECTION__KEY` env var
+/// outranks it.
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
-    init_cascade();
+    let source = config_source(config_path);
+    init_cascade(source.as_ref().map(|(path, _)| path.as_str()));
 
-    let mut config = Config::default();
-
-    if let Some(path) = config_path {
-        config = load_from_file(path)?;
-        info!(path = %path, "Loaded configuration from file");
-    } else if let Ok(path) = std::env::var("ARCHIVER_CONFIG") {
-        config = load_from_file(&path)?;
-        info!(path = %path, "Loaded configuration from ARCHIVER_CONFIG");
-    } else {
-        for default_path in &[
-            "config.yaml",
-            "config/settings.yaml",
-            "/etc/dfe-archiver/config.yaml",
-        ] {
-            if Path::new(default_path).exists() {
-                config = load_from_file(default_path)?;
-                info!(path = %default_path, "Loaded configuration from default location");
-                break;
-            }
+    let mut config = match &source {
+        Some((path, origin)) => {
+            let config = load_from_file(path)?;
+            info!(path = %path, origin, "Loaded configuration");
+            config
         }
-    }
+        None => Config::default(),
+    };
 
     // Apply flat env overrides (preserves existing env var contract)
     config.apply_flat_env("UNUSED");
@@ -95,6 +93,21 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     config.register_in_registry();
 
     Ok(config)
+}
+
+/// The config file to load and what named it: `--config`, then
+/// `ARCHIVER_CONFIG`, then the first of [`DEFAULT_CONFIG_PATHS`] that exists.
+fn config_source(config_path: Option<&str>) -> Option<(String, &'static str)> {
+    if let Some(path) = config_path {
+        return Some((path.to_string(), "--config"));
+    }
+    if let Ok(path) = std::env::var("ARCHIVER_CONFIG") {
+        return Some((path, "ARCHIVER_CONFIG"));
+    }
+    DEFAULT_CONFIG_PATHS
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .map(|path| (path.to_string(), "default location"))
 }
 
 /// Load configuration from YAML file

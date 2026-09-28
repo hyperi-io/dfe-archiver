@@ -103,12 +103,7 @@ Configuration follows a cascade (highest to lowest priority):
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard, the metrics listener and the scaling-pressure engine belong to
-the scalo runtime and are built before the config file is read, so they are set
-by the variables above (or `--metrics-addr`), never by a `memory:`, `metrics:`
-or `scaling:` block in the config file. The archiver's own sections take a
-single underscore; the double-underscore names belong to those scalo sections
-and reach them through the cascade.
+The memory guard belongs to the scalo runtime and reads only the `ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`, `worker_pool`) resolve from the cascade, where the config file is the settings layer and an `ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
 
 ### Which transport, and idling until configured
 

@@ -52,10 +52,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// targets, with scalo's own defaults for everything else.
 ///
 /// Sits UNDER the config cascade, so any `version_check.*` key a deployment
-/// sets wins -- including the `<PREFIX>_VERSION_CHECK__ENABLED=false` the
-/// chart renders for an air-gapped install. That overlay only happens because
-/// `config::load_config` initialises the cascade; see the test
-/// `contract_env_prefix_reaches_the_version_check_it_names`.
+/// sets wins -- `enabled: false` in the config file, or the
+/// `<PREFIX>_VERSION_CHECK__ENABLED=false` the chart renders for an air-gapped
+/// install. That overlay only happens because `config::load_config`
+/// initialises the cascade with the config file as its settings layer.
 #[must_use]
 pub fn version_check_defaults() -> scalo::version_check::VersionCheckConfig {
     scalo::version_check::VersionCheckConfig {
