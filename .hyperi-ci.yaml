@@ -64,7 +64,6 @@ build:
 # Releasing
 release:
   enabled: true
-  binaries: both
   container:
     enabled: true
     registry: ghcr

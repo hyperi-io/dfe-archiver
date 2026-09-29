@@ -102,11 +102,13 @@ fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
 }
 
-/// Roll interval when none is configured and offsets are held: at 10k
-/// records/s that keeps about 96 MB of held offsets per pod.
-pub const HELD_OFFSETS_ROLL_INTERVAL_SECS: u64 = 300;
+/// Roll interval when none is configured and offsets are held, or records
+/// arrive direct: at 10k records/s that keeps about 96 MB of held offsets per
+/// pod, and on the direct transport it bounds what a kill loses from open files.
+pub const SHORT_ROLL_INTERVAL_SECS: u64 = 300;
 
-/// Roll interval when none is configured and no offset waits on a file.
+/// Roll interval when none is configured and the bus has committed every
+/// record at receipt, which is `kafka.acknowledgements.enabled: false`.
 pub const DEFAULT_ROLL_INTERVAL_SECS: u64 = 3600;
 
 /// A roll interval above this, with offsets held, is warned about at startup.
@@ -131,13 +133,14 @@ impl Config {
     }
 
     /// The roll interval in force: `archive.roll_interval_secs` when set,
-    /// otherwise a default short enough to bound held-offset memory.
+    /// otherwise a default short enough to bound held-offset memory and, on
+    /// the direct transport, the records a kill loses from open files.
     #[must_use]
     pub fn roll_interval_secs(&self) -> u64 {
         self.archive
             .roll_interval_secs
-            .unwrap_or(if self.holds_offsets() {
-                HELD_OFFSETS_ROLL_INTERVAL_SECS
+            .unwrap_or(if self.holds_offsets() || self.is_direct() {
+                SHORT_ROLL_INTERVAL_SECS
             } else {
                 DEFAULT_ROLL_INTERVAL_SECS
             })
@@ -340,10 +343,11 @@ pub struct ArchiveConfig {
 
     /// Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
     /// consumer holds offsets (`transport: kafka` with
-    /// `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
-    /// because every record in an open file keeps about 32 bytes of held
-    /// offset in memory until the file completes. A configured value always
-    /// wins, and one above 900 with offsets held logs a warning at startup.
+    /// `kafka.acknowledgements.enabled`, the default) or on `transport: grpc`,
+    /// and 3600 otherwise. Every record in an open file keeps about 32 bytes
+    /// of held offset in memory until the file completes, and on `grpc` a kill
+    /// loses what the open files hold. A configured value always wins, and
+    /// one above 900 with offsets held logs a warning at startup.
     pub roll_interval_secs: Option<u64>,
 
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)

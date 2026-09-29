@@ -358,10 +358,11 @@ $defs:
         description: |-
           Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka
           consumer holds offsets (`transport: kafka` with
-          `kafka.acknowledgements.enabled`, the default) and 3600 otherwise,
-          because every record in an open file keeps about 32 bytes of held
-          offset in memory until the file completes. A configured value always
-          wins, and one above 900 with offsets held logs a warning at startup.
+          `kafka.acknowledgements.enabled`, the default) or on `transport: grpc`,
+          and 3600 otherwise. Every record in an open file keeps about 32 bytes
+          of held offset in memory until the file completes, and on `grpc` a kill
+          loses what the open files hold. A configured value always wins, and
+          one above 900 with offsets held logs a warning at startup.
         type:
         - integer
         - 'null'

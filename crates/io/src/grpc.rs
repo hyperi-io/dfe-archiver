@@ -8,8 +8,8 @@
 
 //! The receive side of the direct transport.
 //!
-//! On a deployment with no broker the sender (dfe-receiver or dfe-fetcher) fans
-//! a matched record out to the loader AND here, over the same scalo Push RPC.
+//! On a deployment with no broker dfe-receiver fans a matched record out to the
+//! loader AND here, over the same scalo Push RPC.
 //! The archiver is the server: it binds the listener and converts each pushed
 //! record into the `KafkaMessage` the rest of the pipeline already speaks.
 

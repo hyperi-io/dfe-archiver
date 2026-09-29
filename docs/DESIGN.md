@@ -186,7 +186,7 @@ stage fans a matched record out to the loader and to the archiver over the same
 Push RPC. A push stream keeps no backlog, so the KEDA composite drops its
 `kafka_lag` term there rather than reading a false zero.
 
-The listener answers each push once its records are queued. A record is released only when its archive file completes, at the roll interval, long after any sender's deadline, so holding the answer until then would expire every push and the sender would resend it. The archive copy on `grpc` is therefore at-most-once: a kill loses what the queue and the open files held, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`.
+The listener answers each push once its records are queued. A record is released only when its archive file completes, at the roll interval, long after any sender's deadline, so holding the answer until then would expire every push and the sender would resend it. The archive copy on `grpc` is therefore at-most-once: a kill loses what the queue and the open files held, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`. An unset `roll_interval_secs` is 300 on `grpc`, as on the bus with acknowledgements on, so an open file holds about five minutes of intake at most rather than an hour.
 
 ### Why only two
 
@@ -367,7 +367,7 @@ Every file name ends `-<seq>-<writer id>`. A staged file is never checked agains
 Archives are rolled (closed and new file opened) when either condition is met:
 
 1. **Size-based**: Final compressed file size exceeds threshold (default 1GB)
-2. **Time-based**: File age exceeds threshold (default 300 s while offsets are held, otherwise 1 hour)
+2. **Time-based**: File age exceeds threshold (default 300 s while offsets are held and on `grpc`, otherwise 1 hour)
 
 ### Important: Compressed File Size
 
@@ -384,7 +384,7 @@ This ensures predictable archive file sizes on storage (optimal for cloud storag
 ```yaml
 archive:
   roll_size_bytes: 1073741824  # 1GB final compressed size
-  roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
+  roll_interval_secs: 300      # unset: 300 while offsets are held or on grpc, else 3600
 ```
 
 ### Path Templates
@@ -762,6 +762,7 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
 | `dfe_archiver_staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt`, `no_store` |
 | `dfe_archiver_staged_files_removed_total{reason}` | Staged files removed at startup: `replayed`, `quarantine_full` |
+
 ### Gauges
 
 | Metric | Description |
@@ -771,7 +772,8 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 | `dfe_archiver_kafka_lag` | Records past this pod's read position (sum across assigned partitions). The commit an open file holds does not inflate it |
 | `pipeline_delivery_guarantee{guarantee,reason}` | 1 for the delivery guarantee in force |
 | `dfe_archiver_hot_buffers_active` | Active hot buffers |
-| `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers || `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
+| `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
+| `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
 | `dfe_archiver_staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
 
 ### Histograms
