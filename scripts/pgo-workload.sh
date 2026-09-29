@@ -29,9 +29,10 @@
 #   - pgo-driver binary built with --features pgo-driver (auto-built if missing)
 #
 # Behaviour:
-#   - Starts single-node Kafka (KRaft) -- no MinIO, file:// destination is
+#   - Starts single-node Redpanda -- no MinIO, file:// destination is
 #     adequate to drive compress + write hot paths
-#   - Writes ephemeral archiver config pointing at Kafka + a temp dir
+#   - Writes ephemeral archiver config pointing at Redpanda, with the archive
+#     and the spool both under one temp dir
 #   - Starts the passed-in archiver binary in background
 #   - Waits for archiver readiness probe
 #   - Runs pgo-driver to produce messages for the configured duration
@@ -61,8 +62,10 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # pattern that picks the right colon out of "${VAR:-name:tag}", and RE2 has no
 # lookahead to do that cleanly.
 # renovate: datasource=docker depName=redpandadata/redpanda
-KAFKA_TAG="v26.2.1"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}}"
+KAFKA_TAG="v26.2.2"
+# Index digest of KAFKA_TAG: docker pulls by digest, so a tag bump moves this with it.
+KAFKA_DIGEST="sha256:468bd13a9f2bd24794cb7fddc867c767fb1008b9a07b297b89fde48c564d7d96"
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}@${KAFKA_DIGEST}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s -- shorter workloads produce bad PGO profiles
@@ -138,7 +141,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ----------------------------------------------------------------------------
-# Start Kafka (KRaft mode, single-node, auto-create topics)
+# Start Redpanda (single node, Kafka API)
 # ----------------------------------------------------------------------------
 
 echo "pgo-workload: starting Redpanda ($KAFKA_IMAGE)"
@@ -193,6 +196,8 @@ echo "pgo-workload: created topic 'events'"
 WORK_DIR=$(mktemp -d -t pgo-workload-XXXXXX)
 CONFIG_FILE="$WORK_DIR/config.yaml"
 ARCHIVE_DIR="$WORK_DIR/archive"
+# The default spool is /var/spool/dfe/archiver, which a non-root runner cannot create.
+SPOOL_DIR="$WORK_DIR/spool"
 mkdir -p "$ARCHIVE_DIR"
 
 # Expression-based routing on org_id exercises the writer-LRU eviction path
@@ -234,14 +239,10 @@ buffer:
   flush_bytes: 4194304            # 4MB -- tighter than default to keep flushes frequent
   flush_age_secs: 5
   writer_parallelism: 4
-
-memory:
-  max_bytes: 536870912            # 512MB
+  spool_dir: "$SPOOL_DIR"
 
 metrics:
-  enabled: true
   address: "127.0.0.1:9091"
-  path: "/metrics"
 
 # DLQ: scalo eagerly creates the file backend regardless of dlq.enabled.
 # Default path /var/spool/dfe/dlq is unwriteable in CI runners. Disabling

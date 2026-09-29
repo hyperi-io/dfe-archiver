@@ -6,13 +6,11 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
-pub mod depth;
-
 use crate::config::RoutingConfig;
 use crate::types::KafkaMessage;
 use crate::{Error, Result};
 use compact_str::CompactString;
-use depth::{MAX_PARSE_DEPTH, json_depth_within};
+use scalo::parse_guard::{MAX_PARSE_DEPTH, json_depth_within};
 use sonic_rs::JsonValueTrait;
 use std::borrow::Cow;
 use tracing::trace;
@@ -510,5 +508,72 @@ mod tests {
                 .expect_err("65 levels are refused");
             assert!(matches!(refused, Error::TooDeep { max: 64 }), "{refused}");
         });
+    }
+
+    // ---- the depth scan's verdicts, which routing takes from scalo ----
+
+    #[test]
+    fn flat_and_shallow_pass() {
+        assert!(json_depth_within(br"{}", MAX_PARSE_DEPTH));
+        assert!(json_depth_within(
+            br#"{"a":1,"b":[1,2,3]}"#,
+            MAX_PARSE_DEPTH
+        ));
+        assert!(json_depth_within(
+            br#"{"a":{"b":{"c":1}}}"#,
+            MAX_PARSE_DEPTH
+        ));
+        assert!(json_depth_within(b"", MAX_PARSE_DEPTH));
+    }
+
+    #[test]
+    fn exactly_at_the_bound_passes_and_one_over_fails() {
+        assert!(json_depth_within(nested_array(3).as_bytes(), 3));
+        assert!(!json_depth_within(nested_array(4).as_bytes(), 3));
+        assert!(json_depth_within(
+            nested_object(MAX_PARSE_DEPTH).as_bytes(),
+            MAX_PARSE_DEPTH
+        ));
+        assert!(!json_depth_within(
+            nested_object(MAX_PARSE_DEPTH + 1).as_bytes(),
+            MAX_PARSE_DEPTH
+        ));
+    }
+
+    #[test]
+    fn sibling_containers_do_not_add_up() {
+        let wide = format!("[{}]", vec!["[[1]]"; 1000].join(","));
+        assert!(json_depth_within(wide.as_bytes(), 3));
+    }
+
+    #[test]
+    fn brackets_inside_strings_do_not_count() {
+        assert!(json_depth_within(br#"{"k":"{{{{{{{{[[[[["}"#, 2));
+    }
+
+    #[test]
+    fn an_escaped_quote_keeps_the_string_open() {
+        assert!(json_depth_within(br#"{"k":"a\"{{{{{"}"#, 2));
+    }
+
+    #[test]
+    fn an_escaped_backslash_closes_the_string() {
+        // `\\` is one literal backslash, so the quote after it ends the string
+        // and the brackets that follow are structure.
+        assert!(!json_depth_within(br#"["\\"[[[1]]]]"#, 3));
+    }
+
+    #[test]
+    fn pathological_depth_is_refused() {
+        for depth in [5_000, 20_000, 100_000] {
+            assert!(!json_depth_within(
+                nested_array(depth).as_bytes(),
+                MAX_PARSE_DEPTH
+            ));
+            assert!(!json_depth_within(
+                nested_object(depth).as_bytes(),
+                MAX_PARSE_DEPTH
+            ));
+        }
     }
 }

@@ -345,7 +345,7 @@
           "default": 1073741824
         },
         "roll_interval_secs": {
-          "description": "Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka\nconsumer holds offsets (`transport: kafka` with\n`kafka.acknowledgements.enabled`, the default) and 3600 otherwise,\nbecause every record in an open file keeps about 32 bytes of held\noffset in memory until the file completes. A configured value always\nwins, and one above 900 with offsets held logs a warning at startup.",
+          "description": "Rolling trigger: interval in seconds. Unset, it is 300 while the Kafka\nconsumer holds offsets (`transport: kafka` with\n`kafka.acknowledgements.enabled`, the default) or on `transport: grpc`,\nand 3600 otherwise. Every record in an open file keeps about 32 bytes\nof held offset in memory until the file completes, and on `grpc` a kill\nloses what the open files hold. A configured value always wins, and\none above 900 with offsets held logs a warning at startup.",
           "type": [
             "integer",
             "null"

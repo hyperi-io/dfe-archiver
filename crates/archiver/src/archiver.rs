@@ -32,7 +32,6 @@ use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
 use dfe_archiver_core::config::{ArchiveConfig, HELD_OFFSET_BYTES};
 use dfe_archiver_core::routing::Router;
-use dfe_archiver_core::routing::depth::MAX_PARSE_DEPTH;
 use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
@@ -44,6 +43,7 @@ use scalo::dlq::{Dlq, DlqEntry, DlqSource};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use scalo::memory::MemoryGuard;
 use scalo::metrics::FlushTrigger;
+use scalo::parse_guard::MAX_PARSE_DEPTH;
 use scalo::scaling::ScalingPressure;
 use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{DeadLetterReason, DeliveryStatus, KafkaToken, SinkConfirmation};
@@ -3000,10 +3000,10 @@ mod tests {
         );
     }
 
-    /// A default deployment writes under the path the image pre-creates, and
-    /// an absolute one, because the container working directory is root-owned.
+    /// The default spool directory is absolute, because the container working
+    /// directory is root-owned.
     #[test]
-    fn test_default_spool_dir_is_the_absolute_image_path() {
+    fn test_default_spool_dir_is_absolute() {
         let config = Config::default();
 
         assert_eq!(config.buffer.spool_dir, DEFAULT_SPOOL_DIR);

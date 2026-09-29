@@ -620,13 +620,34 @@ mod tests {
                 .expect("parse");
         assert!(!acks_off.holds_offsets());
         assert_eq!(acks_off.roll_interval_secs(), 3600);
+    }
 
+    /// The direct transport answers each push before its file completes, so
+    /// a kill loses what the open files hold: an unset roll interval is 300 s
+    /// there too, and an operator's value still wins.
+    #[test]
+    fn test_unset_roll_interval_is_300_on_the_direct_transport() {
         let direct = Config {
             transport: TRANSPORT_GRPC.to_string(),
             ..Config::default()
         };
         assert!(!direct.holds_offsets());
-        assert_eq!(direct.roll_interval_secs(), 3600);
+        assert_eq!(direct.archive.roll_interval_secs, None);
+        assert_eq!(direct.roll_interval_secs(), 300);
+        assert_eq!(direct.long_held_roll_interval(), None);
+
+        let configured: Config = serde_yaml_ng::from_str(
+            "transport: grpc\ngrpc:\n  listen: \"0.0.0.0:6000\"\narchive:\n  roll_interval_secs: 3600\n",
+        )
+        .expect("parse");
+        assert!(configured.is_direct());
+        validate_config(&configured).expect("a direct config with a roll interval is valid");
+        assert_eq!(configured.roll_interval_secs(), 3600);
+        assert_eq!(
+            configured.long_held_roll_interval(),
+            None,
+            "no offset is held on the direct transport, so nothing to warn about"
+        );
     }
 
     /// An operator's roll interval is respected even with offsets held, and a
