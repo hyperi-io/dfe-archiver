@@ -145,7 +145,7 @@ archive:
   # Each file name ends -<seq>-<writer id>.
   path_template: "{year}/{month}/{day}/{hour}"
   roll_size_bytes: 1073741824  # 1GB (final compressed size)
-  roll_interval_secs: 300      # unset: 300 while offsets are held, else 3600
+  roll_interval_secs: 300      # unset: 300 while offsets are held or on the direct (grpc) transport, else 3600
 
 buffer:
   flush_bytes: 1048576         # 1 MiB: a destination's buffer flushes into its file at this size
