@@ -22,8 +22,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# transport-kafka alone: this crate needs scalo only for the `KafkaToken` commit
-# token the buffer carries, so the grpc arm stays in the io crate that builds it.
+# transport-kafka alone: this crate needs scalo for the `KafkaToken` commit
+# token the buffer carries and for `parse_guard`'s JSON depth check, so the
+# grpc arm stays in the io crate that builds it.
 # dlq-kafka: the file backend is an EROFS no-op on the charts' read-only
 # rootfs, so kafka is the only DLQ backend that works deployed.
 scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq", "dlq-kafka", "config-schema"] }
