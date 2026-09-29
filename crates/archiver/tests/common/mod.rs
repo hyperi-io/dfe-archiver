@@ -1676,9 +1676,17 @@ pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
 
 /// Kafka to test against, pinned by digest, the same pin scalo's own tests use.
 ///
-/// renovate: datasource=docker depName=apache/kafka-native
-const KAFKA_TAG: &str =
-    "4.3.1@sha256:2885898ba17065023f1bd605f3a81efcfa986014f062b73b91ef5462485f9060";
+/// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
+///
+/// renovate: datasource=docker depName=apache/kafka
+const KAFKA_TAG: &str = "4.3.1";
+
+/// Digest of `KAFKA_TAG`, apart from it because the Renovate regex stops at a colon.
+const KAFKA_DIGEST: &str =
+    "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
+
+/// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 40 s is too tight.
+const KAFKA_STARTUP: Duration = Duration::from_secs(180);
 
 /// A single-node `KRaft` broker this test owns, advertised on a fixed port below
 /// 10240. Dropping it stops and removes the container.
@@ -1850,12 +1858,13 @@ pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
     use testcontainers::{GenericImage, ImageExt};
 
     let name = container_name(Some(test), "kafka");
+    let image_tag = format!("{KAFKA_TAG}@{KAFKA_DIGEST}");
     let mut taken = Vec::new();
     let mut last_error = String::new();
     for _ in 0..3 {
         reap_stale(&name);
         let port = free_low_port(&taken);
-        let image = GenericImage::new("apache/kafka-native", KAFKA_TAG)
+        let image = GenericImage::new("apache/kafka", image_tag.as_str())
             .with_exposed_port(9092u16.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
             .with_env_var("KAFKA_NODE_ID", "1")
@@ -1893,7 +1902,7 @@ pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
             .with_mapped_port(port, 9092u16.tcp())
             .with_container_name(&name)
             .with_labels(test_labels("kafka"))
-            .with_startup_timeout(CONTAINER_STARTUP);
+            .with_startup_timeout(KAFKA_STARTUP);
         match image.start().await {
             Ok(container) => {
                 let bootstrap = format!("127.0.0.1:{port}");
