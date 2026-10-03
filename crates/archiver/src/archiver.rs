@@ -3392,7 +3392,10 @@ mod tests {
         let mut new = old.clone();
         new.kafka.batch_size = old.kafka.batch_size + 1;
 
-        assert!(restart_required_changes(&old, &new).is_empty());
+        assert_eq!(
+            restart_required_changes(&old, &new),
+            Vec::<&'static str>::new()
+        );
     }
 
     /// The consumer is armed at construction, so turning acknowledgements off
