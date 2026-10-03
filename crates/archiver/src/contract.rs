@@ -282,7 +282,7 @@ mod tests {
         // overrides the default applies. Assert it is non-empty and carries an
         // explicit tag -- never pin a distro here.
         let contract = deployment_contract();
-        assert!(!contract.base_image.is_empty());
+        assert_ne!(contract.base_image, "");
         assert!(
             contract.base_image.contains(':'),
             "base_image must include an explicit tag: {}",

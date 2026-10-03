@@ -1983,7 +1983,7 @@ mod tests {
         let staging = Staging::open(dir.path().join("uploads")).expect("staging");
         let recovery = staging.recover(true).expect("recover");
         assert_eq!(recovery.replayed, 2);
-        assert!(recovery.complete.is_empty());
+        assert_eq!(recovery.complete, Vec::<RecoveredFile>::new());
         assert_eq!(recovery.incomplete, 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
@@ -2056,7 +2056,7 @@ mod tests {
         let staging = Staging::open(dir.path().join("uploads")).expect("staging");
         let recovery = staging.recover(false).expect("recover");
         assert_eq!(recovery.corrupt, 1, "{recovery:?}");
-        assert!(recovery.complete.is_empty());
+        assert_eq!(recovery.complete, Vec::<RecoveredFile>::new());
         assert_eq!(
             std::fs::read_dir(staging.dir().join(QUARANTINE_DIR))
                 .expect("quarantine dir")

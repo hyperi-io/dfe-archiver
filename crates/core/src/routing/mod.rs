@@ -213,7 +213,7 @@ mod tests {
 
         let outcome = router.route(&message).expect("route");
         assert_eq!(outcome.destination.as_str(), "events");
-        assert!(outcome.fallback_fields.is_empty());
+        assert_eq!(outcome.fallback_fields, Vec::<usize>::new());
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
         let msg = make_message("events", r#"{"nothing": "here"}"#);
 
         let outcome = router.route(&msg).expect("route by topic");
-        assert!(outcome.fallback_fields.is_empty());
+        assert_eq!(outcome.fallback_fields, Vec::<usize>::new());
     }
 
     /// Every configured field missing is the misconfiguration this reports:

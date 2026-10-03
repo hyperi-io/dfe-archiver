@@ -1668,9 +1668,18 @@ mod tests {
 
     #[test]
     fn test_unknown_placeholders_names_every_unsupported_token() {
-        assert!(unknown_placeholders("{year}/{month}/{day}/{hour}/archive").is_empty());
-        assert!(unknown_placeholders("data/{timestamp}-{seq}").is_empty());
-        assert!(unknown_placeholders("archive/plain/path").is_empty());
+        assert_eq!(
+            unknown_placeholders("{year}/{month}/{day}/{hour}/archive"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unknown_placeholders("data/{timestamp}-{seq}"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unknown_placeholders("archive/plain/path"),
+            Vec::<String>::new()
+        );
 
         assert_eq!(
             unknown_placeholders("{topic}/{year}/{date}"),
