@@ -44,10 +44,9 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime. Floored at 2.13.2 for the held source
-# acknowledgements, Dlq::write_confirmed, Dlq::refusal and parse_guard the
-# pipeline builds on, and the receive-side drop of a revoked partition's records.
-scalo = { version = ">=2.13.2, <3" }
+# scalo data-plane runtime. The floor is the first release whose contract
+# carries no vendor defaults, so the app names its own.
+scalo = { version = "2.14.0" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.

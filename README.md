@@ -170,6 +170,7 @@ The archiver supports hot-reloading configuration without restart via SIGHUP
 or file polling (5-second interval).
 
 **Hot-reloaded (takes effect on next batch):**
+
 - `kafka.batch_size` - re-read once per receive
 
 **Requires pod restart** - everything else. The pipeline snapshots the config at

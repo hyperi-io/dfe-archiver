@@ -200,6 +200,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: null
@@ -430,6 +431,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
       bucket:
@@ -452,6 +454,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
       credentials_path:
@@ -472,12 +475,14 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
       sas_token:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
       container:
@@ -502,6 +507,7 @@ $defs:
         type: string
       secret_key:
         type: string
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
       bucket:
@@ -642,7 +648,7 @@ $defs:
         $ref: '#/$defs/FileDlqConfig'
         default:
           enabled: true
-          path: /var/spool/dfe/dlq
+          path: /var/spool/scalo/dlq
           rotation: hourly
           max_age_days: 30
           compress_rotated: true
@@ -653,7 +659,7 @@ $defs:
           enabled: true
           routing: per_table
           topic_suffix: .dlq
-          common_topic: dfe.dlq
+          common_topic: null
           send_timeout_ms: 5000
   DlqMode:
     description: How backends are used when multiple are enabled.
@@ -671,7 +677,7 @@ $defs:
     - description: File backend only (no Kafka dependency).
       type: string
       const: file_only
-    - description: Kafka backend only (current dfe-loader behaviour).
+    - description: Kafka backend only (matches a typical consumer's current behaviour).
       type: string
       const: kafka_only
   FileDlqConfig:
@@ -688,9 +694,9 @@ $defs:
       path:
         description: |-
           Base directory for DLQ files.
-          Service name is appended as a subdirectory.
+          Service name is appended as a subdirectory. Default `/var/spool/scalo/dlq`.
         type: string
-        default: /var/spool/dfe/dlq
+        default: /var/spool/scalo/dlq
       rotation:
         description: File rotation period.
         $ref: '#/$defs/RotationPeriod'
@@ -731,9 +737,15 @@ $defs:
         type: string
         default: .dlq
       common_topic:
-        description: Common topic when routing is `Common` or destination is unknown.
-        type: string
-        default: dfe.dlq
+        description: |-
+          Common topic when routing is `Common` or destination is unknown. Unset
+          by default, which names it after the service the DLQ is spawned for:
+          `<service>.dlq`, like the per-table `<destination>.dlq`, or `dlq` when
+          the service has no name. A value that is set is used as it is.
+        type:
+        - string
+        - 'null'
+        default: null
       send_timeout_ms:
         description: |-
           How long a `flush` or the shutdown waits for the broker to ack the
