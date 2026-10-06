@@ -18,7 +18,7 @@ services:
     # Matches KAFKA_TAG in scripts/pgo-workload.sh. Two pins of the same image
     # on different majors makes Renovate track two lines and open a PR for each.
     # renovate: datasource=docker depName=redpandadata/redpanda
-    image: redpandadata/redpanda:v26.2.1
+    image: redpandadata/redpanda:v26.2.2@sha256:468bd13a9f2bd24794cb7fddc867c767fb1008b9a07b297b89fde48c564d7d96
     container_name: archiver-redpanda
     command:
       - redpanda
@@ -50,7 +50,7 @@ services:
   # Redpanda Console (Kafka UI)
   redpanda-console:
     # renovate: datasource=docker depName=redpandadata/console
-    image: redpandadata/console:v3.9.0
+    image: redpandadata/console:v3.12.0@sha256:9dc0cd55db172c6be9c2ff8a51f33a14395f7675fa7fbc002c277f3b96115c27
     container_name: archiver-console
     depends_on:
       redpanda:
@@ -70,7 +70,7 @@ services:
     # Same pin as LOCALSTACK_TAG in crates/archiver/tests/common/mod.rs. Stay on
     # the semver line: the CalVer tags need a licence token to start.
     # renovate: datasource=docker depName=localstack/localstack versioning=semver
-    image: localstack/localstack:4.14
+    image: localstack/localstack:4.14@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
     container_name: archiver-s3
     ports:
       - "9000:4566"   # S3 API, where config.dev.yaml and .env.example point

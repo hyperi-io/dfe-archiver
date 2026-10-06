@@ -10,7 +10,7 @@
 
 [[IgnoredVulns]]
 id = "GHSA-w9wp-h8wv-79jx"
-reason = "opentelemetry_sdk 0.31 through scalo-rs. Not reachable: the unbounded allocation is in W3C Baggage propagation, and neither scalo-rs nor the archiver registers a text-map propagator. Accepted in the dfe-infra THREAT-MODEL.md accepted-risks table. The fix (0.32.1) waits on tracing-opentelemetry supporting 0.32. Revisit on that scalo-rs bump."
+reason = "opentelemetry_sdk 0.31 through scalo-rs. Not reachable: the unbounded allocation is in W3C Baggage propagation, and neither scalo-rs nor the archiver registers a Baggage propagator. Accepted in the dfe-infra docs/THREAT-MODEL.md accepted-risks table. The fix (0.32.1) waits on metrics-exporter-opentelemetry, whose 0.2.1 requires opentelemetry ^0.31. Tracked in hyperi-io/scalo-rs#281."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
