@@ -201,7 +201,7 @@ fn dead_letter_to(config: &mut Config, topic: &str) {
     config.dlq.file.enabled = false;
     config.dlq.kafka.enabled = true;
     config.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-    config.dlq.kafka.common_topic = topic.to_string();
+    config.dlq.kafka.common_topic = Some(topic.to_string());
 }
 
 /// Put a file where the archiver stages its object-store files, so every new

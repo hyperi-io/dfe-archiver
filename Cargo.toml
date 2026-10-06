@@ -44,10 +44,9 @@ cast_precision_loss = "allow"
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
-# scalo data-plane runtime. Floored at 2.13.2 for the held source
-# acknowledgements, Dlq::write_confirmed, Dlq::refusal and parse_guard the
-# pipeline builds on, and the receive-side drop of a revoked partition's records.
-scalo = { version = ">=2.13.2, <3" }
+# scalo data-plane runtime. From 2.14.0 the contract carries no vendor
+# defaults, so the app names its own.
+scalo = { version = "2.14.1" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
@@ -93,7 +92,7 @@ uuid = { version = ">=1.23, <2", features = ["v4", "serde"] }
 parking_lot = ">=0.12, <0.13"
 rayon = ">=1.12, <2"
 dashmap = ">=6.1, <7"
-compact_str = ">=0.9, <0.10"
+compact_str = ">=0.10, <0.11"
 rustc-hash = ">=2.1, <3"
 smallvec = { version = ">=1.15, <2", features = ["union", "serde"] }
 fs2 = ">=0.4, <0.5"

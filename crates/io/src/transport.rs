@@ -48,6 +48,8 @@ impl ReceivedBatch {
 }
 
 /// The transport records arrive on.
+// One transport lives for the whole process, so the larger variant's size is paid once.
+#[allow(clippy::large_enum_variant)]
 pub enum SourceTransport {
     /// A broker holds records between the previous stage and this one.
     Bus(TransportAdapter),

@@ -279,7 +279,34 @@ mod tests {
     fn test_default_dlq_routes_common_to_standard_topic() {
         let config = Config::default();
         assert_eq!(config.dlq.kafka.routing, scalo::dlq::DlqRouting::Common);
-        assert_eq!(config.dlq.kafka.common_topic, "dfe_archiver_dlq");
+        assert_eq!(
+            config.dlq.kafka.common_topic.as_deref(),
+            Some("dfe_archiver_dlq")
+        );
+        assert_eq!(
+            config.dlq.file.path,
+            std::path::PathBuf::from("/var/spool/dfe/dlq")
+        );
+    }
+
+    /// A config file with no `dlq:` key takes the archiver's DLQ defaults, not
+    /// scalo's `/var/spool/scalo/dlq` and per-table routing.
+    #[test]
+    fn a_config_file_without_a_dlq_key_gets_the_archiver_dlq_defaults() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "kafka:\n  brokers: [\"localhost:9092\"]\n").expect("write config");
+
+        let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
+        assert_eq!(
+            config.dlq.file.path,
+            std::path::PathBuf::from("/var/spool/dfe/dlq")
+        );
+        assert_eq!(config.dlq.kafka.routing, scalo::dlq::DlqRouting::Common);
+        assert_eq!(
+            config.dlq.kafka.common_topic.as_deref(),
+            Some("dfe_archiver_dlq")
+        );
     }
 
     #[test]

@@ -54,13 +54,15 @@ pub fn deployment_contract() -> DeploymentContract {
         ),
         base_image,
         image_profile: ImageProfile::Production,
+        // scalo writes no vendor, licence or copyright of its own, so the
+        // labels and the generated Dockerfile header carry exactly these.
         oci_labels: OciLabels {
             description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
                 .into(),
-            // BUSL-1.1 drives the OCI `org.opencontainers.image.licenses`
-            // label and the Dockerfile `# License` header. Copyright stays
-            // the scalo default (the right HYPERI line).
+            vendor: "HYPERI PTY LIMITED".into(),
+            label_namespace: "io.hyperi".into(),
             licenses: "BUSL-1.1".into(),
+            copyright: "(c) 2026 HYPERI PTY LIMITED".into(),
             ..OciLabels::default()
         },
         // Reflectable config (scalo-rs#6): derived JSON Schema of the full

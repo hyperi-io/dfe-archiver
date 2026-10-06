@@ -77,20 +77,25 @@ impl Default for Config {
             buffer: BufferConfig::default(),
             routing: RoutingConfig::default(),
             compression: CompressionConfig::default(),
-            // Fleet DLQ standard defaults: fixed per-app topic, routing=common.
+            // Fleet DLQ standard defaults: fixed per-app topic, routing=common,
+            // and the fleet's spool path rather than scalo's /var/spool/scalo/dlq.
             // Archiver entry destinations are archive PATHS (slashes), so
             // scalo's per-table default would build invalid topic names.
             // Applies when the config file has no `dlq:` key; a partial `dlq:`
             // block reverts nested fields to scalo's own defaults.
             dlq: {
                 let mut dlq = DlqConfig::default();
+                dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
                 dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-                dlq.kafka.common_topic = "dfe_archiver_dlq".to_string();
+                dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
                 dlq
             },
         }
     }
 }
+
+/// Where the DLQ file backend writes when the config file has no `dlq:` key.
+pub const DEFAULT_DLQ_DIR: &str = "/var/spool/dfe/dlq";
 
 /// `transport` value selecting the bus: a broker holds records between stages.
 pub const TRANSPORT_KAFKA: &str = "kafka";
@@ -635,7 +640,7 @@ impl Config {
         }
         if let Some(v) = flat_env::flat_env_string("DLQ", "TOPIC") {
             self.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-            self.dlq.kafka.common_topic = v;
+            self.dlq.kafka.common_topic = Some(v);
         }
         if let Some(v) = flat_env::flat_env_string("DLQ", "MODE") {
             use scalo::dlq::DlqMode;
