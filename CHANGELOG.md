@@ -3,6 +3,18 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.28](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.27...v1.7.28) (2026-10-06)
+
+### Bug Fixes
+
+* clear clippy 1.99 lints ([#111](https://github.com/hyperi-io/dfe-archiver/issues/111)) ([e5d0bbb](https://github.com/hyperi-io/dfe-archiver/commit/e5d0bbbcccbbb60a1a9fec001e66c34fc2f203bc))
+* correct roll interval, spool dir and scalo doc claims ([#110](https://github.com/hyperi-io/dfe-archiver/issues/110)) ([11e26aa](https://github.com/hyperi-io/dfe-archiver/commit/11e26aa39eb85d0245e6e48dba0aedf6423d3391))
+* honour the version-check opt-out in the config file ([#107](https://github.com/hyperi-io/dfe-archiver/issues/107)) ([33143c3](https://github.com/hyperi-io/dfe-archiver/commit/33143c357f0a3d4ba527f9e305d88812076354e7))
+* **io:** drop the second stats-only consumer ([#106](https://github.com/hyperi-io/dfe-archiver/issues/106)) ([d13279f](https://github.com/hyperi-io/dfe-archiver/commit/d13279f71be0ddebc77e8a70e0f4dc912df28bc7))
+* move to scalo 2.14.1 and turn PGO and BOLT on for GA ([#112](https://github.com/hyperi-io/dfe-archiver/issues/112)) ([8ad716e](https://github.com/hyperi-io/dfe-archiver/commit/8ad716eddd0592bfdfed78684b7ea1178f4c9c31))
+* non-root pgo workload, 300 s direct-path roll ([#109](https://github.com/hyperi-io/dfe-archiver/issues/109)) ([245c3f3](https://github.com/hyperi-io/dfe-archiver/commit/245c3f3e3eaa5ebc0829cb0475bc77ad47d4cfd4)), closes [#103](https://github.com/hyperi-io/dfe-archiver/issues/103) [#79](https://github.com/hyperi-io/dfe-archiver/issues/79) [#99](https://github.com/hyperi-io/dfe-archiver/issues/99)
+* **test:** run the Kafka test broker on the JVM image ([#108](https://github.com/hyperi-io/dfe-archiver/issues/108)) ([c5738b6](https://github.com/hyperi-io/dfe-archiver/commit/c5738b6674ea04c67f8809e6440e0ba6fe7bf141))
+
 ## [1.7.27](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.26...v1.7.27) (2026-09-27)
 
 ### Bug Fixes
