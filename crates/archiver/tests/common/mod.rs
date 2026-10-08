@@ -153,8 +153,9 @@ impl TestMode {
     }
 }
 
+/// Load the workspace's own `.env`, never one in a directory above it.
 pub fn load_dotenv() {
-    let _ = dotenvy::dotenv();
+    let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env"));
 }
 
 // -- Kafka ------------------------------------------------------------

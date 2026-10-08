@@ -155,3 +155,52 @@ fn test_default_config_validates() {
     config.kafka.brokers = vec!["localhost:9092".to_string()];
     validate_config(&config).expect("default config should validate");
 }
+
+/// `config-check` run by the binary from `dir` on the fixture config, returning
+/// what it printed.
+fn config_check_in(dir: &std::path::Path) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-archiver"))
+        .args(["--config", &fixture_path(), "config-check"])
+        .current_dir(dir)
+        .env_remove("ARCHIVER_CONFIG")
+        .env_remove("ARCHIVER_DESTINATION")
+        .output()
+        .expect("the binary runs");
+    let printed = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "config-check failed:\n{printed}");
+    printed
+}
+
+/// The binary reads the `.env` in its working directory and no other.
+///
+/// A `.env` in a parent directory belongs to whatever project sits above, so a
+/// search up the tree loads another project's settings and credentials.
+#[test]
+fn a_dotenv_in_a_parent_directory_is_not_loaded() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).expect("project dir");
+    std::fs::write(
+        root.path().join(".env"),
+        "ARCHIVER_DESTINATION=file:///tmp/from_parent_dotenv\n",
+    )
+    .expect("parent .env");
+
+    let printed = config_check_in(&project);
+    assert!(
+        !printed.contains("from_parent_dotenv"),
+        "a .env in the parent directory reached the config"
+    );
+
+    // The project's own .env still loads.
+    std::fs::write(
+        project.join(".env"),
+        "ARCHIVER_DESTINATION=file:///tmp/from_project_dotenv\n",
+    )
+    .expect("project .env");
+    let printed = config_check_in(&project);
+    assert!(
+        printed.contains("from_project_dotenv"),
+        "the project's own .env did not reach the config"
+    );
+}
