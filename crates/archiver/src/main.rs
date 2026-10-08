@@ -360,8 +360,9 @@ fn main() {
     }
 
     // Ahead of the runtime build so a TOKIO_WORKER_THREADS in the env file is
-    // the one the builder reads.
-    dotenvy::dotenv().ok();
+    // the one the builder reads. The working directory's .env only:
+    // dotenvy::dotenv() would load the first .env in any parent directory.
+    dotenvy::from_path(".env").ok();
 
     let app = App::parse();
 

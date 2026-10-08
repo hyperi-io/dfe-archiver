@@ -61,7 +61,7 @@ fn init_cascade(config_file: Option<&str>) {
 /// Priority (highest to lowest):
 /// 1. CLI arguments (handled by caller, merged after)
 /// 2. Environment variables (flat env overrides)
-/// 3. .env file (loaded by dotenvy in main)
+/// 3. `.env` in the working directory, loaded in `main` (never a parent's)
 /// 4. Config file (YAML)
 /// 5. Hard-coded defaults
 ///
