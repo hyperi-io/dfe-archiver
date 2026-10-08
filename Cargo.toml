@@ -46,7 +46,7 @@ dfe-archiver-io = { path = "crates/io" }
 
 # scalo data-plane runtime. From 2.14.0 the contract carries no vendor
 # defaults, so the app names its own.
-scalo = { version = "2.14.1" }
+scalo = { version = "2.14.3" }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.

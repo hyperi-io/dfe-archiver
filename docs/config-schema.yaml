@@ -201,7 +201,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: null
       ssl_ca_location:
@@ -432,7 +431,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
       bucket:
         type: string
@@ -455,7 +453,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
       credentials_path:
         type:
@@ -476,14 +473,12 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
       sas_token:
         type:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
       container:
         type: string
@@ -508,7 +503,6 @@ $defs:
       secret_key:
         type: string
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
       bucket:
         type: string
