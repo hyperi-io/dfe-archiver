@@ -212,6 +212,7 @@ mod tests {
                 // Secrets serialise redacted outside `expose_during`.
                 let applied = scalo::expose_during(|| serde_json::to_string(&config))
                     .expect("config serialises");
+                // The message carries the env var and group names only, never a value.
                 assert!(
                     applied.contains(&sentinel),
                     "{} ({}) was set and no config field read it",
