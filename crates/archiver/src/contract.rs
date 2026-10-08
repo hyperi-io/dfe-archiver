@@ -6,10 +6,13 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
 use dfe_archiver_core::config::TRANSPORT_GRPC;
 use scalo::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaContract,
-    NativeDepsContract, OciLabels, PortContract, base_image_from_cascade,
+    CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
+    KedaContract, NativeDepsContract, OciLabels, PortContract, ResourceList, ResourcesContract,
+    SecretEnvContract, SecretGroupContract, SecurityContract, WritablePath,
+    base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-archiver.
@@ -25,12 +28,15 @@ pub fn deployment_contract() -> DeploymentContract {
     // a distro -- the old "ubuntu:24.04" pin predated the trixie cutover.
     let base_image = base_image_from_cascade();
     DeploymentContract {
-        schema_version: 3,
+        schema_version: CONTRACT_SCHEMA_VERSION,
         app_name: "dfe-archiver".into(),
         binary_name: "dfe-archiver".into(),
         description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines".into(),
         metrics_port: 9090,
-        health: HealthContract::default(),
+        health: HealthContract {
+            startup_budget_seconds: 120,
+            ..HealthContract::default()
+        },
         env_prefix: "ARCHIVER".into(),
         metric_prefix: "archiver".into(),
         config_mount_path: "/etc/dfe/archiver.yaml".into(),
@@ -39,11 +45,12 @@ pub fn deployment_contract() -> DeploymentContract {
         extra_ports: vec![
             PortContract::tcp("push", 6000)
                 .when_equals("config.transport", TRANSPORT_GRPC)
-                .bound_from("grpc.listen"),
+                .bound_from("grpc.listen")
+                .app_protocol("kubernetes.io/h2c"),
         ],
         unbound_listen_paths: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe/archiver.yaml".into()],
-        secrets: vec![],
+        secrets: secrets(),
         default_config: default_config(),
         depends_on: vec!["kafka".into()],
         // No raw-lag trigger: DFE scales on the pressure composite, which this generator cannot express.
@@ -71,7 +78,57 @@ pub fn deployment_contract() -> DeploymentContract {
             dfe_archiver_core::config::Config,
         >()),
         capabilities: capabilities(),
+        // The spool stages object-store uploads, so the root filesystem stays read-only.
+        writable_paths: vec![WritablePath::new("spool", DEFAULT_SPOOL_DIR).size_limit("10Gi")],
+        termination_grace_seconds: 45,
+        resources: ResourcesContract {
+            requests: ResourceList {
+                cpu: "100m".into(),
+                memory: "128Mi".into(),
+            },
+            limits: ResourceList {
+                cpu: "500m".into(),
+                memory: "512Mi".into(),
+            },
+        },
+        security: SecurityContract::default(),
+        singleton: false,
     }
+}
+
+/// The Secrets the chart mounts as env vars.
+///
+/// `Config::apply_flat_env` reads these under the `KAFKA_` and `S3_` prefixes,
+/// never `ARCHIVER_`. The S3 group is optional because only an `s3://`
+/// destination reads it.
+fn secrets() -> Vec<SecretGroupContract> {
+    let env = |env_var: &str, key_name: &str, secret_key: &str| SecretEnvContract {
+        env_var: env_var.into(),
+        key_name: key_name.into(),
+        secret_key: secret_key.into(),
+    };
+    vec![
+        SecretGroupContract::new(
+            "kafka",
+            vec![
+                env("KAFKA_SASL_USER", "username", "username"),
+                env("KAFKA_SASL_PASSWORD", "password", "password"),
+                env("KAFKA_SASL_MECHANISM", "mechanism", "sasl.mechanism"),
+            ],
+        ),
+        SecretGroupContract::new(
+            "s3",
+            vec![
+                env("S3_ACCESS_KEY_ID", "access_key_id", "access_key_id"),
+                env(
+                    "S3_SECRET_ACCESS_KEY",
+                    "secret_access_key",
+                    "secret_access_key",
+                ),
+            ],
+        )
+        .optional(),
+    ]
 }
 
 /// The default configuration the contract publishes, serialised from
@@ -133,6 +190,37 @@ pub fn emit_dockerfile() -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use scalo::config::flat_env::ApplyFlatEnv;
+
+    /// The chart mounts a Secret under every declared name, so a name the
+    /// config never reads leaves the credential silently unused.
+    #[test]
+    fn every_declared_secret_env_var_reaches_the_config() {
+        let contract = deployment_contract();
+        assert!(
+            !contract.secrets.is_empty(),
+            "the contract declares no secrets"
+        );
+        for group in &contract.secrets {
+            for env in &group.env_vars {
+                let sentinel = format!("sentinel-{}", env.key_name);
+                let mut config = dfe_archiver_core::config::Config::default();
+                temp_env::with_var(&env.env_var, Some(sentinel.as_str()), || {
+                    config.apply_flat_env(&contract.env_prefix);
+                });
+
+                // Secrets serialise redacted outside `expose_during`.
+                let applied = scalo::expose_during(|| serde_json::to_string(&config))
+                    .expect("config serialises");
+                assert!(
+                    applied.contains(&sentinel),
+                    "{} ({}) was set and no config field read it",
+                    env.env_var,
+                    group.group_name
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_contract_is_valid() {
@@ -205,7 +293,7 @@ mod tests {
     #[test]
     fn test_contract_carries_reflectable_config() {
         let contract = deployment_contract();
-        assert_eq!(contract.schema_version, 3);
+        assert_eq!(contract.schema_version, CONTRACT_SCHEMA_VERSION);
         assert!(contract.config_schema.is_some());
         let archive = contract
             .capabilities

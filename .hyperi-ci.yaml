@@ -40,7 +40,6 @@ test:
 # Building
 build:
   enabled: true
-  type: app                # Build binaries (not just crate)
   strategies:
     - native
   rust:
@@ -54,9 +53,13 @@ build:
 # Releasing
 release:
   enabled: true
+  # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.
+  helm:
+    enabled: true
+    contract: emit
+    library: "2.14.3"
   container:
     enabled: true
-    registry: ghcr
     dockerfile: Dockerfile
     platforms:
       - linux/amd64
