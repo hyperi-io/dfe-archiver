@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.29](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.28...v1.7.29) (2026-10-09)
+
+### Bug Fixes
+
+* emit deployment contract v4 ([#113](https://github.com/hyperi-io/dfe-archiver/issues/113)) ([ef55b76](https://github.com/hyperi-io/dfe-archiver/commit/ef55b76a5393a70d6ce7a22cc468631243a6aa57))
+* read only the working directory's .env ([#114](https://github.com/hyperi-io/dfe-archiver/issues/114)) ([fc83947](https://github.com/hyperi-io/dfe-archiver/commit/fc839477f6abd4e4ed82eb5b8cd1daff767e5f4a))
+
 ## [1.7.28](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.27...v1.7.28) (2026-10-06)
 
 ### Bug Fixes
