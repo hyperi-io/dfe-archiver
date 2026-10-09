@@ -64,13 +64,13 @@ pub fn deployment_contract() -> DeploymentContract {
         // scalo writes no vendor, licence or copyright of its own, so the
         // labels and the generated Dockerfile header carry exactly these.
         oci_labels: OciLabels {
+            title: "dfe-archiver".into(),
             description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
                 .into(),
             vendor: "HYPERI PTY LIMITED".into(),
             label_namespace: "io.hyperi".into(),
             licenses: "BUSL-1.1".into(),
             copyright: "(c) 2026 HYPERI PTY LIMITED".into(),
-            ..OciLabels::default()
         },
         // Reflectable config (scalo-rs#6): derived JSON Schema of the full
         // Config + a catalog of the storage backends the archiver writes to.
@@ -232,6 +232,15 @@ mod tests {
         assert_eq!(contract.health.liveness_path, "/livez");
         assert_eq!(contract.health.readiness_path, "/readyz");
         assert!(contract.keda.is_some());
+    }
+
+    /// The OCI title and description feed the image labels and the registry
+    /// package page, and scalo leaves both empty unless the app sets them.
+    #[test]
+    fn test_oci_title_and_description_are_set() {
+        let contract = deployment_contract();
+        assert_eq!(contract.oci_labels.title, contract.app_name);
+        assert_ne!(contract.oci_labels.description, "");
     }
 
     /// `generate-artefacts` and `generate_chart` refuse a contract that fails
