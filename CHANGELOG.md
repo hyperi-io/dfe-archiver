@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.30](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.29...v1.7.30) (2026-10-10)
+
+### Bug Fixes
+
+* set the OCI title on the archiver deployment contract ([#115](https://github.com/hyperi-io/dfe-archiver/issues/115)) ([33a0981](https://github.com/hyperi-io/dfe-archiver/commit/33a098184bf29460a58421f10180679f52918c4e))
+
 ## [1.7.29](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.28...v1.7.29) (2026-10-09)
 
 ### Bug Fixes
