@@ -22,7 +22,6 @@ use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
 use dfe_archiver::{Archiver, restart_required_changes};
 use dfe_archiver_core::config::HELD_OFFSET_BYTES;
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
-use scalo::deployment::generate_chart;
 use scalo::logger::security;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,13 +47,6 @@ enum Command {
     EmitDockerfile {
         /// Output path (- for stdout)
         #[arg(default_value = "-")]
-        output: String,
-    },
-
-    /// Generate Helm chart from deployment contract
-    EmitHelm {
-        /// Output directory
-        #[arg(default_value = "chart")]
         output: String,
     },
 
@@ -380,15 +372,6 @@ fn main() {
                 });
                 eprintln!("Dockerfile written to {output}");
             }
-            return;
-        }
-        Some(Command::EmitHelm { output }) => {
-            let contract = deployment_contract();
-            generate_chart(&contract, output, None).unwrap_or_else(|e| {
-                eprintln!("error: failed to generate chart: {e}");
-                std::process::exit(1);
-            });
-            eprintln!("Helm chart generated at {output}/");
             return;
         }
         Some(Command::EmitContract) => {

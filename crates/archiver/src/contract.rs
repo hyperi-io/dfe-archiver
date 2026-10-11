@@ -11,15 +11,16 @@ use dfe_archiver_core::config::TRANSPORT_GRPC;
 use scalo::deployment::{
     CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
     KedaContract, NativeDepsContract, OciLabels, PortContract, ResourceList, ResourcesContract,
-    SecretEnvContract, SecretGroupContract, SecurityContract, WritablePath,
+    SecretEnvContract, SecretGroupContract, SecurityContract, ServiceAccount, WritablePath,
     base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-archiver.
 ///
 /// This defines the deployment-facing contract: ports, health probes,
-/// native dependencies, KEDA config, and entrypoint. Used by
-/// `emit-dockerfile`, `emit-helm`, and `emit-contract` subcommands.
+/// native dependencies, KEDA config, and entrypoint. Used by the
+/// `emit-dockerfile` and `emit-contract` subcommands, and by the release,
+/// which assembles the thin chart from it.
 #[must_use]
 pub fn deployment_contract() -> DeploymentContract {
     // Resolve the base image via the scalo cascade helper so the org-wide
@@ -93,6 +94,7 @@ pub fn deployment_contract() -> DeploymentContract {
         },
         security: SecurityContract::default(),
         singleton: false,
+        service_account: ServiceAccount::Own,
     }
 }
 
@@ -243,8 +245,8 @@ mod tests {
         assert_ne!(contract.oci_labels.description, "");
     }
 
-    /// `generate-artefacts` and `generate_chart` refuse a contract that fails
-    /// these checks, and write nothing.
+    /// `generate-artefacts` refuses a contract that fails these checks, and
+    /// writes nothing.
     #[test]
     fn test_contract_passes_the_generator_checks() {
         deployment_contract()
