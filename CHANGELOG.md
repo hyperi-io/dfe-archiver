@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.31](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.30...v1.7.31) (2026-10-11)
+
+### Bug Fixes
+
+* move to scalo 2.14.6, drop emit-helm ([afdd5c2](https://github.com/hyperi-io/dfe-archiver/commit/afdd5c22d2471cc9ae161cf417066fcfecb593f1))
+
 ## [1.7.30](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.29...v1.7.30) (2026-10-10)
 
 ### Bug Fixes
