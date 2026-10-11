@@ -316,7 +316,6 @@ dfe-archiver                      # Run the archiver service
 dfe-archiver --config config.yaml # With explicit config
 dfe-archiver emit-contract        # Print deployment contract JSON
 dfe-archiver emit-dockerfile      # Generate Dockerfile
-dfe-archiver emit-helm chart/     # Generate Helm chart
 dfe-archiver version              # Version info
 ```
 
@@ -380,6 +379,6 @@ Inbound:
 
 Outbound -- the repo a change here breaks:
 
-- **hyperi-io/dfe-infra**, image pin, lockstep. `helm/charts/dfe-archiver/Chart.yaml` carries the `appVersion`, drift-checked against dfe-infra's `versions.yaml`. A release here is not deployed until that pin moves. The chart lives there -- `dfe-archiver emit-helm` can write one, this repo commits none.
+- **hyperi-io/dfe-infra**, image pin, lockstep. `versions.yaml` pins the image and the thin chart released here, and Argo deploys that published chart. A release here is not deployed until that pin moves. This repo commits no chart: the release assembles it from the deployment contract.
 
 Regenerate both from dfe-infra: `python3 scripts/dfe-stack suite --consumer dfe-archiver`, and again with `--producer`.
