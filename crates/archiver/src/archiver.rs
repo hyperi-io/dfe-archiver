@@ -553,15 +553,13 @@ pub struct Archiver {
     withheld: AtomicU64,
     /// Cancellation token for graceful shutdown
     cancel: CancellationToken,
-    /// The unified KEDA `ScalingPressure` engine, reaching KEDA as the
-    /// `dfe_scaling_pressure` gauge on the metrics listener -- the runtime
-    /// starts that listener without the `/scaling/pressure` route, so nothing
-    /// serves the composite over HTTP. scalo 2.9 collapsed the old dual model (the app's
-    /// weighted pressure + a separate runtime signal cell) into this single
-    /// engine: the components are registered via `ServiceApp::scaling_components`
-    /// and the archiver's loops drive their values directly (`kafka_lag` from
-    /// the consumer's position lag, `buffer_depth` from hot-buffer count,
-    /// `memory` from the cgroup guard) plus the circuit gate. Shared from the
+    /// The unified KEDA `ScalingPressure` engine. The metrics listener serves it
+    /// at `/scaling/pressure` and the scalo runtime copies it into the
+    /// `scaling_pressure` gauge once a second. The components are registered via
+    /// `ServiceApp::scaling_components` and the archiver's loops drive their
+    /// values directly (`kafka_lag` from the consumer's position lag,
+    /// `buffer_depth` from hot-buffer count, `memory` from the cgroup guard)
+    /// plus the circuit gate. Shared from the
     /// runtime when `scaling` is enabled, a standalone fallback otherwise.
     scaling: Arc<ScalingPressure>,
     /// Sink circuit latch driving `ScalingPressure::set_circuit_open`: opened
@@ -988,10 +986,10 @@ impl Archiver {
     /// (default-on self-regulation); `None` means self-regulation is disabled.
     ///
     /// `scaling` is the runtime's unified `ScalingPressure` engine, shared so
-    /// the archiver's loops drive the `dfe_scaling_pressure` gauge KEDA scales
-    /// on. `None` when the runtime's `scaling` feature is off; a standalone
-    /// engine (registering the same components) is built as a fallback so the
-    /// local pressure gauge keeps working.
+    /// the archiver's loops drive the value the runtime writes into the
+    /// `scaling_pressure` gauge KEDA scales on. `None` when the runtime's
+    /// `scaling` feature is off; a standalone engine (registering the same
+    /// components) is built as a fallback.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -1698,8 +1696,6 @@ impl Archiver {
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
         self.scaling
             .set_component("memory", self.memory_guard.pressure_ratio());
-        let pressure = self.scaling.calculate();
-        self.metrics.set_scaling_pressure(pressure);
         self.metrics
             .set_scaling_memory_pressure(self.memory_guard.pressure_ratio());
         self.metrics
