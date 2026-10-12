@@ -205,11 +205,11 @@ impl ServiceApp for App {
         // self_regulation is disabled, `runtime.governor` is None and the
         // receiver is built without a gate (byte-identical to pre-governor).
         // Share the runtime's unified ScalingPressure engine, built from the
-        // components `scaling_components()` registers below and reaching KEDA
-        // as the `dfe_scaling_pressure` gauge. The archiver's loops drive its
-        // values (kafka_lag, buffer_depth, memory, circuit) directly. When the
-        // `scaling` feature is off the runtime hands back None; fall back to a
-        // standalone engine so the gauge path is unchanged.
+        // components `scaling_components()` registers below; the runtime writes
+        // it into the `scaling_pressure` gauge KEDA reads. The archiver's loops
+        // drive its values (kafka_lag, buffer_depth, memory, circuit) directly.
+        // When the `scaling` feature is off the runtime hands back None; fall
+        // back to a standalone engine.
         let archiver = Arc::new(
             Archiver::new(
                 shared_config,

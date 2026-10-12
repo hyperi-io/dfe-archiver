@@ -560,13 +560,6 @@ impl ArchiverMetrics {
         gauge!("pipeline_last_batch_timestamp_seconds").set(now);
     }
 
-    /// Update KEDA scaling pressure gauge
-    pub fn set_scaling_pressure(&self, value: f64) {
-        if let Some(ref dfe) = self.dfe {
-            dfe.scaling_pressure(value);
-        }
-    }
-
     /// Update pipeline readiness
     pub fn set_pipeline_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
@@ -875,7 +868,6 @@ mod tests {
         m.record_eviction();
         m.set_unique_destinations(5);
         m.set_last_batch_timestamp();
-        m.set_scaling_pressure(0.42);
         m.set_pipeline_ready(true);
         m.set_scaling_circuit_open(false);
         m.set_scaling_memory_pressure(0.3);
