@@ -137,6 +137,8 @@ kafka:
   sasl_password: ${KAFKA_PASSWORD}  # env var substitution
   acknowledgements:
     enabled: true              # false commits at receipt
+  librdkafka_overrides:        # raw librdkafka, consumer and DLQ producer
+    message.max.bytes: "8388608"  # a topic capped below the 16 MiB default
 
 archive:
   destination: s3://my-bucket/archives

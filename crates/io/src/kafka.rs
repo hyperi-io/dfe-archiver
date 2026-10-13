@@ -251,9 +251,12 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
     // callback publishes the `rdkafka_*` gauges. scalo
     // already defaults this to 5000ms when unset, but we set it EXPLICITLY (as
     // a highest-priority override) so a future profile/default change can never
-    // silently flip it to 0 and zero the lag signal.
-    let mut librdkafka_overrides = std::collections::HashMap::new();
-    librdkafka_overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
+    // silently flip it to 0 and zero the lag signal. Only an operator's own
+    // `kafka.librdkafka_overrides` entry for it replaces the 5000.
+    let mut librdkafka_overrides = config.librdkafka_overrides.clone();
+    librdkafka_overrides
+        .entry("statistics.interval.ms".to_string())
+        .or_insert_with(|| "5000".to_string());
 
     scalo::transport::KafkaConfig {
         // An empty topic list discovers instead, so a source added after this
@@ -355,9 +358,60 @@ impl Default for MemoryTransportAdapter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use dfe_archiver_core::config::KafkaConfig;
     use rdkafka::ClientContext;
     use rdkafka::statistics::{Partition, Statistics, Topic};
     use scalo::transport::kafka::{StatsContext, total_consumer_lag};
+
+    use super::convert_config;
+
+    fn overrides(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// Unset, the transport gets only the statistics interval the lag signal
+    /// needs; an operator map is passed through with that interval added.
+    #[test]
+    fn librdkafka_overrides_reach_the_transport_with_statistics_kept_on() {
+        let unset = convert_config(&KafkaConfig::default());
+        assert_eq!(
+            unset.librdkafka_overrides,
+            overrides(&[("statistics.interval.ms", "5000")])
+        );
+
+        let config = KafkaConfig {
+            librdkafka_overrides: overrides(&[("message.max.bytes", "8388608")]),
+            ..KafkaConfig::default()
+        };
+        assert_eq!(
+            convert_config(&config).librdkafka_overrides,
+            overrides(&[
+                ("message.max.bytes", "8388608"),
+                ("statistics.interval.ms", "5000"),
+            ])
+        );
+    }
+
+    /// An interval the operator names is theirs, not replaced by the default.
+    #[test]
+    fn an_operator_statistics_interval_is_kept() {
+        let config = KafkaConfig {
+            librdkafka_overrides: overrides(&[("statistics.interval.ms", "10000")]),
+            ..KafkaConfig::default()
+        };
+        assert_eq!(
+            convert_config(&config)
+                .librdkafka_overrides
+                .get("statistics.interval.ms")
+                .map(String::as_str),
+            Some("10000")
+        );
+    }
 
     /// The lag behind `position_lag` counts records past the read position, so
     /// the records an open file holds uncommitted are never read as backlog.
