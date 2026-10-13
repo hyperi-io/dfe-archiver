@@ -6,6 +6,8 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use std::collections::HashMap;
+
 use crate::buffer::DEFAULT_SPOOL_DIR;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use scalo::config::sensitive::SensitiveString;
@@ -297,6 +299,13 @@ pub struct KafkaConfig {
     /// With `enabled: false` offsets are committed as records are received,
     /// and a kill loses what the open files and buffers held.
     pub acknowledgements: AcknowledgementsConfig,
+
+    /// Raw librdkafka properties for the consumer and the DLQ producer,
+    /// winning over every setting scalo derives. `message.max.bytes` here sets
+    /// the DLQ producer's record ceiling, and a dead letter over it is screened
+    /// out before the write. `statistics.interval.ms` stays 5000 unless this
+    /// map names it.
+    pub librdkafka_overrides: HashMap<String, String>,
 }
 
 impl Default for KafkaConfig {
@@ -320,6 +329,7 @@ impl Default for KafkaConfig {
             max_poll_interval_ms: 300_000,
             session_timeout_ms: 30_000,
             acknowledgements: AcknowledgementsConfig::default(),
+            librdkafka_overrides: HashMap::new(),
         }
     }
 }

@@ -35,7 +35,8 @@
         "session_timeout_ms": 30000,
         "acknowledgements": {
           "enabled": true
-        }
+        },
+        "librdkafka_overrides": {}
       }
     },
     "grpc": {
@@ -252,6 +253,14 @@
           "default": {
             "enabled": true
           }
+        },
+        "librdkafka_overrides": {
+          "description": "Raw librdkafka properties for the consumer and the DLQ producer,\nwinning over every setting scalo derives. `message.max.bytes` here sets\nthe DLQ producer's record ceiling, and a dead letter over it is screened\nout before the write. `statistics.interval.ms` stays 5000 unless this\nmap names it.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
         }
       }
     },

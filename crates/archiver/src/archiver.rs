@@ -2488,8 +2488,8 @@ mod tests {
         WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, buffer_message,
         dead_letter_refused_file, held_record_cap, leased_bytes, publish_kafka_lag, received_bytes,
         record_files_opened, record_rolls, record_routing_fallbacks, restart_required_changes,
-        retry_delay, sampled_reason, screen_dead_letters, sink_confirmation, upload_retry_delay,
-        upload_slots, upload_until_settled,
+        retry_delay, sampled_reason, screen_dead_letters, sink_confirmation, spawn_dlq,
+        upload_retry_delay, upload_slots, upload_until_settled,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -3501,6 +3501,38 @@ mod tests {
                 .refused
                 .is_empty(),
             "a disabled DLQ refuses nothing"
+        );
+        dlq.shutdown().await.expect("dlq shutdown");
+    }
+
+    /// `kafka.librdkafka_overrides` in the config file reaches the DLQ
+    /// producer, the archiver's only producer, so a deployment on a managed
+    /// broker can lower its record ceiling to the topic's: an entry the topic
+    /// would refuse is screened out before the write.
+    #[tokio::test]
+    async fn a_librdkafka_override_sets_the_dlq_producers_record_ceiling() {
+        // The max.message.bytes Confluent Basic and Standard cap a topic at.
+        const BASIC_TOPIC_CEILING: usize = 8_388_608;
+        let mut config: Config = serde_yaml_ng::from_str(
+            "kafka:\n  brokers: [\"127.0.0.1:1\"]\n  librdkafka_overrides:\n    \
+             message.max.bytes: \"8388608\"\n",
+        )
+        .expect("config parses");
+        config.dlq.mode = DlqMode::KafkaOnly;
+        config.dlq.file.enabled = false;
+        config.dlq.kafka.enabled = true;
+        let dlq = spawn_dlq(&config).expect("dlq");
+
+        // Under the stack's 16 MiB ceiling, over the topic's once base64-encoded.
+        let entry = DlqEntry::new(
+            "dfe-archiver",
+            "storage_write_failed",
+            vec![b'x'; BASIC_TOPIC_CEILING],
+        );
+        let refused = dlq.refusal(&entry);
+        assert!(
+            matches!(refused, Some(DeadLetterReason::TooLarge { limit, .. }) if limit < BASIC_TOPIC_CEILING),
+            "an entry over the topic ceiling reaches the write: {refused:?}"
         );
         dlq.shutdown().await.expect("dlq shutdown");
     }
