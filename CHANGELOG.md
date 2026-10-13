@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.33](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.32...v1.7.33) (2026-10-13)
+
+### Bug Fixes
+
+* read kafka.librdkafka_overrides ([#120](https://github.com/hyperi-io/dfe-archiver/issues/120)) ([3d02e30](https://github.com/hyperi-io/dfe-archiver/commit/3d02e304c9f37f0d47947f0472861c94d1334758)), closes [#118](https://github.com/hyperi-io/dfe-archiver/issues/118)
+
 ## [1.7.32](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.31...v1.7.32) (2026-10-12)
 
 ### Bug Fixes
