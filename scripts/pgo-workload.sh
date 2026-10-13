@@ -62,9 +62,9 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # pattern that picks the right colon out of "${VAR:-name:tag}", and RE2 has no
 # lookahead to do that cleanly.
 # renovate: datasource=docker depName=redpandadata/redpanda
-KAFKA_TAG="v26.2.3"
+KAFKA_TAG="v26.2.4"
 # Index digest of KAFKA_TAG: docker pulls by digest, so a tag bump moves this with it.
-KAFKA_DIGEST="sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9"
+KAFKA_DIGEST="sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89"
 KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}@${KAFKA_DIGEST}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
