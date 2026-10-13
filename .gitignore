@@ -14,7 +14,7 @@ Thumbs.db
 .env.local
 .env.*.local
 .env.*
-!.env.example
+!.env*.example
 !.env.example.*
 .gcs-test-key.json
 
@@ -40,17 +40,23 @@ coverage.lcov
 tarpaulin-report.json
 cobertura.xml
 
-# cargo (keep the checked-in config.toml)
-.cargo/
+# cargo (keep the checked-in config.toml). Glob the contents, not the directory:
+# git cannot re-include a file whose parent directory is excluded.
+.cargo/*
 !.cargo/config.toml
 
-# Local working files / AI agent artefacts (not committed)
+# Local working files (not committed)
 docs/superpowers/
 hyperi-ai/
 # The dotted spelling is the current one (plans, handovers, scratch). It is NOT
 # matched by the line above, so without this the whole directory sits untracked
-# in `git status` and a `git add -A` commits it.
-.hyperi-ai/
+# in `git status` and a `git add -A` commits it. No trailing slash: a directory
+# pattern does not match a symlink.
+.hyperi-ai
+.superpowers/
+.playwright-mcp/
+.kube/
+.secrets/
 .mcp.json
 .ai-version
 .worktrees/
