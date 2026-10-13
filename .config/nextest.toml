@@ -6,6 +6,15 @@
 # License:      BUSL-1.1
 # Copyright:    (c) 2026 HyperI Pty Ltd
 
+# Setup scripts are still experimental in nextest, and pull-test-images is one.
+experimental = ["setup-scripts"]
+
+# Pulls every image the e2e fixtures start, so no test spends its own timeout on a pull.
+[scripts.setup.pull-test-images]
+command = { command-line = "scripts/pull-test-images.sh", relative-to = "workspace-root" }
+# Ends a pull that hangs, rather than holding the run until the CI job times out.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 [profile.default]
 # Limit test parallelism to avoid overwhelming the system
 test-threads = 2
@@ -22,6 +31,10 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 
 # Fail fast - stop on first failure
 fail-fast = false
+
+[[profile.default.scripts]]
+filter = "binary_id(dfe-archiver::e2e)"
+setup = "pull-test-images"
 
 # Opt-in only (`cargo nextest run --profile ci`); hyperi-ci does NOT select it.
 [profile.ci]
