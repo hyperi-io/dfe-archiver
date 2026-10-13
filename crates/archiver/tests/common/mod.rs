@@ -462,14 +462,44 @@ pub fn reap_stale(name: &str) {
         .status();
 }
 
-// -- Azurite (Azure Blob emulator) -------------------------------------
+// -- Container images ---------------------------------------------------
 
-/// Azurite, the Microsoft-published Azure Blob emulator. Pinned rather than
-/// `latest`: a floating tag retargets the suite on every image refresh, so a
-/// break lands with nothing in the diff to explain it.
-///
-/// renovate: datasource=docker depName=mcr.microsoft.com/azure-storage/azurite
-const AZURITE_TAG: &str = "3.36.0";
+/// The pull script nextest runs first, which holds the pins so it pulls what the fixtures start.
+const PULL_SCRIPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/pull-test-images.sh"
+));
+
+/// The value `scripts/pull-test-images.sh` assigns to `name`, as in `KAFKA_TAG="4.3.1"`.
+fn pin(name: &str) -> &'static str {
+    let assignment = format!("{name}=\"");
+    PULL_SCRIPT
+        .lines()
+        .find_map(|line| line.strip_prefix(assignment.as_str())?.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("scripts/pull-test-images.sh assigns no {name}"))
+}
+
+/// `name` at `tag`, which in CI must already be pulled: a pull inside a test spends its timeout.
+fn pinned_image(name: &str, tag: &str) -> testcontainers::GenericImage {
+    let reference = format!("{name}:{tag}");
+    if env::var_os("CI").is_some() && env::var_os("NEXTEST").is_some() && docker_available() {
+        let held = std::process::Command::new("docker")
+            .args(["image", "inspect", &reference])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(
+            held,
+            "{reference} was not pulled before the run: nextest's pull-test-images \
+             setup script pulls every image a fixture starts, so add it to \
+             scripts/pull-test-images.sh"
+        );
+    }
+    testcontainers::GenericImage::new(name, tag)
+}
+
+// -- Azurite (Azure Blob emulator) -------------------------------------
 
 /// Azurite's published dev account. Fixed and documented by Microsoft, not a
 /// secret -- it only ever unlocks an emulator on localhost.
@@ -510,9 +540,9 @@ impl AzureFixture {
 /// Returns `None` when neither is available -- having failed the run in CI,
 /// where a skip would be a green job that tested nothing.
 pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> {
+    use testcontainers::ImageExt;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
 
     load_dotenv();
     if let Ok(account_name) = env::var("AZURE_STORAGE_ACCOUNT") {
@@ -542,7 +572,8 @@ pub async fn acquire_azure(test: &str, container: &str) -> Option<AzureFixture> 
     // This name belongs to this test alone, so anything holding it is a leak.
     reap_stale(&name);
 
-    let image = GenericImage::new("mcr.microsoft.com/azure-storage/azurite", AZURITE_TAG)
+    let tag = pin("AZURITE_TAG");
+    let image = pinned_image("mcr.microsoft.com/azure-storage/azurite", tag)
         .with_exposed_port(10000u16.tcp())
         .with_wait_for(WaitFor::message_on_stdout(
             "Azurite Blob service successfully listens",
@@ -749,17 +780,6 @@ pub async fn azurite_blob_len(
 
 // -- LocalStack (AWS S3 emulator) --------------------------------------
 
-/// `LocalStack`, on the SEMVER line only -- do NOT move this to the `CalVer` tags
-/// (`2026.07.0` etc). Those require a licence: they exit 55 with "License
-/// activation failed! ... set the `LOCALSTACK_AUTH_TOKEN` variable", so every
-/// `LocalStack` test would skip. 4.x is the newest line that boots with no token
-/// -- verified here on 4.14.0 (build 2026-02-26), which starts, prints
-/// "You are starting the `LocalStack` Community Docker image" and serves S3.
-/// Reject a `CalVer` bump. Same pin as dfe-fetcher, deliberately.
-///
-/// renovate: datasource=docker depName=localstack/localstack versioning=semver
-const LOCALSTACK_TAG: &str = "4.14";
-
 /// An S3 target for a test: a live bucket if one is configured, else a
 /// `LocalStack` this fixture owns.
 pub struct S3Fixture {
@@ -789,9 +809,9 @@ impl S3Fixture {
 ///
 /// Returns `None` when neither is available -- having failed the run in CI.
 pub async fn acquire_s3(test: &str, bucket: &str) -> Option<S3Fixture> {
+    use testcontainers::ImageExt;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
 
     load_dotenv();
     if let Ok(live_bucket) = env::var("S3_BUCKET") {
@@ -823,7 +843,7 @@ pub async fn acquire_s3(test: &str, bucket: &str) -> Option<S3Fixture> {
     // This name belongs to this test alone, so anything holding it is a leak.
     reap_stale(&name);
 
-    let image = GenericImage::new("localstack/localstack", LOCALSTACK_TAG)
+    let image = pinned_image("localstack/localstack", pin("LOCALSTACK_TAG"))
         .with_exposed_port(4566u16.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready."))
         // S3 only. LocalStack starts every service it is asked for, and the rest
@@ -979,12 +999,6 @@ pub async fn localstack_object_len(
 
 // -- fake-gcs-server (Google Cloud Storage emulator) -------------------
 
-/// `fsouza/fake-gcs-server`, the maintained GCS emulator (1.55.1 published
-/// 2026-07-19). Pinned, not `latest`, for the same reason as Azurite.
-///
-/// renovate: datasource=docker depName=fsouza/fake-gcs-server
-const FAKE_GCS_TAG: &str = "1.55.1";
-
 /// A GCS target for a test: a live bucket if credentials are configured, else a
 /// fake-gcs-server this fixture owns.
 pub struct GcsFixture {
@@ -1034,9 +1048,9 @@ impl GcsFixture {
 ///
 /// Returns `None` when neither is available -- having failed the run in CI.
 pub async fn acquire_gcs(test: &str, bucket: &str) -> Option<GcsFixture> {
+    use testcontainers::ImageExt;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
 
     load_dotenv();
     if let Ok(live_bucket) = env::var("GCS_BUCKET") {
@@ -1064,7 +1078,7 @@ pub async fn acquire_gcs(test: &str, bucket: &str) -> Option<GcsFixture> {
     // This name belongs to this test alone, so anything holding it is a leak.
     reap_stale(&name);
 
-    let image = GenericImage::new("fsouza/fake-gcs-server", FAKE_GCS_TAG)
+    let image = pinned_image("fsouza/fake-gcs-server", pin("FAKE_GCS_TAG"))
         .with_exposed_port(4443u16.tcp())
         // STDERR: fake-gcs-server's slog default writes there and stdout stays
         // empty, so waiting on stdout never matches and every test times out.
@@ -1626,9 +1640,9 @@ async fn forward(
 ///
 /// Returns `None` only when Docker is absent, having failed the run in CI.
 pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
+    use testcontainers::ImageExt;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
 
     let name = container_name(Some(test), "localstack");
     let mut taken = Vec::new();
@@ -1636,7 +1650,7 @@ pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
     for _ in 0..3 {
         reap_stale(&name);
         let port = free_low_port(&taken);
-        let image = GenericImage::new("localstack/localstack", LOCALSTACK_TAG)
+        let image = pinned_image("localstack/localstack", pin("LOCALSTACK_TAG"))
             .with_exposed_port(4566u16.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready."))
             .with_env_var("SERVICES", "s3")
@@ -1674,17 +1688,6 @@ pub async fn acquire_s3_store(test: &str) -> Option<S3StoreFixture> {
 }
 
 // -- Kafka, owned per test --
-
-/// Kafka to test against, pinned by digest, the same pin scalo's own tests use.
-///
-/// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
-///
-/// renovate: datasource=docker depName=apache/kafka
-const KAFKA_TAG: &str = "4.3.1";
-
-/// Digest of `KAFKA_TAG`, apart from it because the Renovate regex stops at a colon.
-const KAFKA_DIGEST: &str =
-    "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
 
 /// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 40 s is too tight.
 const KAFKA_STARTUP: Duration = Duration::from_secs(180);
@@ -1854,18 +1857,18 @@ impl KafkaFixture {
 ///
 /// Returns `None` only when Docker is absent, having failed the run in CI.
 pub async fn acquire_kafka(test: &str) -> Option<KafkaFixture> {
+    use testcontainers::ImageExt;
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
 
     let name = container_name(Some(test), "kafka");
-    let image_tag = format!("{KAFKA_TAG}@{KAFKA_DIGEST}");
+    let image_tag = format!("{}@{}", pin("KAFKA_TAG"), pin("KAFKA_DIGEST"));
     let mut taken = Vec::new();
     let mut last_error = String::new();
     for _ in 0..3 {
         reap_stale(&name);
         let port = free_low_port(&taken);
-        let image = GenericImage::new("apache/kafka", image_tag.as_str())
+        let image = pinned_image("apache/kafka", &image_tag)
             .with_exposed_port(9092u16.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
             .with_env_var("KAFKA_NODE_ID", "1")

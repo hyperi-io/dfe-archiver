@@ -67,7 +67,7 @@ services:
   # destinations. It accepts any credentials, minioadmin included.
   # =========================================================================
   s3:
-    # Same pin as LOCALSTACK_TAG in crates/archiver/tests/common/mod.rs. Stay on
+    # Same pin as LOCALSTACK_TAG in scripts/pull-test-images.sh. Stay on
     # the semver line: the CalVer tags need a licence token to start.
     # renovate: datasource=docker depName=localstack/localstack versioning=semver
     image: localstack/localstack:4.14@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
