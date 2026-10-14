@@ -1,16 +1,20 @@
 - kind: sink
   name: archive
-  description: 'Rolling object-store archiver: consumes Kafka, writes compressed rolled files to a storage backend selected by the destination URL scheme.'
+  description: "Rolling object-store archiver: consumes Kafka, writes compressed rolled files to a storage backend selected by the destination URL scheme."
   maturity: stable
   fields:
   - name: destination
     type: string
     required: true
-    description: Destination URL; the scheme selects the backend (file:// | s3:// | gs:// | az:// | minio://).
+    description: >-
+      Destination URL; the scheme selects the backend (file:// | s3:// | gs:// |
+      az:// | minio://).
   - name: path_template
     type: string
     required: false
-    description: Path template under the routed destination; supported placeholders are {year}, {month}, {day}, {hour}, {minute}, {timestamp} and {seq}.
+    description: >-
+      Path template under the routed destination; supported placeholders are {year},
+      {month}, {day}, {hour}, {minute}, {timestamp} and {seq}.
   - name: compression
     type: enum
     required: false

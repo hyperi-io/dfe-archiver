@@ -57,7 +57,7 @@ release:
   helm:
     enabled: true
     contract: emit
-    library: "2.14.9"
+    library: "2.14.13"
   container:
     enabled: true
     dockerfile: Dockerfile

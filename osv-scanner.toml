@@ -15,8 +15,3 @@ reason = "opentelemetry_sdk 0.31 through scalo-rs. Not reachable: the unbounded 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
 reason = "paste is unmaintained, with no vulnerability and no replacement. A compile-time proc macro under tikv-jemalloc-ctl 0.7.0, the latest release, behind the jemalloc feature, so it reaches no running code. Drop when tikv-jemalloc-ctl leaves it."
-
-# unsafe-libyaml arrives via figment and serde_yaml_ng; tracked in hyperi-io/scalo-rs#341.
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0449"
-reason = "unsafe-libyaml is unmaintained, not vulnerable; it parses only operator-supplied config YAML via serde_yaml and serde_yaml_ng (figment, scalo), never untrusted input; drop when scalo moves to a maintained YAML parser"

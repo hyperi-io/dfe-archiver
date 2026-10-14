@@ -70,7 +70,7 @@ fn smoke_startup_boots_with_default_config() {
 fn smoke_deployment_contract() {
     use dfe_archiver::contract::deployment_contract;
     let contract = deployment_contract();
-    let json = contract.to_json();
+    let json = contract.to_json().expect("contract serialises to JSON");
     assert!(!json.is_empty(), "contract JSON should not be empty");
     assert!(
         json.contains("dfe-archiver"),

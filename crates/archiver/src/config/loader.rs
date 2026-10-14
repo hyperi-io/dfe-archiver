@@ -115,8 +115,8 @@ fn load_from_file(path: &str) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("failed to read config file '{path}': {e}")))?;
 
-    serde_yaml_ng::from_str(&content)
-        .map_err(|e| Error::Config(format!("failed to parse config file '{path}': {e}")))
+    scalo::yaml::from_str(&content, path, scalo::yaml::Profile::Config)
+        .map_err(|e| Error::Config(format!("failed to parse config file: {e}")))
 }
 
 /// Validate configuration
@@ -624,9 +624,12 @@ mod tests {
         assert!(config.kafka.acknowledgements.enabled);
         assert!(config.grpc.acknowledgements.enabled);
 
-        let parsed: Config =
-            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
-                .expect("parse");
+        let parsed: Config = scalo::yaml::from_str(
+            "kafka:\n  acknowledgements:\n    enabled: false\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
         assert!(!parsed.kafka.acknowledgements.enabled);
         assert!(parsed.grpc.acknowledgements.enabled);
         validate_config(&parsed).expect("acknowledgements off is a valid config");
@@ -642,9 +645,12 @@ mod tests {
         assert_eq!(held.roll_interval_secs(), 300);
         assert_eq!(held.long_held_roll_interval(), None);
 
-        let acks_off: Config =
-            serde_yaml_ng::from_str("kafka:\n  acknowledgements:\n    enabled: false\n")
-                .expect("parse");
+        let acks_off: Config = scalo::yaml::from_str(
+            "kafka:\n  acknowledgements:\n    enabled: false\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
         assert!(!acks_off.holds_offsets());
         assert_eq!(acks_off.roll_interval_secs(), 3600);
     }
@@ -663,9 +669,7 @@ mod tests {
         assert_eq!(direct.roll_interval_secs(), 300);
         assert_eq!(direct.long_held_roll_interval(), None);
 
-        let configured: Config = serde_yaml_ng::from_str(
-            "transport: grpc\ngrpc:\n  listen: \"0.0.0.0:6000\"\narchive:\n  roll_interval_secs: 3600\n",
-        )
+        let configured: Config = scalo::yaml::from_str("transport: grpc\ngrpc:\n  listen: \"0.0.0.0:6000\"\narchive:\n  roll_interval_secs: 3600\n", "config.yaml", scalo::yaml::Profile::Config)
         .expect("parse");
         assert!(configured.is_direct());
         validate_config(&configured).expect("a direct config with a roll interval is valid");
@@ -681,19 +685,31 @@ mod tests {
     /// long one is flagged for the startup warning.
     #[test]
     fn test_a_configured_roll_interval_wins_over_the_held_offsets_default() {
-        let long: Config =
-            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 3600\n").expect("parse");
+        let long: Config = scalo::yaml::from_str(
+            "archive:\n  roll_interval_secs: 3600\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
         assert!(long.holds_offsets());
         assert_eq!(long.roll_interval_secs(), 3600);
         assert_eq!(long.long_held_roll_interval(), Some(3600));
 
-        let short: Config =
-            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 60\n").expect("parse");
+        let short: Config = scalo::yaml::from_str(
+            "archive:\n  roll_interval_secs: 60\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
         assert_eq!(short.roll_interval_secs(), 60);
         assert_eq!(short.long_held_roll_interval(), None);
 
-        let at_the_line: Config =
-            serde_yaml_ng::from_str("archive:\n  roll_interval_secs: 900\n").expect("parse");
+        let at_the_line: Config = scalo::yaml::from_str(
+            "archive:\n  roll_interval_secs: 900\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
         assert_eq!(at_the_line.long_held_roll_interval(), None);
     }
 
@@ -716,15 +732,19 @@ mod tests {
             allow_http: true,
             ..Default::default()
         };
-        let yaml = serde_yaml_ng::to_string(&cfg).expect("serialise");
-        let parsed: S3Config = serde_yaml_ng::from_str(&yaml).expect("deserialise");
+        let yaml = scalo::yaml::to_string(&cfg).expect("serialise");
+        let parsed: S3Config =
+            scalo::yaml::from_str(&yaml, "config.yaml", scalo::yaml::Profile::Config)
+                .expect("deserialise");
         assert!(parsed.allow_http);
         assert_eq!(parsed.bucket, "test-bucket");
 
         // Absent field should deserialise to false (#[serde(default)]).
         cfg.allow_http = false;
         let yaml_no_flag = "bucket: test-bucket\n";
-        let parsed: S3Config = serde_yaml_ng::from_str(yaml_no_flag).expect("deserialise no flag");
+        let parsed: S3Config =
+            scalo::yaml::from_str(yaml_no_flag, "config.yaml", scalo::yaml::Profile::Config)
+                .expect("deserialise no flag");
         assert!(!parsed.allow_http);
     }
 }

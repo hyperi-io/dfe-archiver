@@ -139,7 +139,8 @@ fn test_fixture_config_loads_and_validates() {
     ))
     .expect("read fixture");
 
-    let config: Config = serde_yaml_ng::from_str(&yaml).expect("parse YAML");
+    let config: Config = scalo::yaml::from_str(&yaml, "config.yaml", scalo::yaml::Profile::Config)
+        .expect("parse YAML");
     validate_config(&config).expect("fixture config should validate");
 
     assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
