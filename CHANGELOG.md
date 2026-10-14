@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.34](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.33...v1.7.34) (2026-10-14)
+
+### Bug Fixes
+
+* pull test images before the e2e tests run ([#121](https://github.com/hyperi-io/dfe-archiver/issues/121)) ([5aed1d8](https://github.com/hyperi-io/dfe-archiver/commit/5aed1d87a834c57d681b54e793bc13506b46f9c7))
+* rebuild on scalo 2.14.13 and parse YAML through it ([#124](https://github.com/hyperi-io/dfe-archiver/issues/124)) ([b6d5fd1](https://github.com/hyperi-io/dfe-archiver/commit/b6d5fd1e3e8a866f95f40b16d1dea2364bb6e795))
+
 ## [1.7.33](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.32...v1.7.33) (2026-10-13)
 
 ### Bug Fixes
