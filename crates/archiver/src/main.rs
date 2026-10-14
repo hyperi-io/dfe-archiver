@@ -375,8 +375,13 @@ fn main() {
             return;
         }
         Some(Command::EmitContract) => {
-            let contract = deployment_contract();
-            println!("{}", contract.to_json());
+            match deployment_contract().to_json() {
+                Ok(json) => println!("{json}"),
+                Err(e) => {
+                    eprintln!("error: failed to serialise the deployment contract: {e}");
+                    std::process::exit(1);
+                }
+            }
             return;
         }
         _ => {}

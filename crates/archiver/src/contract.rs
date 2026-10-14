@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_contract_json_roundtrip() {
         let contract = deployment_contract();
-        let json = contract.to_json();
+        let json = contract.to_json().expect("contract serialises to JSON");
         let parsed: DeploymentContract =
             serde_json::from_str(&json).expect("contract should roundtrip via JSON");
         assert_eq!(parsed.app_name, "dfe-archiver");

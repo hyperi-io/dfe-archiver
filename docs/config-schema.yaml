@@ -34,7 +34,7 @@ properties:
     default: kafka
   kafka:
     description: Kafka consumer configuration
-    $ref: '#/$defs/KafkaConfig'
+    $ref: "#/$defs/KafkaConfig"
     default:
       brokers:
       - localhost:9092
@@ -59,7 +59,7 @@ properties:
       librdkafka_overrides: {}
   grpc:
     description: Push listener configuration, read when `transport` is `grpc`.
-    $ref: '#/$defs/GrpcConfig'
+    $ref: "#/$defs/GrpcConfig"
     default:
       listen: null
       recv_buffer_size: 10000
@@ -71,10 +71,10 @@ properties:
         enabled: true
   archive:
     description: Archive output configuration
-    $ref: '#/$defs/ArchiveConfig'
+    $ref: "#/$defs/ArchiveConfig"
     default:
-      destination: ''
-      path_template: '{year}/{month}/{day}/{hour}'
+      destination: ""
+      path_template: "{year}/{month}/{day}/{hour}"
       file_extension: jsonl
       roll_size_bytes: 1073741824
       roll_interval_secs: null
@@ -86,7 +86,7 @@ properties:
       minio: null
   buffer:
     description: Buffer management configuration
-    $ref: '#/$defs/BufferConfig'
+    $ref: "#/$defs/BufferConfig"
     default:
       flush_bytes: 1048576
       flush_age_secs: 60
@@ -95,7 +95,7 @@ properties:
       spool_dir: /var/spool/dfe/archiver
   routing:
     description: Routing configuration
-    $ref: '#/$defs/RoutingConfig'
+    $ref: "#/$defs/RoutingConfig"
     default:
       mode: expression
       expression_fields:
@@ -103,14 +103,14 @@ properties:
       default_segment: unknown
   compression:
     description: Compression configuration
-    $ref: '#/$defs/CompressionConfig'
+    $ref: "#/$defs/CompressionConfig"
     default:
       codec: zstd
       level: 3
       enabled: true
   dlq:
     description: Dead letter queue configuration
-    $ref: '#/$defs/DlqConfig'
+    $ref: "#/$defs/DlqConfig"
     default:
       enabled: true
       mode: cascade
@@ -184,7 +184,7 @@ $defs:
         description: SASL mechanism (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       security_protocol:
         description: Security protocol (PLAINTEXT, `SASL_PLAINTEXT`, SSL, `SASL_SSL`)
@@ -194,13 +194,13 @@ $defs:
         description: SASL username
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       sasl_password:
         description: SASL password (never serialised in plaintext)
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
         default: null
@@ -210,7 +210,7 @@ $defs:
           (private-CA trust). Maps to librdkafka `ssl.ca.location`.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       allow_insecure_transport:
         description: |-
@@ -246,7 +246,7 @@ $defs:
           re-reads what an open file held: duplicates are possible, loss is not.
           With `enabled: false` offsets are committed as records are received,
           and a kill loses what the open files and buffers held.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
       librdkafka_overrides:
@@ -297,7 +297,7 @@ $defs:
         description: Listen address, e.g. `0.0.0.0:6000`. Required when `transport` is `grpc`.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       recv_buffer_size:
         description: Records buffered from incoming RPCs before the sender is held.
@@ -333,7 +333,7 @@ $defs:
           on this transport is at-most-once, and `enabled: false` only changes the
           reason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`
           to `acks_disabled`.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   ArchiveConfig:
@@ -347,7 +347,7 @@ $defs:
           path: a container-local directory nobody asked for looks like it is
           archiving and loses every file when the pod is replaced.
         type: string
-        default: ''
+        default: ""
       path_template:
         description: |-
           Path template under the routed destination. The supported placeholders
@@ -355,13 +355,13 @@ $defs:
           {seq}; any other is refused at config validation, because the writer
           would pass it through into the object key as literal braces.
         type: string
-        default: '{year}/{month}/{day}/{hour}'
+        default: "{year}/{month}/{day}/{hour}"
       file_extension:
         description: File extension (without compression suffix)
         type: string
         default: jsonl
       roll_size_bytes:
-        description: 'Rolling trigger: final compressed file size in bytes (not inbound data)'
+        description: "Rolling trigger: final compressed file size in bytes (not inbound data)"
         type: integer
         format: uint64
         minimum: 0
@@ -377,7 +377,7 @@ $defs:
           one above 900 with offsets held logs a warning at startup.
         type:
         - integer
-        - 'null'
+        - "null"
         format: uint64
         minimum: 0
         default: null
@@ -401,26 +401,26 @@ $defs:
       s3:
         description: S3-specific configuration
         anyOf:
-        - $ref: '#/$defs/S3Config'
-        - type: 'null'
+        - $ref: "#/$defs/S3Config"
+        - type: "null"
         default: null
       gcs:
         description: GCS-specific configuration
         anyOf:
-        - $ref: '#/$defs/GcsConfig'
-        - type: 'null'
+        - $ref: "#/$defs/GcsConfig"
+        - type: "null"
         default: null
       azure:
         description: Azure-specific configuration
         anyOf:
-        - $ref: '#/$defs/AzureConfig'
-        - type: 'null'
+        - $ref: "#/$defs/AzureConfig"
+        - type: "null"
         default: null
       minio:
         description: MinIO-specific configuration
         anyOf:
-        - $ref: '#/$defs/MinioConfig'
-        - type: 'null'
+        - $ref: "#/$defs/MinioConfig"
+        - type: "null"
         default: null
   S3Config:
     description: S3 configuration
@@ -429,25 +429,27 @@ $defs:
       region:
         type:
         - string
-        - 'null'
+        - "null"
       endpoint:
         type:
         - string
-        - 'null'
+        - "null"
       access_key_id:
         type:
         - string
-        - 'null'
+        - "null"
       secret_access_key:
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
       bucket:
         type: string
       allow_http:
-        description: Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS required).
+        description: >-
+          Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS
+          required).
         type: boolean
         default: false
     required:
@@ -459,17 +461,17 @@ $defs:
       project_id:
         type:
         - string
-        - 'null'
+        - "null"
       service_account_key:
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
       credentials_path:
         type:
         - string
-        - 'null'
+        - "null"
       bucket:
         type: string
     required:
@@ -483,13 +485,13 @@ $defs:
       account_key:
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
       sas_token:
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
       container:
@@ -499,13 +501,13 @@ $defs:
       endpoint:
         type:
         - string
-        - 'null'
+        - "null"
     required:
     - account_name
     - container
     - use_emulator
   MinioConfig:
-    description: '`MinIO` configuration (S3-compatible)'
+    description: "`MinIO` configuration (S3-compatible)"
     type: object
     properties:
       endpoint:
@@ -576,7 +578,7 @@ $defs:
     type: object
     properties:
       mode:
-        description: 'Routing mode: "expression" (default) or "topic"'
+        description: "Routing mode: \"expression\" (default) or \"topic\""
         type: string
         default: expression
       expression_fields:
@@ -622,7 +624,7 @@ $defs:
         default: true
       mode:
         description: Backend routing mode.
-        $ref: '#/$defs/DlqMode'
+        $ref: "#/$defs/DlqMode"
         default: cascade
       queue_capacity:
         description: |-
@@ -651,7 +653,7 @@ $defs:
         default: 100
       file:
         description: File backend configuration.
-        $ref: '#/$defs/FileDlqConfig'
+        $ref: "#/$defs/FileDlqConfig"
         default:
           enabled: true
           path: /var/spool/scalo/dlq
@@ -660,7 +662,7 @@ $defs:
           compress_rotated: true
       kafka:
         description: Kafka backend configuration.
-        $ref: '#/$defs/KafkaDlqConfig'
+        $ref: "#/$defs/KafkaDlqConfig"
         default:
           enabled: true
           routing: per_table
@@ -705,7 +707,7 @@ $defs:
         default: /var/spool/scalo/dlq
       rotation:
         description: File rotation period.
-        $ref: '#/$defs/RotationPeriod'
+        $ref: "#/$defs/RotationPeriod"
         default: hourly
       max_age_days:
         description: Auto-cleanup files older than this many days.
@@ -736,7 +738,7 @@ $defs:
         default: true
       routing:
         description: Topic routing strategy.
-        $ref: '#/$defs/DlqRouting'
+        $ref: "#/$defs/DlqRouting"
         default: per_table
       topic_suffix:
         description: Suffix appended to destination for per-table routing.
@@ -750,7 +752,7 @@ $defs:
           the service has no name. A value that is set is used as it is.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       send_timeout_ms:
         description: |-

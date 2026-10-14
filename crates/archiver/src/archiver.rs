@@ -3513,9 +3513,11 @@ mod tests {
     async fn a_librdkafka_override_sets_the_dlq_producers_record_ceiling() {
         // The max.message.bytes Confluent Basic and Standard cap a topic at.
         const BASIC_TOPIC_CEILING: usize = 8_388_608;
-        let mut config: Config = serde_yaml_ng::from_str(
+        let mut config: Config = scalo::yaml::from_str(
             "kafka:\n  brokers: [\"127.0.0.1:1\"]\n  librdkafka_overrides:\n    \
              message.max.bytes: \"8388608\"\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
         )
         .expect("config parses");
         config.dlq.mode = DlqMode::KafkaOnly;
