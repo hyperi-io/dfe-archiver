@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.35](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.34...v1.7.35) (2026-10-15)
+
+### Bug Fixes
+
+* rebuild on scalo 2.14.15 and rustls 0.23.46 ([1d53af7](https://github.com/hyperi-io/dfe-archiver/commit/1d53af79bd55183ee634ffd6fe3091ffffefc1b7))
+
 ## [1.7.34](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.33...v1.7.34) (2026-10-14)
 
 ### Bug Fixes
