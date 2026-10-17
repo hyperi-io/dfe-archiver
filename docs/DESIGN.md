@@ -443,7 +443,7 @@ Messages routed by Kafka topic name:
 
 ### Expression-Based (Default)
 
-Route by JSON field values for multi-tenant scenarios. The default is one field, `org_id`:
+Route by JSON field values for multi-tenant scenarios. Unset, the fields are `org_id` on `kafka`, where each source has its own topic, and `_source` then `org_id` on `grpc`:
 
 ```yaml
 routing:
@@ -472,6 +472,10 @@ routing:
 ```
 
 Message: `{"tags": {"category": "security"}}` -> Destination: `events/security/`
+
+### Records With No Topic
+
+On `grpc` the topic is the sender's routing key, and dfe-receiver sends none. A record with no key gets no topic folder: with no routing config, `{"_source": "cisco_ios.log", "org_id": "acme"}` lands under `cisco_ios.log/acme/`. Under `mode: topic` it lands under `default_segment`.
 
 ### Default Segment
 

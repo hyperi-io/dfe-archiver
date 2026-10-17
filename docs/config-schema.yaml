@@ -66,7 +66,6 @@ properties:
       recv_timeout_ms: 100
       max_message_size: 16777216
       compression: false
-      default_topic: default_land
       acknowledgements:
         enabled: true
   archive:
@@ -98,8 +97,7 @@ properties:
     $ref: "#/$defs/RoutingConfig"
     default:
       mode: expression
-      expression_fields:
-      - org_id
+      expression_fields: null
       default_segment: unknown
   compression:
     description: Compression configuration
@@ -321,10 +319,6 @@ $defs:
         description: Enable gzip compression for gRPC messages.
         type: boolean
         default: false
-      default_topic:
-        description: Archive destination key for a record whose sender set no routing key.
-        type: string
-        default: default_land
       acknowledgements:
         description: |-
           The listener answers each push once its records are queued, with this
@@ -584,14 +578,18 @@ $defs:
       expression_fields:
         description: |-
           Field paths for expression-based routing (dot notation)
-          e.g., [`org_id`, `tags.event_type`]
-        type: array
+          e.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on
+          `transport: kafka` and `[_source, org_id]` on `transport: grpc`.
+        type:
+        - array
+        - "null"
         items:
           type: string
-        default:
-        - org_id
+        default: null
       default_segment:
-        description: Default path segment when field not found
+        description: |-
+          Path segment for a field the record does not carry, and the
+          destination of a record with no topic under `mode: topic`.
         type: string
         default: unknown
   CompressionConfig:

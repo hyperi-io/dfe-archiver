@@ -161,7 +161,7 @@ compression:
 
 routing:
   mode: expression             # or "topic"
-  expression_fields:
+  expression_fields:           # unset: [org_id] on kafka, [_source, org_id] on grpc
     - org_id
     - event_type
 ```

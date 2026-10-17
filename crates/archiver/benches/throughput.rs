@@ -98,7 +98,7 @@ fn bench_routing(c: &mut Criterion) {
     // Expression-based routing
     let expr_router = Router::new(RoutingConfig {
         mode: "expression".to_string(),
-        expression_fields: vec!["org_id".to_string(), "event_type".to_string()],
+        expression_fields: Some(vec!["org_id".to_string(), "event_type".to_string()]),
         default_segment: "unknown".to_string(),
     });
 

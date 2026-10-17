@@ -97,7 +97,7 @@ impl Router {
     /// `Routed::fallback_fields` indexes them.
     #[must_use]
     pub fn expression_fields(&self) -> &[String] {
-        &self.config.expression_fields
+        self.config.expression_fields.as_deref().unwrap_or_default()
     }
 
     /// Route message to destination path
@@ -111,7 +111,7 @@ impl Router {
         match self.config.mode.as_str() {
             "expression" => self.route_by_expression(message),
             _ => Ok(Routed {
-                destination: Self::topic_destination(message),
+                destination: self.topic_destination(message),
                 fallback_fields: Vec::new(),
             }),
         }
@@ -121,9 +121,13 @@ impl Router {
     /// record expression routing cannot read.
     ///
     /// On the direct transport the topic is the sender's routing key, so it is
-    /// encoded as any other record-carried value is.
+    /// encoded as any other record-carried value is, and a record pushed with
+    /// none goes under `default_segment`.
     #[must_use]
-    pub fn topic_destination(message: &KafkaMessage) -> CompactString {
+    pub fn topic_destination(&self, message: &KafkaMessage) -> CompactString {
+        if message.topic.is_empty() {
+            return CompactString::from(self.config.default_segment.as_str());
+        }
         match path_segment(&message.topic) {
             Cow::Borrowed(_) => message.topic.clone(),
             Cow::Owned(encoded) => CompactString::from(encoded),
@@ -141,11 +145,15 @@ impl Router {
         let json: sonic_rs::Value = sonic_rs::from_slice(&message.payload)
             .map_err(|e| Error::Routing(format!("invalid JSON: {e}")))?;
 
-        let mut segments = Vec::with_capacity(self.config.expression_fields.len() + 1);
-        segments.push(path_segment(&message.topic).into_owned());
+        let fields = self.expression_fields();
+        let mut segments = Vec::with_capacity(fields.len() + 1);
+        // A record pushed with no routing key has no topic, so no topic folder.
+        if !message.topic.is_empty() {
+            segments.push(path_segment(&message.topic).into_owned());
+        }
         let mut fallback_fields = Vec::new();
 
-        for (index, field_path) in self.config.expression_fields.iter().enumerate() {
+        for (index, field_path) in fields.iter().enumerate() {
             let resolved = if let Some(value) = extract_field(&json, field_path) {
                 // Record-carried, so attacker-controlled: one encoded segment.
                 if let Cow::Owned(encoded) = path_segment(&value) {
@@ -220,7 +228,7 @@ mod tests {
     fn test_route_by_expression() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string(), "event_type".to_string()],
+            expression_fields: Some(vec!["org_id".to_string(), "event_type".to_string()]),
             default_segment: "unknown".to_string(),
         };
 
@@ -242,7 +250,7 @@ mod tests {
     fn test_route_by_expression_missing_field() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string(), "missing".to_string()],
+            expression_fields: Some(vec!["org_id".to_string(), "missing".to_string()]),
             default_segment: "unknown".to_string(),
         };
 
@@ -262,7 +270,7 @@ mod tests {
     fn test_route_by_nested_expression() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["tags.category".to_string()],
+            expression_fields: Some(vec!["tags.category".to_string()]),
             default_segment: "unknown".to_string(),
         };
 
@@ -289,7 +297,7 @@ mod tests {
     fn test_route_non_json_with_expression_returns_error() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string()],
+            expression_fields: Some(vec!["org_id".to_string()]),
             default_segment: "fallback".to_string(),
         };
         let router = Router::new(config);
@@ -302,7 +310,7 @@ mod tests {
     fn test_route_deeply_nested_field() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["a.b.c.d".to_string()],
+            expression_fields: Some(vec!["a.b.c.d".to_string()]),
             default_segment: "missing".to_string(),
         };
         let router = Router::new(config);
@@ -315,7 +323,7 @@ mod tests {
     fn test_route_deeply_nested_missing() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["a.b.c.d.e.f".to_string()],
+            expression_fields: Some(vec!["a.b.c.d.e.f".to_string()]),
             default_segment: "nope".to_string(),
         };
         let router = Router::new(config);
@@ -331,7 +339,7 @@ mod tests {
     fn test_topic_routing_reports_no_fallback() {
         let config = RoutingConfig {
             mode: "topic".to_string(),
-            expression_fields: vec!["org_id".to_string()],
+            expression_fields: Some(vec!["org_id".to_string()]),
             default_segment: "unknown".to_string(),
         };
         let router = Router::new(config);
@@ -347,7 +355,7 @@ mod tests {
     fn test_every_missing_field_reports_a_fallback() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string(), "tenant_id".to_string()],
+            expression_fields: Some(vec!["org_id".to_string(), "tenant_id".to_string()]),
             default_segment: "unknown".to_string(),
         };
         let router = Router::new(config);
@@ -401,16 +409,62 @@ mod tests {
             .expect("route by topic");
         assert_eq!(outcome.destination.as_str(), "..=2F..=2Fetc");
         assert_eq!(
-            Router::topic_destination(&make_message("events", "{}")).as_str(),
+            router
+                .topic_destination(&make_message("events", "{}"))
+                .as_str(),
             "events"
         );
+    }
+
+    // ---- a record pushed with no routing key ----
+
+    /// The direct transport gives a keyless record an empty topic.
+    fn keyless(payload: &str) -> KafkaMessage {
+        make_message("", payload)
+    }
+
+    #[test]
+    fn a_keyless_record_gets_no_topic_folder_under_expression_routing() {
+        let router = Router::new(RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: Some(vec!["_source".to_string(), "org_id".to_string()]),
+            default_segment: "unknown".to_string(),
+        });
+        let outcome = router
+            .route(&keyless(r#"{"_source":"cisco_ios.log","org_id":"acme"}"#))
+            .expect("route");
+        assert_eq!(outcome.destination.as_str(), "cisco_ios.log/acme");
+        assert_eq!(outcome.fallback_fields, Vec::<usize>::new());
+
+        let keyed = router
+            .route(&make_message(
+                "traffic",
+                r#"{"_source":"cisco_ios.log","org_id":"acme"}"#,
+            ))
+            .expect("route");
+        assert_eq!(
+            keyed.destination.as_str(),
+            "traffic/cisco_ios.log/acme",
+            "a record with a key keeps its topic folder"
+        );
+    }
+
+    #[test]
+    fn a_keyless_record_under_topic_routing_goes_under_the_default_segment() {
+        let router = Router::new(RoutingConfig {
+            mode: "topic".to_string(),
+            ..Default::default()
+        });
+        let outcome = router.route(&keyless("{}")).expect("route by topic");
+        assert_eq!(outcome.destination.as_str(), "unknown");
+        assert_eq!(router.topic_destination(&keyless("{}")).as_str(), "unknown");
     }
 
     #[test]
     fn expression_routing_encodes_every_field_value() {
         let router = Router::new(RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string(), "kind".to_string()],
+            expression_fields: Some(vec!["org_id".to_string(), "kind".to_string()]),
             default_segment: "unknown".to_string(),
         });
         let outcome = router
@@ -453,7 +507,7 @@ mod tests {
     fn router_in(mode: &str) -> Router {
         Router::new(RoutingConfig {
             mode: mode.to_string(),
-            expression_fields: vec!["org_id".to_string()],
+            expression_fields: Some(vec!["org_id".to_string()]),
             default_segment: "unknown".to_string(),
         })
     }

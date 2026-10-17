@@ -48,7 +48,6 @@
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
         "compression": false,
-        "default_topic": "default_land",
         "acknowledgements": {
           "enabled": true
         }
@@ -87,9 +86,7 @@
       "$ref": "#/$defs/RoutingConfig",
       "default": {
         "mode": "expression",
-        "expression_fields": [
-          "org_id"
-        ],
+        "expression_fields": null,
         "default_segment": "unknown"
       }
     },
@@ -312,11 +309,6 @@
           "description": "Enable gzip compression for gRPC messages.",
           "type": "boolean",
           "default": false
-        },
-        "default_topic": {
-          "description": "Archive destination key for a record whose sender set no routing key.",
-          "type": "string",
-          "default": "default_land"
         },
         "acknowledgements": {
           "description": "The listener answers each push once its records are queued, with this\non or off: a record is released only when its archive file completes, at\nthe roll interval, long after any sender's deadline. So the archive copy\non this transport is at-most-once, and `enabled: false` only changes the\nreason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`\nto `acks_disabled`.",
@@ -623,17 +615,18 @@
           "default": "expression"
         },
         "expression_fields": {
-          "description": "Field paths for expression-based routing (dot notation)\ne.g., [`org_id`, `tags.event_type`]",
-          "type": "array",
+          "description": "Field paths for expression-based routing (dot notation)\ne.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on\n`transport: kafka` and `[_source, org_id]` on `transport: grpc`.",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           },
-          "default": [
-            "org_id"
-          ]
+          "default": null
         },
         "default_segment": {
-          "description": "Default path segment when field not found",
+          "description": "Path segment for a field the record does not carry, and the\ndestination of a record with no topic under `mode: topic`.",
           "type": "string",
           "default": "unknown"
         }

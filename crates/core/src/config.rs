@@ -153,6 +153,22 @@ impl Config {
             })
     }
 
+    /// The routing in force: `routing` with `expression_fields` resolved to
+    /// the transport's default when unset.
+    #[must_use]
+    pub fn effective_routing(&self) -> RoutingConfig {
+        let mut routing = self.routing.clone();
+        routing.expression_fields.get_or_insert_with(|| {
+            let fields: &[&str] = if self.is_direct() {
+                &GRPC_EXPRESSION_FIELDS
+            } else {
+                &KAFKA_EXPRESSION_FIELDS
+            };
+            fields.iter().map(|field| (*field).to_string()).collect()
+        });
+        routing
+    }
+
     /// The roll interval when offsets are held for longer than
     /// [`HELD_OFFSETS_ROLL_WARN_SECS`], or `None` when it needs no warning.
     #[must_use]
@@ -207,9 +223,6 @@ pub struct GrpcConfig {
     /// Enable gzip compression for gRPC messages.
     pub compression: bool,
 
-    /// Archive destination key for a record whose sender set no routing key.
-    pub default_topic: String,
-
     /// The listener answers each push once its records are queued, with this
     /// on or off: a record is released only when its archive file completes, at
     /// the roll interval, long after any sender's deadline. So the archive copy
@@ -227,7 +240,6 @@ impl Default for GrpcConfig {
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
             compression: false,
-            default_topic: "default_land".to_string(),
             acknowledgements: AcknowledgementsConfig::default(),
         }
     }
@@ -521,10 +533,12 @@ pub struct RoutingConfig {
     pub mode: String,
 
     /// Field paths for expression-based routing (dot notation)
-    /// e.g., [`org_id`, `tags.event_type`]
-    pub expression_fields: Vec<String>,
+    /// e.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on
+    /// `transport: kafka` and `[_source, org_id]` on `transport: grpc`.
+    pub expression_fields: Option<Vec<String>>,
 
-    /// Default path segment when field not found
+    /// Path segment for a field the record does not carry, and the
+    /// destination of a record with no topic under `mode: topic`.
     pub default_segment: String,
 }
 
@@ -532,11 +546,19 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             mode: "expression".to_string(),
-            expression_fields: vec!["org_id".to_string()],
+            expression_fields: None,
             default_segment: "unknown".to_string(),
         }
     }
 }
+
+/// `routing.expression_fields` unset on `transport: kafka`: each source's topic
+/// is already the first folder.
+pub const KAFKA_EXPRESSION_FIELDS: [&str; 1] = ["org_id"];
+
+/// `routing.expression_fields` unset on `transport: grpc`: a pushed record has
+/// no topic, so its `_source` is the first folder.
+pub const GRPC_EXPRESSION_FIELDS: [&str; 2] = ["_source", "org_id"];
 
 /// Compression configuration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -734,6 +756,7 @@ impl Normalize for Config {
         {
             self.kafka.sasl_mechanism = Some("PLAIN".to_string());
         }
+        self.routing = self.effective_routing();
     }
 }
 

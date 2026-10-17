@@ -236,7 +236,12 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     // Expression mode with no fields yields the same path as topic mode, and
     // additionally rejects non-JSON payloads. Never what was intended.
-    if config.routing.mode == "expression" && config.routing.expression_fields.is_empty() {
+    if config.routing.mode == "expression"
+        && config
+            .effective_routing()
+            .expression_fields
+            .is_none_or(|fields| fields.is_empty())
+    {
         return Err(Error::Config(
             "routing.expression_fields cannot be empty when routing.mode is 'expression'"
                 .to_string(),
@@ -563,7 +568,7 @@ mod tests {
         let mut config = Config::default();
         config.kafka.brokers = vec!["localhost:9092".to_string()];
         config.routing.mode = "expression".to_string();
-        config.routing.expression_fields = vec![];
+        config.routing.expression_fields = Some(vec![]);
 
         assert!(
             validate_config(&config).is_err(),
@@ -580,8 +585,56 @@ mod tests {
         assert!(validate_config(&config).is_ok(), "topic mode is valid");
 
         config.routing.mode = "expression".to_string();
-        config.routing.expression_fields = vec!["org_id".to_string()];
+        config.routing.expression_fields = Some(vec!["org_id".to_string()]);
         assert!(validate_config(&config).is_ok(), "expression mode is valid");
+
+        config.routing.expression_fields = None;
+        assert!(
+            validate_config(&config).is_ok(),
+            "unset fields take the transport's default"
+        );
+    }
+
+    #[test]
+    fn test_unset_expression_fields_take_the_transports_default() {
+        let kafka = Config::default();
+        assert_eq!(
+            kafka.effective_routing().expression_fields,
+            Some(vec!["org_id".to_string()]),
+            "a Kafka topic already names the source"
+        );
+
+        let grpc = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        assert_eq!(
+            grpc.effective_routing().expression_fields,
+            Some(vec!["_source".to_string(), "org_id".to_string()]),
+            "a pushed record has no topic, so _source names the first folder"
+        );
+
+        let mut configured = grpc;
+        configured.routing.expression_fields = Some(vec!["org_id".to_string()]);
+        configured.normalize();
+        assert_eq!(
+            configured.routing.expression_fields,
+            Some(vec!["org_id".to_string()]),
+            "a configured list wins over the default"
+        );
+    }
+
+    #[test]
+    fn test_normalize_resolves_unset_expression_fields_from_the_transport() {
+        let mut config = Config {
+            transport: TRANSPORT_GRPC.to_string(),
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(
+            config.routing.expression_fields,
+            Some(vec!["_source".to_string(), "org_id".to_string()])
+        );
     }
 
     /// `{topic}` and `{date}` were advertised by the field's own doc comment
