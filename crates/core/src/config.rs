@@ -184,17 +184,11 @@ impl Config {
     /// `ServiceApp::work_state` and by the tests. Structural faults are
     /// `validate_config`'s; this answers only "valid, but nothing to archive".
     ///
-    /// A bound listener always has work: a sender can arrive at any moment and
-    /// nothing in the config says whether one will. So the direct form idles
-    /// only for a missing destination.
+    /// Only a missing destination idles. A bound listener can be dialled at any moment, and a consumer with no `kafka.topics` discovers every topic `topic_exclude` keeps.
     #[must_use]
     pub fn idle_reason(&self) -> Option<&'static str> {
         if self.archive.destination.trim().is_empty() {
             return Some("archive.destination is empty -- nowhere to write");
-        }
-        if !self.is_direct() && self.kafka.topics.is_empty() && self.kafka.topic_include.is_empty()
-        {
-            return Some("no kafka.topics and no kafka.topic_include to discover with");
         }
         None
     }
