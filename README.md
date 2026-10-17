@@ -89,7 +89,7 @@ Configuration follows a cascade (highest to lowest priority):
 | `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
 | `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
-| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
+| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none: every topic) |
 | `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
 | `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
 | `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
@@ -113,12 +113,7 @@ and the previous stage sends to it point to point, which is how a deployment
 with no broker still archives. A deployment sets it from the same dial that
 decides the rest of the stack's transport, so it is not normally hand-authored.
 
-The archiver starts, passes readiness and serves health and metrics with no
-work to do -- no destination, or no topics and no discovery pattern. It opens
-no broker connection and binds no listener while idle, reports the
-`work_config` health component Degraded with the reason, holds the
-`pipeline_idle` gauge at 1, and starts the moment a config change gives it
-work. `Config::idle_reason` is the whole predicate.
+The archiver starts, passes readiness and serves health and metrics with no destination. It opens no broker connection and binds no listener while idle, reports the `work_config` health component Degraded with the reason, holds the `pipeline_idle` gauge at 1 and starts the moment a config change names a destination. `Config::idle_reason` is the whole predicate.
 
 ### Config File Example
 
@@ -129,7 +124,7 @@ kafka:
   brokers:
     - kafka:9092
   group_id: dfe-archiver
-  topics:                      # omit to discover, filtered by topic_include
+  topics:                      # omit to discover all, narrowed by topic_include
     - events
     - logs
   sasl_mechanism: SCRAM-SHA-256

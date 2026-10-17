@@ -123,7 +123,7 @@ fn load_from_file(path: &str) -> Result<Config> {
 ///
 /// STRUCTURAL faults only -- a contradictory or unusable setting, which the
 /// service refuses loudly. A config that is valid and merely EMPTY of work
-/// (no topics, no destination) is `Config::idle_reason`'s to answer, and the
+/// (no destination) is `Config::idle_reason`'s to answer, and the
 /// scalo idle gate keeps the service Ready while it waits for one that names
 /// work.
 ///
@@ -383,27 +383,15 @@ mod tests {
         );
     }
 
-    /// The bus form with neither an explicit topic list nor a discovery
-    /// pattern would subscribe to every topic on the broker, which is never
-    /// what an unconfigured archiver should start doing.
+    /// With no topics named the bus form discovers every topic `topic_exclude` keeps, so a destination is all it needs.
     #[test]
-    fn test_no_topics_and_no_discovery_pattern_is_idle() {
+    fn test_the_bus_form_has_work_with_or_without_topics() {
         let mut config = Config::default();
         config.kafka.brokers = vec!["localhost:9092".to_string()];
         config.archive.destination = "file:///tmp/archive".to_string();
 
         validate_config(&config).expect("an empty topic list is not a structural fault");
-        assert_eq!(
-            config.idle_reason(),
-            Some("no kafka.topics and no kafka.topic_include to discover with")
-        );
-    }
-
-    #[test]
-    fn test_explicit_topics_or_a_discovery_pattern_is_work() {
-        let mut config = Config::default();
-        config.kafka.brokers = vec!["localhost:9092".to_string()];
-        config.archive.destination = "file:///tmp/archive".to_string();
+        assert_eq!(config.idle_reason(), None);
 
         config.kafka.topics = vec!["default_land".to_string()];
         assert_eq!(config.idle_reason(), None);
