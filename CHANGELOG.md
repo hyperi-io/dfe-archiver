@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.36](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.35...v1.7.36) (2026-10-17)
+
+### Bug Fixes
+
+* rebuild on scalo 2.14.17 ([15a881d](https://github.com/hyperi-io/dfe-archiver/commit/15a881db5ef566ace745ec8bc6d53df540cf8792))
+* route gRPC records by _source ([#127](https://github.com/hyperi-io/dfe-archiver/issues/127)) ([66e5812](https://github.com/hyperi-io/dfe-archiver/commit/66e581231650a1e5232ac30c554c5083e2f4609a)), closes [#126](https://github.com/hyperi-io/dfe-archiver/issues/126)
+
 ## [1.7.35](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.34...v1.7.35) (2026-10-15)
 
 ### Bug Fixes
