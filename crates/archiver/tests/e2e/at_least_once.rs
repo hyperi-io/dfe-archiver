@@ -22,7 +22,9 @@ use dfe_archiver::io::create_backend;
 use dfe_archiver::metrics::ArchiverMetrics;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use scalo::metrics::{MetricsConfig, MetricsManager};
-use scalo::transport::{GrpcConfig, GrpcTransport, SendResult, TransportSender};
+use scalo::transport::{
+    GrpcConfig, GrpcTransport, PayloadFormat, Record, RecordMeta, SendResult, TransportSender,
+};
 use scalo::{AckHeldSource, SelfRegulationConfig};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -918,6 +920,111 @@ async fn a_write_still_failing_at_shutdown_on_the_direct_transport_is_counted_dr
         "every record still failing at shutdown is counted:\n{}",
         manager.render()
     );
+}
+
+/// Push `ids` with no routing key, as dfe-receiver does, each carrying the
+/// `_source` and `org_id` the receiver writes into the record.
+async fn push_keyless(config: &Config, ids: std::ops::Range<u64>) {
+    let listen = config.grpc.listen.clone().expect("listen address");
+    let sender = GrpcTransport::new(&GrpcConfig {
+        endpoint: Some(format!("http://{listen}")),
+        ..GrpcConfig::default()
+    })
+    .await
+    .expect("sender");
+    for id in ids {
+        let record = Record {
+            payload: format!(r#"{{"id":{id},"_source":"cisco_ios.log","org_id":"acme"}}"#)
+                .into_bytes()
+                .into(),
+            key: None,
+            headers: Vec::new(),
+            metadata: RecordMeta {
+                timestamp_ms: None,
+                format: PayloadFormat::Json,
+            },
+        };
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while !matches!(
+            sender.send_batch(std::slice::from_ref(&record)).await,
+            SendResult::Ok
+        ) {
+            assert!(Instant::now() < deadline, "the listener never took a push");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// Every file under `dir`'s `file://` archive, as its path below the archive root.
+fn archived_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let root = dir.join("archive");
+    let mut files = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read archive dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path.strip_prefix(&root).expect("below root").to_path_buf());
+            }
+        }
+    }
+    files
+}
+
+/// With no routing config, a record pushed with no routing key lands under its
+/// `_source` and then its `org_id`, with no topic folder above them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_keyless_pushed_record_lands_under_its_source_and_org_by_default() {
+    init_logs();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let mut config = Config {
+        transport: TRANSPORT_GRPC.to_string(),
+        ..Config::default()
+    };
+    config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
+    config.archive.destination = format!("file://{}", dir.path().join("archive").display());
+    config.archive.roll_interval_secs = Some(1);
+    config.compression.enabled = false;
+    config.buffer.flush_age_secs = 1;
+    config.buffer.spool_dir = dir.path().join("spool").display().to_string();
+    config.dlq.enabled = false;
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    push_keyless(&config, 0..3).await;
+    wait_until("the pushed records were archived", || async {
+        counter(&manager, "messages_archived_total") >= 3
+    })
+    .await;
+    stop(&archiver, running).await;
+
+    let files = archived_files(dir.path());
+    assert!(!files.is_empty(), "nothing was archived");
+    for file in &files {
+        let parts: Vec<String> = file
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            parts.get(..2),
+            Some(["cisco_ios.log".to_string(), "acme".to_string()].as_slice()),
+            "{}",
+            file.display()
+        );
+        assert_eq!(
+            parts.len(),
+            6,
+            "<_source>/<org_id>/YYYY/MM/DD/<HH-file>: {}",
+            file.display()
+        );
+    }
+    assert_eq!(archived_ids(dir.path()), vec![0, 1, 2]);
 }
 
 /// A file the store refuses for good at upload is read back and dead-lettered

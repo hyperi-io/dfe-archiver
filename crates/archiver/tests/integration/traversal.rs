@@ -40,7 +40,7 @@ const HOSTILE: [&str; 11] = [
 fn router() -> Router {
     Router::new(RoutingConfig {
         mode: "expression".to_string(),
-        expression_fields: vec!["org_id".to_string()],
+        expression_fields: Some(vec!["org_id".to_string()]),
         default_segment: "unknown".to_string(),
     })
 }

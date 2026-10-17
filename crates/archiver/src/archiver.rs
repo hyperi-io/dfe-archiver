@@ -1008,7 +1008,7 @@ impl Archiver {
             "pipeline delivery guarantee"
         );
 
-        let router = Router::new(config.routing.clone());
+        let router = Router::new(config.effective_routing());
 
         let buffer = hot_buffers(&config, memory_guard.limit_bytes())?;
         let slots = upload_slots(&config);
@@ -1040,9 +1040,8 @@ impl Archiver {
         // Writer LRU cache -- clamp to at least 1 to satisfy NonZeroUsize.
         let writer_cap = NonZeroUsize::new(config.archive.max_writers).unwrap_or(NonZeroUsize::MIN);
 
-        let routing_fallback_guards = config
-            .routing
-            .expression_fields
+        let routing_fallback_guards = router
+            .expression_fields()
             .iter()
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -1325,7 +1324,7 @@ impl Archiver {
                 }
                 self.security_validation_event(&e);
                 Some(dfe_archiver_core::routing::Routed {
-                    destination: Router::topic_destination(msg),
+                    destination: self.router.topic_destination(msg),
                     fallback_fields: Vec::new(),
                 })
             }
@@ -3263,7 +3262,7 @@ mod tests {
         let fields = vec!["org_id".to_string()];
         let router = Router::new(RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: fields.clone(),
+            expression_fields: Some(fields.clone()),
             default_segment: "unknown".to_string(),
         });
         let guards: Vec<AtomicU64> = fields.iter().map(|_| AtomicU64::new(0)).collect();

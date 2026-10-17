@@ -31,9 +31,9 @@ use crate::transport::ReceivedBatch;
 /// Adapter wrapping the scalo `GrpcTransport` in receive mode.
 pub struct PushTransportAdapter {
     transport: GrpcTransport,
-    /// Routing key applied when the sender set none. The archiver routes on the
-    /// message topic, so a keyless record still lands somewhere named.
-    default_topic: Arc<str>,
+    /// The topic of a record pushed with no routing key: empty, which routing
+    /// gives no topic folder. Held once so each such record costs a refcount.
+    no_topic: Arc<str>,
     /// `grpc.acknowledgements`, reported through the delivery guarantee.
     acknowledgements: AcknowledgementsConfig,
 }
@@ -88,16 +88,17 @@ impl PushTransportAdapter {
 
         Ok(Self {
             transport,
-            default_topic: Arc::from(config.default_topic.as_str()),
+            no_topic: Arc::from(""),
             acknowledgements: config.acknowledgements,
         })
     }
 
     /// Receive a batch of pushed records.
     ///
-    /// The sender names the destination through the record's routing key; the
-    /// commit-token sequence stands in for the Kafka offset, so the buffer's
-    /// per-message accounting is unchanged.
+    /// The sender names the destination through the record's routing key, and
+    /// a record with none has an empty topic. The commit-token sequence stands
+    /// in for the Kafka offset, so the buffer's per-message accounting is
+    /// unchanged.
     ///
     /// After [`close`](Self::close) this returns the records already answered,
     /// then [`Error::Shutdown`].
@@ -126,10 +127,7 @@ impl PushTransportAdapter {
             .into_iter()
             .zip(batch.commit_tokens)
             .map(|(record, token)| {
-                let topic = record
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| self.default_topic.clone());
+                let topic = record.key.clone().unwrap_or_else(|| self.no_topic.clone());
                 // A push stream's sequence stands in for the broker offset; the
                 // buffer only needs it to be monotonic per message.
                 let offset = token.seq.cast_signed();
