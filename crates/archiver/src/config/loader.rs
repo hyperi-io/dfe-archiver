@@ -409,7 +409,6 @@ mod tests {
             transport: TRANSPORT_GRPC.to_string(),
             ..Config::default()
         };
-        config.grpc.listen = Some("0.0.0.0:6000".to_string());
         config.archive.destination = "file:///tmp/archive".to_string();
         config.kafka.brokers = vec![];
         config.kafka.topics = vec![];
@@ -430,6 +429,20 @@ mod tests {
             validate_config(&config).is_err(),
             "transport: grpc with no listen address can never receive anything"
         );
+    }
+
+    /// The default binds the push port the deployment contract declares, so a direct config needs no `grpc` block.
+    #[test]
+    fn test_direct_transport_listens_on_the_push_port_by_default() {
+        let config: Config = scalo::yaml::from_str(
+            "transport: grpc\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse");
+
+        validate_config(&config).expect("a direct config with no grpc block is valid");
+        assert_eq!(config.grpc.listen.as_deref(), Some("0.0.0.0:6000"));
     }
 
     #[test]

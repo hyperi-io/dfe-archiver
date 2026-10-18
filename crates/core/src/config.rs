@@ -202,7 +202,7 @@ impl Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GrpcConfig {
-    /// Listen address, e.g. `0.0.0.0:6000`. Required when `transport` is `grpc`.
+    /// Listen address. Defaults to `0.0.0.0:6000`, the push port the deployment contract declares, so the Service and the listener agree.
     pub listen: Option<String>,
 
     /// Records buffered from incoming RPCs before the sender is held.
@@ -229,7 +229,7 @@ pub struct GrpcConfig {
 impl Default for GrpcConfig {
     fn default() -> Self {
         Self {
-            listen: None,
+            listen: Some("0.0.0.0:6000".to_string()),
             recv_buffer_size: 10_000,
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
