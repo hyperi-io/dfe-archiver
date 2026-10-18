@@ -85,7 +85,7 @@ Configuration follows a cascade (highest to lowest priority):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
-| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
+| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | `0.0.0.0:6000` |
 | `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
 | `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |

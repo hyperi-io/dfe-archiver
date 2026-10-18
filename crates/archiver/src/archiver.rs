@@ -3412,7 +3412,7 @@ mod tests {
         let mut new = old.clone();
         new.transport = "grpc".to_string();
         new.kafka.topics = vec!["other".to_string()];
-        new.grpc.listen = Some("0.0.0.0:6000".to_string());
+        new.grpc.listen = Some("0.0.0.0:7000".to_string());
         new.archive.destination = "file:///srv/dfe/archive".to_string();
         new.buffer.flush_bytes += 1;
         new.routing.mode = "topic".to_string();

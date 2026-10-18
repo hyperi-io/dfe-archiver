@@ -277,7 +277,6 @@ mod tests {
         assert_eq!(gate.holds_in(&config), Some(false));
 
         config["transport"] = serde_json::json!(TRANSPORT_GRPC);
-        config["grpc"]["listen"] = serde_json::json!("0.0.0.0:6000");
         assert_eq!(gate.holds_in(&config), Some(true));
 
         contract.default_config = Some(config);
