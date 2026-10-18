@@ -397,6 +397,18 @@ mod tests {
         );
     }
 
+    /// An unset topic list and include list discover every topic the excludes keep.
+    #[test]
+    fn an_unset_topic_include_discovers_every_topic() {
+        let unset = convert_config(&KafkaConfig::default());
+        assert!(unset.auto_discover);
+        assert_eq!(unset.topic_include, Vec::<String>::new());
+        assert_eq!(
+            unset.topic_exclude,
+            scalo::transport::KafkaConfig::default().topic_exclude
+        );
+    }
+
     /// An interval the operator names is theirs, not replaced by the default.
     #[test]
     fn an_operator_statistics_interval_is_kept() {

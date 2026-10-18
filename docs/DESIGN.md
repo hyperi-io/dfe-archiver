@@ -174,12 +174,7 @@ about the pipeline that differs between the two forms.
 | `kafka` | a consumer group over the landing topics | broker offset commit once the archive file holding the record is complete |
 | `grpc` | the scalo Push listener, from the previous stage | the Push RPC response, at enqueue |
 
-On `kafka` an empty `topics` list turns on broker-side discovery: the topic set
-is re-read every `topic_refresh_secs` and filtered by `topic_include` and
-`topic_exclude`, so a source added later is archived without a restart. Where a
-source has both a landing and a transformed topic, discovery keeps the landing
-one -- the archiver's job is the record as it arrived, which is the reverse of
-the loader's preference.
+On `kafka` an empty `topics` list turns on broker-side discovery, re-read every `topic_refresh_secs`, so a source added later is archived without a restart. Discovery takes every topic `topic_exclude` keeps, narrowed by `topic_include` when set. Where a source has both a landing and a transformed topic, discovery keeps the landing one: the archiver keeps the record as it arrived, the reverse of the loader.
 
 `grpc` exists so a deployment with no broker can still archive: the previous
 stage fans a matched record out to the loader and to the archiver over the same
@@ -202,13 +197,7 @@ select.
 
 ### Idle until configured
 
-An archiver with no destination, or on the bus with no topics and no discovery
-pattern, has nothing to do. It starts anyway: it stays Ready, serves health and
-metrics, opens no broker connection and binds no listener, reports the
-`work_config` health component Degraded with the reason, and holds
-`pipeline_idle` at 1. The first config change that gives it work starts the
-pipeline with no restart. That behaviour is scalo's (`scalo::lifecycle`); the
-predicate is this app's, in `Config::idle_reason`.
+An archiver with no destination has nothing to do. It starts anyway: it stays Ready, serves health and metrics, opens no broker connection and binds no listener, reports the `work_config` health component Degraded with the reason and holds `pipeline_idle` at 1. The first config change that names a destination starts the pipeline with no restart. That behaviour is scalo's (`scalo::lifecycle`) and the predicate is this app's, in `Config::idle_reason`.
 
 Structural faults are the other half of the split and still refuse loudly: an
 unknown transport, a `grpc` form with no listen address, a bus form with no
