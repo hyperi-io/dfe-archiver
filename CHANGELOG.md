@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.37](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.36...v1.7.37) (2026-10-20)
+
+### Bug Fixes
+
+* default grpc.listen to 0.0.0.0:6000 ([64c77bf](https://github.com/hyperi-io/dfe-archiver/commit/64c77bf0330101defc5064171100f3dd5788e5c5))
+* discover every topic when topic_include is unset ([939914f](https://github.com/hyperi-io/dfe-archiver/commit/939914ff5e79a972a6a40002cc6681dc24870b45))
+* rebuild on scalo 2.14.18 ([#131](https://github.com/hyperi-io/dfe-archiver/issues/131)) ([c89967a](https://github.com/hyperi-io/dfe-archiver/commit/c89967a1251b12cd2eab25639ee63e9384d75a0c))
+
 ## [1.7.36](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.35...v1.7.36) (2026-10-17)
 
 ### Bug Fixes
