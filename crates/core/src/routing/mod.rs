@@ -65,11 +65,11 @@ pub fn path_segment(value: &str) -> Cow<'_, str> {
 }
 
 /// Where a message is archived, and which configured expression fields the
-/// payload did not carry.
+/// payload did not carry or carried blank.
 ///
 /// This crate owns no metrics, so the router reports the fallback and the
 /// archiver crate counts it -- otherwise a misconfigured field name is
-/// indistinguishable from a tenant genuinely called `unknown`.
+/// indistinguishable from a tenant genuinely called `default`.
 #[derive(Debug, Clone)]
 pub struct Routed {
     /// Destination path segment the writer archives under.
@@ -154,7 +154,9 @@ impl Router {
         let mut fallback_fields = Vec::new();
 
         for (index, field_path) in fields.iter().enumerate() {
-            let resolved = if let Some(value) = extract_field(&json, field_path) {
+            let resolved = if let Some(value) =
+                extract_field(&json, field_path).filter(|value| !value.trim().is_empty())
+            {
                 // Record-carried, so attacker-controlled: one encoded segment.
                 if let Cow::Owned(encoded) = path_segment(&value) {
                     encoded
@@ -228,14 +230,14 @@ mod tests {
     fn test_route_by_expression() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["org_id".to_string(), "event_type".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string(), "event_type".to_string()]),
+            default_segment: "default".to_string(),
         };
 
         let router = Router::new(config);
         let message = make_message(
             "events",
-            r#"{"org_id": "acme", "event_type": "login", "data": {}}"#,
+            r#"{"_org_id": "acme", "event_type": "login", "data": {}}"#,
         );
 
         let outcome = router.route(&message).expect("route");
@@ -247,18 +249,38 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_or_null_field_takes_the_default_segment_and_reports_a_fallback() {
+        let router = Router::new(RoutingConfig {
+            mode: "expression".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string()]),
+            default_segment: "default".to_string(),
+        });
+        for payload in [
+            r#"{"_org_id": ""}"#,
+            r#"{"_org_id": "  "}"#,
+            r#"{"_org_id": null}"#,
+        ] {
+            let outcome = router
+                .route(&make_message("events", payload))
+                .expect("route");
+            assert_eq!(outcome.destination.as_str(), "events/default", "{payload}");
+            assert_eq!(outcome.fallback_fields, vec![0], "{payload}");
+        }
+    }
+
+    #[test]
     fn test_route_by_expression_missing_field() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["org_id".to_string(), "missing".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string(), "missing".to_string()]),
+            default_segment: "default".to_string(),
         };
 
         let router = Router::new(config);
-        let message = make_message("events", r#"{"org_id": "acme"}"#);
+        let message = make_message("events", r#"{"_org_id": "acme"}"#);
 
         let outcome = router.route(&message).expect("route");
-        assert_eq!(outcome.destination.as_str(), "events/acme/unknown");
+        assert_eq!(outcome.destination.as_str(), "events/acme/default");
         assert_eq!(
             outcome.fallback_fields,
             vec![1],
@@ -271,7 +293,7 @@ mod tests {
         let config = RoutingConfig {
             mode: "expression".to_string(),
             expression_fields: Some(vec!["tags.category".to_string()]),
-            default_segment: "unknown".to_string(),
+            default_segment: "default".to_string(),
         };
 
         let router = Router::new(config);
@@ -297,7 +319,7 @@ mod tests {
     fn test_route_non_json_with_expression_returns_error() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["org_id".to_string()]),
+            expression_fields: Some(vec!["_org_id".to_string()]),
             default_segment: "fallback".to_string(),
         };
         let router = Router::new(config);
@@ -339,8 +361,8 @@ mod tests {
     fn test_topic_routing_reports_no_fallback() {
         let config = RoutingConfig {
             mode: "topic".to_string(),
-            expression_fields: Some(vec!["org_id".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string()]),
+            default_segment: "default".to_string(),
         };
         let router = Router::new(config);
         let msg = make_message("events", r#"{"nothing": "here"}"#);
@@ -355,14 +377,14 @@ mod tests {
     fn test_every_missing_field_reports_a_fallback() {
         let config = RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["org_id".to_string(), "tenant_id".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string(), "tenant_id".to_string()]),
+            default_segment: "default".to_string(),
         };
         let router = Router::new(config);
         let msg = make_message("events", r#"{"customer": "acme"}"#);
 
         let outcome = router.route(&msg).expect("route");
-        assert_eq!(outcome.destination.as_str(), "events/unknown/unknown");
+        assert_eq!(outcome.destination.as_str(), "events/default/default");
         assert_eq!(outcome.fallback_fields, vec![0, 1]);
     }
 
@@ -427,11 +449,11 @@ mod tests {
     fn a_keyless_record_gets_no_topic_folder_under_expression_routing() {
         let router = Router::new(RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["_source".to_string(), "org_id".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_source".to_string(), "_org_id".to_string()]),
+            default_segment: "default".to_string(),
         });
         let outcome = router
-            .route(&keyless(r#"{"_source":"cisco_ios.log","org_id":"acme"}"#))
+            .route(&keyless(r#"{"_source":"cisco_ios.log","_org_id":"acme"}"#))
             .expect("route");
         assert_eq!(outcome.destination.as_str(), "cisco_ios.log/acme");
         assert_eq!(outcome.fallback_fields, Vec::<usize>::new());
@@ -439,7 +461,7 @@ mod tests {
         let keyed = router
             .route(&make_message(
                 "traffic",
-                r#"{"_source":"cisco_ios.log","org_id":"acme"}"#,
+                r#"{"_source":"cisco_ios.log","_org_id":"acme"}"#,
             ))
             .expect("route");
         assert_eq!(
@@ -456,19 +478,19 @@ mod tests {
             ..Default::default()
         });
         let outcome = router.route(&keyless("{}")).expect("route by topic");
-        assert_eq!(outcome.destination.as_str(), "unknown");
-        assert_eq!(router.topic_destination(&keyless("{}")).as_str(), "unknown");
+        assert_eq!(outcome.destination.as_str(), "default");
+        assert_eq!(router.topic_destination(&keyless("{}")).as_str(), "default");
     }
 
     #[test]
     fn expression_routing_encodes_every_field_value() {
         let router = Router::new(RoutingConfig {
             mode: "expression".to_string(),
-            expression_fields: Some(vec!["org_id".to_string(), "kind".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string(), "kind".to_string()]),
+            default_segment: "default".to_string(),
         });
         let outcome = router
-            .route(&make_message("events", r#"{"org_id":"..","kind":"a/b"}"#))
+            .route(&make_message("events", r#"{"_org_id":"..","kind":"a/b"}"#))
             .expect("route");
         assert_eq!(outcome.destination.as_str(), "events/=2E=2E/a=2Fb");
     }
@@ -507,8 +529,8 @@ mod tests {
     fn router_in(mode: &str) -> Router {
         Router::new(RoutingConfig {
             mode: mode.to_string(),
-            expression_fields: Some(vec!["org_id".to_string()]),
-            default_segment: "unknown".to_string(),
+            expression_fields: Some(vec!["_org_id".to_string()]),
+            default_segment: "default".to_string(),
         })
     }
 
@@ -522,7 +544,7 @@ mod tests {
                     nested_array(depth),
                     nested_object(depth),
                     // A deep sibling ahead of the routing field.
-                    format!(r#"{{"sibling":{},"org_id":"acme"}}"#, nested_array(depth)),
+                    format!(r#"{{"sibling":{},"_org_id":"acme"}}"#, nested_array(depth)),
                 ];
                 for payload in deep {
                     let message = make_message("events", &payload);
@@ -550,8 +572,8 @@ mod tests {
         on_stack(BOUND_STACK, || {
             let router = router_in("expression");
             // The object around the routing field is the first level.
-            let at = format!(r#"{{"org_id":"acme","n":{}}}"#, nested_array(63));
-            let over = format!(r#"{{"org_id":"acme","n":{}}}"#, nested_array(64));
+            let at = format!(r#"{{"_org_id":"acme","n":{}}}"#, nested_array(63));
+            let over = format!(r#"{{"_org_id":"acme","n":{}}}"#, nested_array(64));
 
             let outcome = router
                 .route(&make_message("events", &at))

@@ -672,7 +672,7 @@ fn record_rolls(metrics: &ArchiverMetrics, writer: &mut ArchiveWriter, destinati
 /// `crates/core` owns no metrics, so the router reports the fallback and this
 /// records it: read against `messages_received_total`, a sustained ratio of 1
 /// is a field name no source in the deployment sets, which otherwise looks
-/// exactly like a tenant called `unknown`.
+/// exactly like a tenant called `default`.
 fn record_routing_fallbacks(
     metrics: &ArchiverMetrics,
     fields: &[String],
@@ -3250,7 +3250,7 @@ mod tests {
     }
 
     /// A field no source carries is otherwise indistinguishable from a tenant
-    /// named `unknown`, so the counter has to move on the router's own output
+    /// named `default`, so the counter has to move on the router's own output
     /// rather than on a hand-built index list.
     #[test]
     fn test_a_missing_routing_field_moves_routing_fallback_total() {
@@ -3259,16 +3259,16 @@ mod tests {
         );
         let metrics = ArchiverMetrics::register(&manager, "test");
 
-        let fields = vec!["org_id".to_string()];
+        let fields = vec!["_org_id".to_string()];
         let router = Router::new(RoutingConfig {
             mode: "expression".to_string(),
             expression_fields: Some(fields.clone()),
-            default_segment: "unknown".to_string(),
+            default_segment: "default".to_string(),
         });
         let guards: Vec<AtomicU64> = fields.iter().map(|_| AtomicU64::new(0)).collect();
 
         let carried =
-            KafkaMessage::for_test(br#"{"org_id":"acme"}"#.to_vec(), "default_land", 0, 0);
+            KafkaMessage::for_test(br#"{"_org_id":"acme"}"#.to_vec(), "default_land", 0, 0);
         let missing =
             KafkaMessage::for_test(br#"{"customer":"acme"}"#.to_vec(), "default_land", 0, 1);
 
@@ -3281,8 +3281,8 @@ mod tests {
         assert!(
             rendered
                 .lines()
-                .any(|line| line == r#"archiver_routing_fallback_total{field="org_id"} 1"#),
-            "the record carrying org_id must not count as a fallback:\n{rendered}"
+                .any(|line| line == r#"archiver_routing_fallback_total{field="_org_id"} 1"#),
+            "the record carrying _org_id must not count as a fallback:\n{rendered}"
         );
     }
 

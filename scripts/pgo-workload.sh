@@ -200,8 +200,8 @@ ARCHIVE_DIR="$WORK_DIR/archive"
 SPOOL_DIR="$WORK_DIR/spool"
 mkdir -p "$ARCHIVE_DIR"
 
-# Expression-based routing on org_id exercises the writer-LRU eviction path
-# (the pgo-driver produces 32 distinct org_ids by default; max_writers caps
+# Expression-based routing on _org_id exercises the writer-LRU eviction path
+# (the pgo-driver produces 32 distinct _org_ids by default; max_writers caps
 # the active set so eviction-close fires under load). zstd level 3 is the
 # default production codec; rolling on small size + short interval keeps the
 # close-and-roll path warm during the workload.
@@ -228,8 +228,8 @@ archive:
 routing:
   mode: "expression"
   expression_fields:
-    - "org_id"
-  default_segment: "unknown"
+    - "_org_id"
+  default_segment: "default"
 
 compression:
   codec: "zstd"

@@ -864,7 +864,7 @@ mod tests {
         m.record_commit(1);
         m.record_commit_error();
         m.record_routing_error();
-        m.record_routing_fallback("org_id");
+        m.record_routing_fallback("_org_id");
         m.record_eviction();
         m.set_unique_destinations(5);
         m.set_last_batch_timestamp();

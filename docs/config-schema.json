@@ -87,7 +87,7 @@
       "default": {
         "mode": "expression",
         "expression_fields": null,
-        "default_segment": "unknown"
+        "default_segment": "default"
       }
     },
     "compression": {
@@ -615,7 +615,7 @@
           "default": "expression"
         },
         "expression_fields": {
-          "description": "Field paths for expression-based routing (dot notation)\ne.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on\n`transport: kafka` and `[_source, org_id]` on `transport: grpc`.",
+          "description": "Field paths for expression-based routing (dot notation)\ne.g., [`_org_id`, `tags.event_type`]. Unset, they are `[_org_id]` on\n`transport: kafka` and `[_source, _org_id]` on `transport: grpc`.",
           "type": [
             "array",
             "null"
@@ -626,9 +626,9 @@
           "default": null
         },
         "default_segment": {
-          "description": "Path segment for a field the record does not carry, and the\ndestination of a record with no topic under `mode: topic`.",
+          "description": "Path segment for a field the record does not carry or carries blank, and\nthe destination of a record with no topic under `mode: topic`. `default`\nis the deployment default org that `_org_id` takes when no sender set one.",
           "type": "string",
-          "default": "unknown"
+          "default": "default"
         }
       }
     },

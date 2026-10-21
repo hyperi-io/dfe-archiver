@@ -527,12 +527,13 @@ pub struct RoutingConfig {
     pub mode: String,
 
     /// Field paths for expression-based routing (dot notation)
-    /// e.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on
-    /// `transport: kafka` and `[_source, org_id]` on `transport: grpc`.
+    /// e.g., [`_org_id`, `tags.event_type`]. Unset, they are `[_org_id]` on
+    /// `transport: kafka` and `[_source, _org_id]` on `transport: grpc`.
     pub expression_fields: Option<Vec<String>>,
 
-    /// Path segment for a field the record does not carry, and the
-    /// destination of a record with no topic under `mode: topic`.
+    /// Path segment for a field the record does not carry or carries blank, and
+    /// the destination of a record with no topic under `mode: topic`. `default`
+    /// is the deployment default org that `_org_id` takes when no sender set one.
     pub default_segment: String,
 }
 
@@ -541,18 +542,18 @@ impl Default for RoutingConfig {
         Self {
             mode: "expression".to_string(),
             expression_fields: None,
-            default_segment: "unknown".to_string(),
+            default_segment: "default".to_string(),
         }
     }
 }
 
 /// `routing.expression_fields` unset on `transport: kafka`: each source's topic
 /// is already the first folder.
-pub const KAFKA_EXPRESSION_FIELDS: [&str; 1] = ["org_id"];
+pub const KAFKA_EXPRESSION_FIELDS: [&str; 1] = ["_org_id"];
 
 /// `routing.expression_fields` unset on `transport: grpc`: a pushed record has
 /// no topic, so its `_source` is the first folder.
-pub const GRPC_EXPRESSION_FIELDS: [&str; 2] = ["_source", "org_id"];
+pub const GRPC_EXPRESSION_FIELDS: [&str; 2] = ["_source", "_org_id"];
 
 /// Compression configuration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

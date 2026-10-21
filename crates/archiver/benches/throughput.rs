@@ -21,7 +21,7 @@ fn generate_test_data(count: usize) -> Vec<Vec<u8>> {
         .map(|i| {
             serde_json::json!({
                 "id": i,
-                "org_id": format!("org-{}", i % 10),
+                "_org_id": format!("org-{}", i % 10),
                 "event_type": "benchmark",
                 "timestamp": "2026-02-03T12:00:00Z",
                 "data": {
@@ -98,8 +98,8 @@ fn bench_routing(c: &mut Criterion) {
     // Expression-based routing
     let expr_router = Router::new(RoutingConfig {
         mode: "expression".to_string(),
-        expression_fields: Some(vec!["org_id".to_string(), "event_type".to_string()]),
-        default_segment: "unknown".to_string(),
+        expression_fields: Some(vec!["_org_id".to_string(), "event_type".to_string()]),
+        default_segment: "default".to_string(),
     });
 
     group.bench_function("by_expression", |b| {
