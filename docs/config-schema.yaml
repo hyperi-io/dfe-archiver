@@ -98,7 +98,7 @@ properties:
     default:
       mode: expression
       expression_fields: null
-      default_segment: unknown
+      default_segment: default
   compression:
     description: Compression configuration
     $ref: "#/$defs/CompressionConfig"
@@ -580,8 +580,8 @@ $defs:
       expression_fields:
         description: |-
           Field paths for expression-based routing (dot notation)
-          e.g., [`org_id`, `tags.event_type`]. Unset, they are `[org_id]` on
-          `transport: kafka` and `[_source, org_id]` on `transport: grpc`.
+          e.g., [`_org_id`, `tags.event_type`]. Unset, they are `[_org_id]` on
+          `transport: kafka` and `[_source, _org_id]` on `transport: grpc`.
         type:
         - array
         - "null"
@@ -590,10 +590,11 @@ $defs:
         default: null
       default_segment:
         description: |-
-          Path segment for a field the record does not carry, and the
-          destination of a record with no topic under `mode: topic`.
+          Path segment for a field the record does not carry or carries blank, and
+          the destination of a record with no topic under `mode: topic`. `default`
+          is the deployment default org that `_org_id` takes when no sender set one.
         type: string
-        default: unknown
+        default: default
   CompressionConfig:
     description: Compression configuration
     type: object

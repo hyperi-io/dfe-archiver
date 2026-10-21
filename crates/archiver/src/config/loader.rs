@@ -586,7 +586,7 @@ mod tests {
         assert!(validate_config(&config).is_ok(), "topic mode is valid");
 
         config.routing.mode = "expression".to_string();
-        config.routing.expression_fields = Some(vec!["org_id".to_string()]);
+        config.routing.expression_fields = Some(vec!["_org_id".to_string()]);
         assert!(validate_config(&config).is_ok(), "expression mode is valid");
 
         config.routing.expression_fields = None;
@@ -601,7 +601,7 @@ mod tests {
         let kafka = Config::default();
         assert_eq!(
             kafka.effective_routing().expression_fields,
-            Some(vec!["org_id".to_string()]),
+            Some(vec!["_org_id".to_string()]),
             "a Kafka topic already names the source"
         );
 
@@ -611,16 +611,16 @@ mod tests {
         };
         assert_eq!(
             grpc.effective_routing().expression_fields,
-            Some(vec!["_source".to_string(), "org_id".to_string()]),
+            Some(vec!["_source".to_string(), "_org_id".to_string()]),
             "a pushed record has no topic, so _source names the first folder"
         );
 
         let mut configured = grpc;
-        configured.routing.expression_fields = Some(vec!["org_id".to_string()]);
+        configured.routing.expression_fields = Some(vec!["_org_id".to_string()]);
         configured.normalize();
         assert_eq!(
             configured.routing.expression_fields,
-            Some(vec!["org_id".to_string()]),
+            Some(vec!["_org_id".to_string()]),
             "a configured list wins over the default"
         );
     }
@@ -634,7 +634,7 @@ mod tests {
         config.normalize();
         assert_eq!(
             config.routing.expression_fields,
-            Some(vec!["_source".to_string(), "org_id".to_string()])
+            Some(vec!["_source".to_string(), "_org_id".to_string()])
         );
     }
 

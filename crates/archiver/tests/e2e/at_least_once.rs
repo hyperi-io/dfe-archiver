@@ -923,7 +923,7 @@ async fn a_write_still_failing_at_shutdown_on_the_direct_transport_is_counted_dr
 }
 
 /// Push `ids` with no routing key, as dfe-receiver does, each carrying the
-/// `_source` and `org_id` the receiver writes into the record.
+/// `_source` and `_org_id` the receiver writes into the record.
 async fn push_keyless(config: &Config, ids: std::ops::Range<u64>) {
     let listen = config.grpc.listen.clone().expect("listen address");
     let sender = GrpcTransport::new(&GrpcConfig {
@@ -934,7 +934,7 @@ async fn push_keyless(config: &Config, ids: std::ops::Range<u64>) {
     .expect("sender");
     for id in ids {
         let record = Record {
-            payload: format!(r#"{{"id":{id},"_source":"cisco_ios.log","org_id":"acme"}}"#)
+            payload: format!(r#"{{"id":{id},"_source":"cisco_ios.log","_org_id":"acme"}}"#)
                 .into_bytes()
                 .into(),
             key: None,
@@ -974,7 +974,7 @@ fn archived_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// With no routing config, a record pushed with no routing key lands under its
-/// `_source` and then its `org_id`, with no topic folder above them.
+/// `_source` and then its `_org_id`, with no topic folder above them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_keyless_pushed_record_lands_under_its_source_and_org_by_default() {
     init_logs();
@@ -1020,7 +1020,7 @@ async fn a_keyless_pushed_record_lands_under_its_source_and_org_by_default() {
         assert_eq!(
             parts.len(),
             6,
-            "<_source>/<org_id>/YYYY/MM/DD/<HH-file>: {}",
+            "<_source>/<_org_id>/YYYY/MM/DD/<HH-file>: {}",
             file.display()
         );
     }

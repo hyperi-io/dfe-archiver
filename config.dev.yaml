@@ -55,8 +55,8 @@ buffer:
 routing:
   mode: "expression"
   expression_fields:
-    - "org_id"
-  default_segment: "unknown"
+    - "_org_id"
+  default_segment: "default"
   # Uncomment for topic-based routing:
   # mode: "topic"
 

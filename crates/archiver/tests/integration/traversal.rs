@@ -40,15 +40,15 @@ const HOSTILE: [&str; 11] = [
 fn router() -> Router {
     Router::new(RoutingConfig {
         mode: "expression".to_string(),
-        expression_fields: Some(vec!["org_id".to_string()]),
-        default_segment: "unknown".to_string(),
+        expression_fields: Some(vec!["_org_id".to_string()]),
+        default_segment: "default".to_string(),
     })
 }
 
-/// A record whose `org_id` is `value`, encoded as JSON so a NUL or a newline
+/// A record whose `_org_id` is `value`, encoded as JSON so a NUL or a newline
 /// is a real character of the value.
 fn record(value: &str) -> KafkaMessage {
-    let payload = serde_json::json!({ "org_id": value, "n": 1 }).to_string();
+    let payload = serde_json::json!({ "_org_id": value, "n": 1 }).to_string();
     KafkaMessage::for_test(payload.into_bytes(), "events", 0, 0)
 }
 

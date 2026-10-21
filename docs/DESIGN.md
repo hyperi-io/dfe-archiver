@@ -146,7 +146,7 @@ DFE Archiver consumes messages from Kafka topics and archives them to various st
 flowchart TB
     K["Kafka consumer group (scalo)<br/>batches of kafka.batch_size, 10K by default<br/>tracks every offset it hands out"]
     P["scalo Push listener (grpc)<br/>one push per call, answered once queued"]
-    R["Router<br/>topic, or JSON fields (default: expression on org_id)<br/>depth scan before every parse, past 64 levels to the DLQ<br/>every path segment encoded"]
+    R["Router<br/>topic, or JSON fields (default: expression on _org_id)<br/>depth scan before every parse, past 64 levels to the DLQ<br/>every path segment encoded"]
     H["Hot buffers, one per destination, in memory<br/>at most 64 at once, the least recently used flushed for another<br/>each flushes at flush_bytes, flush_records or flush_age_secs<br/>together at most a quarter of the memory limit, largest first"]
     W["Archive writers, one per destination<br/>up to archive.max_writers (1024), the least recent closed past it<br/>each flush appends one compressed frame, zstd by default<br/>a failed append is cut back and retried, its batch and offsets held<br/>a file rolls at roll_size_bytes compressed, or roll_interval_secs"]
     L["Local path<br/>the file and its directories synced to disk"]
@@ -230,7 +230,7 @@ brokers, a codec or routing mode that does not exist.
 
 ### Problem Statement
 
-With expression-based routing (e.g., by `org_id`), you could have 10,000+ unique destinations. A fixed buffer per destination multiplies: 10,000 destinations x 64 MB is 640 GB.
+With expression-based routing (e.g., by `_org_id`), you could have 10,000+ unique destinations. A fixed buffer per destination multiplies: 10,000 destinations x 64 MB is 640 GB.
 
 ### Solution: a ceiling per destination and a cap on all of them
 
@@ -432,20 +432,20 @@ Messages routed by Kafka topic name:
 
 ### Expression-Based (Default)
 
-Route by JSON field values for multi-tenant scenarios. Unset, the fields are `org_id` on `kafka`, where each source has its own topic, and `_source` then `org_id` on `grpc`:
+Route by JSON field values for multi-tenant scenarios. Unset, the fields are `_org_id` on `kafka`, where each source has its own topic, and `_source` then `_org_id` on `grpc`:
 
 ```yaml
 routing:
   mode: expression
   expression_fields:
-    - org_id
+    - _org_id
     - event_type
 ```
 
 Example message:
 
 ```json
-{"org_id": "acme", "event_type": "login", "data": {...}}
+{"_org_id": "acme", "event_type": "login", "data": {...}}
 ```
 
 Destination: `events/acme/login/`
@@ -464,15 +464,15 @@ Message: `{"tags": {"category": "security"}}` -> Destination: `events/security/`
 
 ### Records With No Topic
 
-On `grpc` the topic is the sender's routing key, and dfe-receiver sends none. A record with no key gets no topic folder: with no routing config, `{"_source": "cisco_ios.log", "org_id": "acme"}` lands under `cisco_ios.log/acme/`. Under `mode: topic` it lands under `default_segment`.
+On `grpc` the topic is the sender's routing key, and dfe-receiver sends none. A record with no key gets no topic folder: with no routing config, `{"_source": "cisco_ios.log", "_org_id": "acme"}` lands under `cisco_ios.log/acme/`. Under `mode: topic` it lands under `default_segment`.
 
 ### Default Segment
 
-Missing fields use configurable default:
+A field the record does not carry, or carries null or blank, takes the default. A record with no `_org_id` therefore lands under `default`, the deployment default org every component stamps:
 
 ```yaml
 routing:
-  default_segment: "unknown"
+  default_segment: "default"
 ```
 
 ### Segment Encoding
@@ -719,7 +719,7 @@ compression:
 routing:
   mode: expression
   expression_fields:
-    - org_id
+    - _org_id
     - event_type
 ```
 

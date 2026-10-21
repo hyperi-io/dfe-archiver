@@ -24,6 +24,8 @@ mod common;
 mod archive;
 #[path = "integration/config.rs"]
 mod config;
+#[path = "integration/org_path.rs"]
+mod org_path;
 #[path = "integration/test_runner_config.rs"]
 mod test_runner_config;
 #[path = "integration/traversal.rs"]

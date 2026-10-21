@@ -23,7 +23,7 @@ buffer:
 
 routing:
   mode: topic
-  default_segment: unknown
+  default_segment: default
 
 compression:
   codec: zstd

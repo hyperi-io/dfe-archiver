@@ -19,7 +19,7 @@ contract).
 
 - **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
 - **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none, each in its standard framed format (LZ4 frames `.lz4`, the snappy framing format `.sz`, gzip members `.gz`, zstd frames `.zst`), so the codec's own tools read an archive file whole
-- **Smart routing**: By JSON field expressions (e.g., `org_id`) or topic
+- **Smart routing**: By JSON field expressions (e.g., `_org_id`) or topic
 - **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
 - **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete
 - **Memory-capped**: every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first
@@ -156,8 +156,8 @@ compression:
 
 routing:
   mode: expression             # or "topic"
-  expression_fields:           # unset: [org_id] on kafka, [_source, org_id] on grpc
-    - org_id
+  expression_fields:           # unset: [_org_id] on kafka, [_source, _org_id] on grpc
+    - _org_id
     - event_type
 ```
 
@@ -359,7 +359,7 @@ Green says less than it looks, two ways:
 
 | Don't | Do | Why |
 |-------|----|-----|
-| Commit the Kafka offsets of a batch once it is written into a file. | Hold them on the file and release them when it completes. The armed consumer commits each partition up to its lowest offset not yet released. | A file is an upload in progress until it rolls, and a kill abandons it. Default routing is expression on `org_id`, so one partition fans out to several files that complete at different times (#82). |
+| Commit the Kafka offsets of a batch once it is written into a file. | Hold them on the file and release them when it completes. The armed consumer commits each partition up to its lowest offset not yet released. | A file is an upload in progress until it rolls, and a kill abandons it. Default routing is expression on `_org_id`, so one partition fans out to several files that complete at different times (#82). |
 | Build a second `MetricsManager` in a test and assert on `render()`. | Share one manager, assert on the delta. | `set_global_recorder` succeeds once per process. Later managers keep the existing recorder and render an empty string. nextest forks per test and hides it, `cargo-llvm-cov` runs one process and does not (#84). |
 | Trust `cargo update -p rustls` to clear the advisory. | `cargo update -p rustls --precise 0.23.45`, then build both arches. | Plain `-p` stops at 0.23.43, still vulnerable, because 0.23.45 needs aws-lc-rs to move too. `--precise` drags `aws-lc-sys` 0.41 to 0.45, which compiles C (#85). |
 | Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |

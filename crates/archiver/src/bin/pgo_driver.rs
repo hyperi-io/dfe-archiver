@@ -238,7 +238,7 @@ async fn produce_loop(
         let payload = &payloads[usize::try_from(idx).unwrap_or(usize::MAX) % payloads.len()];
         idx = idx.wrapping_add(1);
         // Spread across partitions; archiver routes by topic by default but
-        // expression-routing setups key off org_id which lives in the payload.
+        // expression-routing setups key off _org_id which lives in the payload.
         let key = format!("k{}", idx % 1024);
         let record: FutureRecord<'_, str, [u8]> = FutureRecord::to(&cfg.topic)
             .payload(payload.as_slice())
@@ -275,7 +275,7 @@ fn build_payloads(shape: PayloadShape, org_cardinality: u32) -> Vec<Vec<u8>> {
 }
 
 fn small_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
-    // ~150-300 byte events, varied org_id to drive the writer-LRU eviction
+    // ~150-300 byte events, varied _org_id to drive the writer-LRU eviction
     // path and exercise expression-routing lookups. The compressed size is
     // small relative to zstd block overhead so this stresses the
     // accumulator-merge path more than the compressor itself.
@@ -284,7 +284,7 @@ fn small_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
     for org in 0..org_cardinality {
         for src in sources {
             let s = format!(
-                r#"{{"_timestamp":"2026-04-29T12:00:00.123Z","_source":"{src}","org_id":"org-{org:04}","user":"u-{u}","action":"event","ip":"10.0.0.{ip}"}}"#,
+                r#"{{"_timestamp":"2026-04-29T12:00:00.123Z","_source":"{src}","_org_id":"org-{org:04}","user":"u-{u}","action":"event","ip":"10.0.0.{ip}"}}"#,
                 u = org % 1000,
                 ip = org % 255,
             );
@@ -300,12 +300,12 @@ fn medium_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     for org in 0..org_cardinality {
         let s = format!(
-            r#"{{"_timestamp":"2026-04-29T12:00:00Z","_source":"api","org_id":"org-{org:04}","request":{{"method":"POST","path":"/v1/orders","headers":{{"user-agent":"Mozilla/5.0","accept":"application/json","x-request-id":"req-abc-123-xyz"}},"body_size":4096}},"response":{{"status":201,"body_size":256,"duration_ms":47}},"client":{{"ip":"203.0.113.42","country":"AU","asn":13335}},"user":{{"id":"u-{org}","tenant":"acme","roles":["admin","ops"]}}}}"#
+            r#"{{"_timestamp":"2026-04-29T12:00:00Z","_source":"api","_org_id":"org-{org:04}","request":{{"method":"POST","path":"/v1/orders","headers":{{"user-agent":"Mozilla/5.0","accept":"application/json","x-request-id":"req-abc-123-xyz"}},"body_size":4096}},"response":{{"status":201,"body_size":256,"duration_ms":47}},"client":{{"ip":"203.0.113.42","country":"AU","asn":13335}},"user":{{"id":"u-{org}","tenant":"acme","roles":["admin","ops"]}}}}"#
         );
         out.push(s.into_bytes());
 
         let s = format!(
-            r#"{{"_timestamp":"2026-04-29T12:00:01Z","_source":"auth","org_id":"org-{org:04}","tags":{{"event":{{"category":"authentication","outcome":"success"}}}},"actor":{{"username":"svc-pipeline","entity_type":"service_account","mfa":{{"required":true,"factor":"webauthn","verified":true}}}},"target":{{"resource":"prod-cluster","scope":"read"}},"network":{{"src_ip":"198.51.100.7","dst_ip":"10.10.5.2","port":443}}}}"#
+            r#"{{"_timestamp":"2026-04-29T12:00:01Z","_source":"auth","_org_id":"org-{org:04}","tags":{{"event":{{"category":"authentication","outcome":"success"}}}},"actor":{{"username":"svc-pipeline","entity_type":"service_account","mfa":{{"required":true,"factor":"webauthn","verified":true}}}},"target":{{"resource":"prod-cluster","scope":"read"}},"network":{{"src_ip":"198.51.100.7","dst_ip":"10.10.5.2","port":443}}}}"#
         );
         out.push(s.into_bytes());
     }
@@ -319,7 +319,7 @@ fn large_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     for org in 0..org_cardinality {
         let mut buf = format!(
-            r#"{{"_timestamp":"2026-04-29T12:00:00Z","_source":"api","org_id":"org-{org:04}","batch_id":"b-2026-04-29-001","events":["#
+            r#"{{"_timestamp":"2026-04-29T12:00:00Z","_source":"api","_org_id":"org-{org:04}","batch_id":"b-2026-04-29-001","events":["#
         )
         .into_bytes();
         for i in 0..50 {

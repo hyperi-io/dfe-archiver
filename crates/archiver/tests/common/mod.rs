@@ -1948,7 +1948,7 @@ pub fn test_topic_name(prefix: &str) -> String {
 pub fn test_json_message(id: u64, org_id: &str, event_type: &str) -> Vec<u8> {
     serde_json::json!({
         "id": id,
-        "org_id": org_id,
+        "_org_id": org_id,
         "event_type": event_type,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "data": {
