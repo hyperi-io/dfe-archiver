@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.38](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.37...v1.7.38) (2026-10-21)
+
+### Bug Fixes
+
+* key the archive path on _org_id, default org on a blank one ([#132](https://github.com/hyperi-io/dfe-archiver/issues/132)) ([f198c80](https://github.com/hyperi-io/dfe-archiver/commit/f198c80d093bb21f982a0523f221d24d92d63bbb))
+
 ## [1.7.37](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.36...v1.7.37) (2026-10-20)
 
 ### Bug Fixes
