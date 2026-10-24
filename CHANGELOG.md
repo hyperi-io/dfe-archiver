@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.39](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.38...v1.7.39) (2026-10-24)
+
+### Bug Fixes
+
+* take scalo 2.14.20 and ctutils 0.4.5 ([#134](https://github.com/hyperi-io/dfe-archiver/issues/134)) ([b36c4be](https://github.com/hyperi-io/dfe-archiver/commit/b36c4bed2e8e0f4fb3979ab7f60a3d22b08664cf))
+
 ## [1.7.38](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.37...v1.7.38) (2026-10-21)
 
 ### Bug Fixes
