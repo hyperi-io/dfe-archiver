@@ -15,6 +15,14 @@ language: rust
 # Quality checks
 quality:
   enabled: true
+  # cargo-audit and osv-scanner do not read deny.toml, so its accepted advisories repeat here.
+  ignore:
+    - tool: cargo-audit
+      id: RUSTSEC-2026-0387
+      reason: "crypto-bigint 0.5.5 via the aws-sdk-s3 dev-dependency only, in no shipped binary. No 0.5 fix exists and aws-sigv4 1.6.3 still requires ^0.5.4. Mirrors the deny.toml ignore."
+    - tool: osv-scanner
+      id: RUSTSEC-2026-0387
+      reason: "crypto-bigint 0.5.5 via the aws-sdk-s3 dev-dependency only, in no shipped binary. No 0.5 fix exists and aws-sigv4 1.6.3 still requires ^0.5.4. Mirrors the deny.toml ignore."
   rust:
     fmt: blocking           # Formatting check (cargo fmt --check)
     clippy: blocking        # Linting (cargo clippy)
@@ -57,7 +65,7 @@ release:
   helm:
     enabled: true
     contract: emit
-    library: "2.14.19"
+    library: "2.14.20"
   container:
     enabled: true
     dockerfile: Dockerfile
