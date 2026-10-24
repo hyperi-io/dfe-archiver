@@ -6,7 +6,9 @@
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
 [advisories]
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 arrives only through the aws-sdk-s3 dev-dependency (aws-sigv4 -> p256 -> elliptic-curve), so no shipped binary carries it. The 0.5 line has no fix (patched >= 0.7.6) and aws-sigv4 1.6.3 still requires ^0.5.4. Drop when aws-sigv4 leaves crypto-bigint 0.5" },
+]
 
 [licenses]
 allow = [
