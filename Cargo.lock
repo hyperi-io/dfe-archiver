@@ -318,7 +318,7 @@ dependencies = [
  "hmac 0.13.0",
  "http",
  "http-body",
- "lru",
+ "lru 0.18.5",
  "percent-encoding",
  "regex-lite",
  "sha2 0.11.1",
@@ -1418,7 +1418,7 @@ name = "dfe-archiver"
 version = "0.0.0"
 dependencies = [
  "aws-sdk-s3",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "compact_str",
@@ -1428,7 +1428,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hmac 0.13.0",
- "lru",
+ "lru 0.19.0",
  "metrics",
  "parking_lot",
  "proptest",
@@ -1465,7 +1465,7 @@ dependencies = [
  "flate2",
  "fs2",
  "indexmap 2.14.2",
- "lz4_flex 0.13.1",
+ "lz4_flex",
  "parking_lot",
  "scalo",
  "schemars 1.2.3",
@@ -1479,7 +1479,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -1491,7 +1491,7 @@ dependencies = [
  "dfe-archiver-core",
  "flate2",
  "futures",
- "lz4_flex 0.13.1",
+ "lz4_flex",
  "object_store",
  "percent-encoding",
  "rdkafka",
@@ -1503,7 +1503,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2843,19 +2843,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
-
-[[package]]
-name = "lz4_flex"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
-dependencies = [
- "twox-hash",
-]
 
 [[package]]
 name = "lz4_flex"
@@ -4559,7 +4559,7 @@ dependencies = [
  "governor",
  "hyper-util",
  "libc",
- "lz4_flex 0.14.0",
+ "lz4_flex",
  "memchr",
  "metrics",
  "metrics-exporter-opentelemetry",
@@ -4602,7 +4602,7 @@ dependencies = [
  "uuid",
  "wide",
  "yaque",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -6661,29 +6661,11 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe 7.3.0",
-]
-
-[[package]]
-name = "zstd"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
