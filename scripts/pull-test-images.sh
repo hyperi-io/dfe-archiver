@@ -17,7 +17,7 @@ set -euo pipefail
 
 # Pinned rather than `latest`: a floating tag retargets the suite with nothing in the diff to explain it.
 # renovate: datasource=docker depName=mcr.microsoft.com/azure-storage/azurite
-AZURITE_TAG="3.36.0"
+AZURITE_TAG="3.37.0"
 
 # The maintained GCS emulator, pinned for the same reason as Azurite.
 # renovate: datasource=docker depName=fsouza/fake-gcs-server
