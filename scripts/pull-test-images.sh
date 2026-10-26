@@ -21,7 +21,7 @@ AZURITE_TAG="3.36.0"
 
 # The maintained GCS emulator, pinned for the same reason as Azurite.
 # renovate: datasource=docker depName=fsouza/fake-gcs-server
-FAKE_GCS_TAG="1.55.1"
+FAKE_GCS_TAG="1.56.1"
 
 # The JVM image, the same pin scalo's own tests use: apache/kafka-native before 4.4.0 segfaults in getpwuid on ~2% of starts.
 # renovate: datasource=docker depName=apache/kafka
