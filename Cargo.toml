@@ -141,7 +141,7 @@ rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
 # runs with no cloud credentials. Same major line as the rest of the fleet
 # (dfe-fetcher, dfe-loader, dfe-receiver) so the container-hygiene helpers stay
 # copy-compatible.
-testcontainers = ">=0.27.3, <0.28"
+testcontainers = ">=0.28.0, <0.29"
 # Azure Shared Key signing, for the one call object_store does not expose:
 # creating the blob container the tests then write into. Azurite rejects an
 # unsigned request, so there is no shortcut. Versions match what the graph
