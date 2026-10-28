@@ -3,6 +3,22 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.40](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.39...v1.7.40) (2026-10-28)
+
+### Bug Fixes
+
+* declare the repo classification as product ([#144](https://github.com/hyperi-io/dfe-archiver/issues/144)) ([df0f028](https://github.com/hyperi-io/dfe-archiver/commit/df0f0288a7e1a7fc6bca1de3e207e8915b950fcc))
+* **deps:** update aws sdk and s3-compatible servers ([#136](https://github.com/hyperi-io/dfe-archiver/issues/136)) ([1569914](https://github.com/hyperi-io/dfe-archiver/commit/15699145c52b95edd139ba43761986dc9deafe62))
+* **deps:** update fsouza/fake-gcs-server Docker tag to v1.56.1 ([#139](https://github.com/hyperi-io/dfe-archiver/issues/139)) ([2ba487b](https://github.com/hyperi-io/dfe-archiver/commit/2ba487b4db9fcdaebc7867b2c5b77d5dee69eaa5))
+* **deps:** update mcr.microsoft.com/azure-storage/azurite Docker tag to v3.37.0 ([#141](https://github.com/hyperi-io/dfe-archiver/issues/141)) ([8b4d8bb](https://github.com/hyperi-io/dfe-archiver/commit/8b4d8bb80254404c4a897883185c09c727a02327))
+* **deps:** update redpandadata/console Docker tag to v3.13.1 ([#135](https://github.com/hyperi-io/dfe-archiver/issues/135)) ([076462d](https://github.com/hyperi-io/dfe-archiver/commit/076462dc0fc3afe95e79542a7a4d5096a921f194))
+* **deps:** update redpandadata/redpanda Docker tag to v26.2.6 ([#137](https://github.com/hyperi-io/dfe-archiver/issues/137)) ([74cf039](https://github.com/hyperi-io/dfe-archiver/commit/74cf039b697c08697e9afc1edf0833b0c018dd0a))
+* **deps:** update Rust crate aws-sdk-s3 to >=1.155.0, <2 ([#142](https://github.com/hyperi-io/dfe-archiver/issues/142)) ([28d943c](https://github.com/hyperi-io/dfe-archiver/commit/28d943c25f562d9d6af8ed85b396db96d201fd27))
+* **deps:** update Rust crate testcontainers to >=0.28.0, <0.29 ([#140](https://github.com/hyperi-io/dfe-archiver/issues/140)) ([3cad7a0](https://github.com/hyperi-io/dfe-archiver/commit/3cad7a0e4364764aac46783231828eb26c6c538f))
+* **deps:** update rust-dependencies ([#138](https://github.com/hyperi-io/dfe-archiver/issues/138)) ([124b7a5](https://github.com/hyperi-io/dfe-archiver/commit/124b7a518532c0a784b348bfda98aef62cb0dd07))
+* **deps:** update rust-dependencies ([#143](https://github.com/hyperi-io/dfe-archiver/issues/143)) ([5e175a0](https://github.com/hyperi-io/dfe-archiver/commit/5e175a0d5ea0d2fbdfaca614177db6d8f8ef93bc))
+* rebuild on scalo 2.14.21 ([#146](https://github.com/hyperi-io/dfe-archiver/issues/146)) ([e706b03](https://github.com/hyperi-io/dfe-archiver/commit/e706b0336fb120a1009b4beb4d93402bc102fa21))
+
 ## [1.7.39](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.38...v1.7.39) (2026-10-24)
 
 ### Bug Fixes
