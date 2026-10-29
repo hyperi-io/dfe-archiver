@@ -179,6 +179,8 @@ says a restart is needed rather than reporting a reload that reached nothing.
 
 ## Storage Backends
 
+What a file holds, where it lands, how long it stays and how to restore from it: [docs/archiving.md](docs/archiving.md).
+
 ### Local File
 
 ```yaml
