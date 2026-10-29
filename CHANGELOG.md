@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.41](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.40...v1.7.41) (2026-10-29)
+
+### Bug Fixes
+
+* 2.2.2 round on scalo 2.14.22 ([#149](https://github.com/hyperi-io/dfe-archiver/issues/149)) ([e94e3a6](https://github.com/hyperi-io/dfe-archiver/commit/e94e3a67c091cd77f67a0ce5ca091f55e37bcfe8))
+* bring the clippy config to the baseline ([#148](https://github.com/hyperi-io/dfe-archiver/issues/148)) ([46dc57f](https://github.com/hyperi-io/dfe-archiver/commit/46dc57ffdd7b897bfea2a3210cdcabbd0fabdb02))
+
 ## [1.7.40](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.39...v1.7.40) (2026-10-28)
 
 ### Bug Fixes
