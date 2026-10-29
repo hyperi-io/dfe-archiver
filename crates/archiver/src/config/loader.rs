@@ -30,7 +30,7 @@ const DEFAULT_CONFIG_PATHS: [&str; 3] = [
 /// settings layer.
 ///
 /// `ServiceRuntime` resolves `version_check`, `metrics`, `logger`,
-/// `self_regulation`, `scaling` and `worker_pool` through `from_cascade()`,
+/// `self_regulation` and `scaling` through `from_cascade()`,
 /// which returns each type's own default when the cascade was never set up --
 /// indistinguishable from a cascade that says "default", and silent. Without
 /// this call no `ARCHIVER_*__*` variable a chart renders reaches anything, and
@@ -67,7 +67,7 @@ fn init_cascade(config_file: Option<&str>) {
 ///
 /// The app's own sections are read straight from the config file. Sections
 /// scalo owns (`version_check`, `metrics`, `logger`, `self_regulation`,
-/// `scaling`, `worker_pool`) come from the cascade `init_cascade` sets up, where
+/// `scaling`) come from the cascade `init_cascade` sets up, where
 /// the same file is the settings layer and a `<PREFIX>_SECTION__KEY` env var
 /// outranks it.
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {

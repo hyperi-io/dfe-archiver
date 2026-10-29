@@ -4613,7 +4613,6 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
- "rayon",
  "rdkafka",
  "regex",
  "reqwest 0.13.5",
