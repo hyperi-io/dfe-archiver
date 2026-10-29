@@ -531,6 +531,10 @@ impl ObjectStoreBackend {
     }
 
     /// Create backend for AWS S3
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the S3 client cannot be built from `config`.
     pub fn new_s3(
         config: &S3Config,
         prefix: String,
@@ -571,6 +575,10 @@ impl ObjectStoreBackend {
     }
 
     /// Create backend for `MinIO` (S3-compatible)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the `MinIO` client cannot be built from `config`.
     pub fn new_minio(
         config: &MinioConfig,
         prefix: String,
@@ -619,6 +627,10 @@ impl ObjectStoreBackend {
     /// 2. `credentials_path` (path to service account JSON file)
     /// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (Application Default Credentials)
     /// 4. Instance metadata (when running on GCP)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GCS client cannot be built from `config`.
     pub fn new_gcs(
         config: &GcsConfig,
         prefix: String,
@@ -650,6 +662,10 @@ impl ObjectStoreBackend {
     }
 
     /// Create backend for Azure Blob Storage
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Azure client cannot be built from `config`.
     pub fn new_azure(
         config: &AzureConfig,
         prefix: String,
@@ -1215,6 +1231,10 @@ impl StorageBackend for ObjectStoreBackend {
 
 /// Create storage backend from destination URL. Object-store files are
 /// staged under `staging` until they upload.
+///
+/// # Errors
+///
+/// Returns an error when the destination scheme is unsupported or its backend cannot be built.
 pub fn create_backend(
     config: &ArchiveConfig,
     staging: &Staging,

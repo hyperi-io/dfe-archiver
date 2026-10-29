@@ -990,6 +990,10 @@ impl Archiver {
     /// `scaling_pressure` gauge KEDA scales on. `None` when the runtime's
     /// `scaling` feature is off; a standalone engine (registering the same
     /// components) is built as a fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transport, the hot buffers, the dead-letter queue or the staging directory cannot be set up.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,

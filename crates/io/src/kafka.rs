@@ -230,6 +230,10 @@ impl TransportAdapter {
     }
 
     /// Close transport connection
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error when the close fails.
     pub async fn close(&self) -> Result<()> {
         info!("Closing Kafka transport");
         self.transport
