@@ -322,6 +322,10 @@ impl MemoryTransportAdapter {
     }
 
     /// Inject messages for testing
+    ///
+    /// # Panics
+    ///
+    /// Panics when the message mutex is poisoned.
     pub fn inject(&self, payloads: Vec<Vec<u8>>, topic: &str) {
         let mut guard = self.messages.lock().expect("lock poisoned");
         for payload in payloads {
@@ -341,6 +345,10 @@ impl MemoryTransportAdapter {
     }
 
     /// Receive messages (drains injected messages)
+    ///
+    /// # Panics
+    ///
+    /// Panics when the message mutex is poisoned.
     pub fn recv(&self, max_messages: usize) -> Vec<KafkaMessage> {
         let mut guard = self.messages.lock().expect("lock poisoned");
         let count = max_messages.min(guard.len());
