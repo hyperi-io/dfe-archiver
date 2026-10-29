@@ -70,6 +70,10 @@ fn init_cascade(config_file: Option<&str>) {
 /// `scaling`, `worker_pool`) come from the cascade `init_cascade` sets up, where
 /// the same file is the settings layer and a `<PREFIX>_SECTION__KEY` env var
 /// outranks it.
+///
+/// # Errors
+///
+/// Returns an error when the config file cannot be read or parsed, or the result fails [`validate_config`].
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     let source = config_source(config_path);
     init_cascade(source.as_ref().map(|(path, _)| path.as_str()));
@@ -128,6 +132,10 @@ fn load_from_file(path: &str) -> Result<Config> {
 /// work.
 ///
 /// Called by `load_config` and by the `ConfigReloader` on hot-reload.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`] naming the first contradictory or unusable setting.
 pub fn validate_config(config: &Config) -> Result<()> {
     let known_transports = [TRANSPORT_KAFKA, TRANSPORT_GRPC];
     if !known_transports.contains(&config.transport.as_str()) {

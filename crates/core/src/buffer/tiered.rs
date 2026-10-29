@@ -214,6 +214,10 @@ fn get_available_disk_space(path: &Path) -> std::io::Result<u64> {
 
 impl TieredBufferManager {
     /// Create new tiered buffer manager
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the spool directory cannot be created or has less free space than `min_free_disk_bytes`.
     pub fn new(config: TieredBufferConfig) -> Result<Self> {
         std::fs::create_dir_all(&config.spool_dir)?;
 
