@@ -103,7 +103,7 @@ Configuration follows a cascade (highest to lowest priority):
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard belongs to the scalo runtime and reads only the `ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`, `worker_pool`) resolve from the cascade, where the config file is the settings layer and an `ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
+The memory guard belongs to the scalo runtime and reads only the `ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and an `ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
 
 ### Which transport, and idling until configured
 
@@ -178,6 +178,8 @@ of those logs a warning naming the sections that changed, and the security event
 says a restart is needed rather than reporting a reload that reached nothing.
 
 ## Storage Backends
+
+What a file holds, where it lands, how long it stays and how to restore from it: [docs/archiving.md](docs/archiving.md).
 
 ### Local File
 

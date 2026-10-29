@@ -754,6 +754,7 @@ fn screen_dead_letters<T>(dlq: &Dlq, entries: Vec<(DlqEntry, T)>) -> Screened<T>
     let mut writable = Vec::with_capacity(entries.len());
     let mut refused = Vec::new();
     for (entry, tag) in entries {
+        let entry = dlq.cap(entry);
         match dlq.refusal(&entry) {
             Some(reason) => refused.push((reason, tag)),
             None => writable.push((entry, tag)),

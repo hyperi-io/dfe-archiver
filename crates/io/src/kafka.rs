@@ -60,7 +60,7 @@ impl TransportAdapter {
         );
 
         let hs_config = convert_config(config);
-        let transport = KafkaTransport::new(&hs_config)
+        let transport = KafkaTransport::receiver(&hs_config)
             .await
             .map_err(|e| Error::transport_with("transport creation failed", e))?
             .with_acknowledgements(config.acknowledgements);

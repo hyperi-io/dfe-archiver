@@ -80,6 +80,11 @@ impl ServiceApp for App {
         }
     }
 
+    /// Not ready until the pipeline sets its readiness flag.
+    fn readiness_check(&self, _config: &Self::Config) -> Option<scalo::metrics::ReadinessFn> {
+        Some(Arc::new(|| false))
+    }
+
     fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
         load_config(path).map_err(|e| CliError::Config(e.to_string()))
     }
@@ -362,7 +367,10 @@ fn main() {
     // (these don't need logger/config init)
     match &app.command {
         Some(Command::EmitDockerfile { output }) => {
-            let content = dfe_archiver::contract::emit_dockerfile();
+            let content = dfe_archiver::contract::emit_dockerfile().unwrap_or_else(|e| {
+                eprintln!("error: the deployment contract is invalid: {e}");
+                std::process::exit(1);
+            });
             if output == "-" {
                 print!("{content}");
             } else {

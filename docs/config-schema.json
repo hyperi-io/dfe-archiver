@@ -108,6 +108,7 @@
         "queue_capacity": 10000,
         "batch_size": 256,
         "flush_interval_ms": 100,
+        "max_payload_bytes": 524288,
         "file": {
           "enabled": true,
           "path": "/var/spool/dfe/dlq",
@@ -688,6 +689,16 @@
           "format": "uint64",
           "minimum": 0,
           "default": 100
+        },
+        "max_payload_bytes": {
+          "description": "Payload bytes an entry keeps: a longer payload is cut to this and the\nentry marked `truncated` with its original length, so it lands where\nthe whole record could not. `None` keeps every payload whole. Default\n[`DEFAULT_MAX_PAYLOAD_BYTES`].",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": 524288
         },
         "file": {
           "description": "File backend configuration.",

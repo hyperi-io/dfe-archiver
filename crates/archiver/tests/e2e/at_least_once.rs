@@ -677,6 +677,8 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     // flushes the buffer as one batch.
     config.buffer.flush_age_secs = 10;
     dead_letter_to(&mut config, "dlq");
+    // No payload cap, which would cut the oversize record down to one the DLQ holds.
+    config.dlq.max_payload_bytes = None;
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
@@ -1139,6 +1141,8 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
     config.archive.path_template = format!("{REFUSED_SEGMENT}/{{year}}");
     config.compression.enabled = true;
     dead_letter_to(&mut config, "dlq");
+    // No payload cap, which would cut the oversize record down to one the DLQ holds.
+    config.dlq.max_payload_bytes = None;
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;

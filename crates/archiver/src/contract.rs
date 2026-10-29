@@ -9,10 +9,9 @@
 use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
 use dfe_archiver_core::config::TRANSPORT_GRPC;
 use scalo::deployment::{
-    CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
-    KedaContract, NativeDepsContract, OciLabels, PortContract, ResourceList, ResourcesContract,
-    SecretEnvContract, SecretGroupContract, SecurityContract, ServiceAccount, WritablePath,
-    base_image_from_cascade,
+    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaContract,
+    NativeDepsContract, OciLabels, PortContract, ResourceList, ResourcesContract,
+    SecretEnvContract, SecretGroupContract, WritablePath, base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-archiver.
@@ -29,7 +28,6 @@ pub fn deployment_contract() -> DeploymentContract {
     // a distro -- the old "ubuntu:24.04" pin predated the trixie cutover.
     let base_image = base_image_from_cascade();
     DeploymentContract {
-        schema_version: CONTRACT_SCHEMA_VERSION,
         app_name: "dfe-archiver".into(),
         binary_name: "dfe-archiver".into(),
         description: "High-volume Kafka-to-storage archiver for PB/s scale data pipelines".into(),
@@ -49,8 +47,6 @@ pub fn deployment_contract() -> DeploymentContract {
                 .bound_from("grpc.listen")
                 .app_protocol("kubernetes.io/h2c"),
         ],
-        unbound_listen_paths: vec![],
-        hot_paths: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe/archiver.yaml".into()],
         secrets: secrets(),
         default_config: default_config(),
@@ -93,9 +89,7 @@ pub fn deployment_contract() -> DeploymentContract {
                 memory: "512Mi".into(),
             },
         },
-        security: SecurityContract::default(),
-        singleton: false,
-        service_account: ServiceAccount::Own,
+        ..DeploymentContract::default()
     }
 }
 
@@ -184,8 +178,12 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
 /// function so there is one source of truth for the checked-in `Dockerfile`.
 /// `None` = no contract-identity labels (those are stamped by the
 /// CI-orchestrated invocation, not this one-off).
-#[must_use]
-pub fn emit_dockerfile() -> String {
+///
+/// # Errors
+///
+/// Returns the contract's validation error: scalo refuses to generate from a
+/// bad contract.
+pub fn emit_dockerfile() -> Result<String, scalo::DeploymentError> {
     scalo::deployment::generate_dockerfile(&deployment_contract(), None)
 }
 
@@ -305,7 +303,10 @@ mod tests {
     #[test]
     fn test_contract_carries_reflectable_config() {
         let contract = deployment_contract();
-        assert_eq!(contract.schema_version, CONTRACT_SCHEMA_VERSION);
+        assert_eq!(
+            contract.schema_version,
+            scalo::deployment::CONTRACT_SCHEMA_VERSION
+        );
         assert!(contract.config_schema.is_some());
         let archive = contract
             .capabilities
@@ -395,7 +396,8 @@ mod tests {
     #[test]
     fn test_contract_generates_dockerfile() {
         let contract = deployment_contract();
-        let dockerfile = scalo::deployment::generate_dockerfile(&contract, None);
+        let dockerfile =
+            scalo::deployment::generate_dockerfile(&contract, None).expect("the contract is valid");
         // Base image is cascade-resolved (debian:trixie-slim by default), so
         // assert the FROM line matches the contract's resolved base_image
         // rather than pinning a distro.
@@ -424,7 +426,7 @@ mod tests {
             .join("..")
             .join("Dockerfile");
         let on_disk = std::fs::read_to_string(&path).expect("read Dockerfile");
-        let emitted = emit_dockerfile();
+        let emitted = emit_dockerfile().expect("the contract is valid");
         assert_eq!(
             on_disk.trim(),
             emitted.trim(),

@@ -41,7 +41,7 @@ fn env_example_assignments() -> Vec<(String, String)> {
 ///
 /// 1. `load_config` leaves the cascade initialised. Every deployment knob
 ///    `ServiceRuntime` resolves -- `version_check`, `metrics`, `logger`,
-///    `self_regulation`, `scaling`, `worker_pool` -- comes from a
+///    `self_regulation`, `scaling` -- comes from a
 ///    `from_cascade()` helper that silently returns its own default when the
 ///    cascade was never set up. The single assertion covers a section added
 ///    later too, so it needs no editing when the runtime grows one.
