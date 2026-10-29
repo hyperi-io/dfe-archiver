@@ -11,9 +11,17 @@ use crate::{Error, Result};
 /// Compression codec trait
 pub trait Compressor {
     /// Compress data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the codec fails to encode `data`.
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>>;
 
     /// Decompress data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `data` is not valid for the codec.
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>>;
 
     /// Get file extension for this codec
@@ -221,6 +229,10 @@ impl Compressor for GzipCompressor {
 }
 
 /// Create compressor from codec name
+///
+/// # Errors
+///
+/// Returns [`Error::Compression`] for an unknown codec name.
 pub fn create_compressor(codec: &str, level: i32) -> Result<Box<dyn Compressor + Send + Sync>> {
     match codec.to_lowercase().as_str() {
         "none" => Ok(Box::new(NoCompressor)),

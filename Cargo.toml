@@ -32,11 +32,13 @@ unsafe_code = "forbid"
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
+dbg_macro = "deny"
 panic = "warn"
+# Types keep descriptive names even where the module path repeats them, so call sites read without it.
 module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
+# #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
+# 16 sites turn counts and byte totals into f64 metric values, which are exact below 2^53.
 cast_precision_loss = "allow"
 
 [workspace.dependencies]

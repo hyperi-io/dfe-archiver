@@ -419,6 +419,10 @@ impl ArchiveWriter {
     }
 
     /// Write data to archive, rolling first if the policy says so.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a roll or the open of a new file fails.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         if let Some(trigger) = self.should_roll() {
             self.roll(trigger).await?;
@@ -448,6 +452,10 @@ impl ArchiveWriter {
     }
 
     /// Write a single record (adds newline).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying [`Self::write`] fails.
     pub async fn write_record(&mut self, record: &[u8]) -> Result<()> {
         self.write(record).await?;
         self.write(b"\n").await?;
@@ -460,6 +468,10 @@ impl ArchiveWriter {
     }
 
     /// Flush buffer to storage. Returns compression stats if data was written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when compression fails or the compressed bytes cannot be appended to storage.
     pub async fn flush(&mut self) -> Result<Option<FlushStats>> {
         if self.buffer.is_empty() {
             return Ok(None);
@@ -631,6 +643,10 @@ impl ArchiveWriter {
     }
 
     /// Close the writer. Returns stats for the closed file (if any was open).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the final flush or the finishing of the file fails.
     pub async fn close(&mut self) -> Result<Option<CloseStats>> {
         self.flush().await?;
 
@@ -666,6 +682,10 @@ impl ArchiveWriter {
     /// Closing rather than rolling is the difference that matters for an idle
     /// destination -- `roll` would open a replacement, manufacturing an empty
     /// file every interval, while `write` opens on demand when data returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`Self::close`] fails.
     pub async fn close_if_aged(&mut self) -> Result<Option<CloseStats>> {
         let Some(trigger) = self.should_roll() else {
             return Ok(None);
