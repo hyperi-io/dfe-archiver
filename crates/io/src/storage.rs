@@ -237,6 +237,44 @@ impl Staging {
         Quarantined::Moved
     }
 
+    /// Refuse a volume with less than `required` bytes free, unless recovery
+    /// kept files to upload: only a running process uploads them, so refusing
+    /// then would keep the backlog on disk for good. A write that later finds
+    /// the disk full is held and retried while the uploads free it.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] when the room is short or the free space cannot be read.
+    pub fn ensure_room(&self, required: u64) -> Result<()> {
+        let available = fs2::available_space(&self.dir).map_err(|e| {
+            Error::storage_with(
+                format!("reading the free space under {}", self.dir.display()),
+                e,
+            )
+        })?;
+        self.room_for(available, required)
+    }
+
+    /// [`ensure_room`](Self::ensure_room) with the free space already read.
+    fn room_for(&self, available: u64, required: u64) -> Result<()> {
+        let staged = self.bytes.load(Ordering::Relaxed);
+        if staged == 0 && available < required {
+            return Err(Error::storage(format!(
+                "insufficient disk space under {}: {available} bytes free, {required} required",
+                self.dir.display()
+            )));
+        }
+        if available < required {
+            warn!(
+                dir = %self.dir.display(),
+                available,
+                staged,
+                required,
+                "The spool volume is short of free space; starting to upload what a previous process staged, and a write that finds the disk full waits for those uploads"
+            );
+        }
+        Ok(())
+    }
+
     /// Bytes staged and not yet uploaded or discarded.
     #[must_use]
     pub fn bytes(&self) -> Arc<AtomicU64> {
@@ -1253,10 +1291,8 @@ pub fn create_backend(
         let rest = dest.strip_prefix("s3://").unwrap_or("");
         let (bucket, prefix) = parse_bucket_prefix(rest);
 
-        let s3_config = config.s3.clone().unwrap_or_else(|| S3Config {
-            bucket: bucket.to_string(),
-            ..Default::default()
-        });
+        let mut s3_config = config.s3.clone().unwrap_or_default();
+        fill_bucket(&mut s3_config.bucket, bucket);
 
         Ok(Box::new(ObjectStoreBackend::new_s3(
             &s3_config,
@@ -1272,9 +1308,7 @@ pub fn create_backend(
             Error::Config("minio:// destination requires minio config section".to_string())
         })?;
 
-        if !bucket.is_empty() && minio_config.bucket.is_empty() {
-            minio_config.bucket = bucket.to_string();
-        }
+        fill_bucket(&mut minio_config.bucket, bucket);
 
         Ok(Box::new(ObjectStoreBackend::new_minio(
             &minio_config,
@@ -1291,10 +1325,8 @@ pub fn create_backend(
             .unwrap_or("");
         let (bucket, prefix) = parse_bucket_prefix(rest);
 
-        let gcs_config = config.gcs.clone().unwrap_or_else(|| GcsConfig {
-            bucket: bucket.to_string(),
-            ..Default::default()
-        });
+        let mut gcs_config = config.gcs.clone().unwrap_or_default();
+        fill_bucket(&mut gcs_config.bucket, bucket);
 
         Ok(Box::new(ObjectStoreBackend::new_gcs(
             &gcs_config,
@@ -1310,14 +1342,8 @@ pub fn create_backend(
         };
         let (container, prefix) = parse_bucket_prefix(rest);
 
-        let mut azure_config = config.azure.clone().unwrap_or_else(|| AzureConfig {
-            container: container.to_string(),
-            ..Default::default()
-        });
-
-        if !container.is_empty() && azure_config.container.is_empty() {
-            azure_config.container = container.to_string();
-        }
+        let mut azure_config = config.azure.clone().unwrap_or_default();
+        fill_bucket(&mut azure_config.container, container);
 
         Ok(Box::new(ObjectStoreBackend::new_azure(
             &azure_config,
@@ -1337,6 +1363,17 @@ pub fn create_backend(
         )))
     } else {
         Ok(Box::new(FileBackend::new(dest)))
+    }
+}
+
+/// Take the destination URL's bucket when the backend's section names none.
+///
+/// The section exists without a bucket whenever only its credentials are set,
+/// which is what the chart's `S3_ACCESS_KEY_ID` Secret does, and a backend built
+/// on an empty bucket addresses the endpoint's root instead of the bucket.
+fn fill_bucket(configured: &mut String, from_url: &str) {
+    if configured.is_empty() {
+        *configured = from_url.to_string();
     }
 }
 
@@ -2007,6 +2044,16 @@ mod tests {
         assert_eq!(recovery.incomplete, 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
+
+        // Nothing kept to upload, so a short volume refuses at once.
+        staging.room_for(100, 100).expect("exactly the room needed");
+        let short = staging
+            .room_for(100, 101)
+            .expect_err("one byte short of the room");
+        assert!(
+            short.to_string().contains("insufficient disk space"),
+            "{short}"
+        );
     }
 
     /// With no source to deliver them again, a complete file is handed back
@@ -2026,6 +2073,10 @@ mod tests {
         assert_eq!(file.path, "events/complete.jsonl");
         assert_eq!(file.blocks, vec![4, 4]);
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 8);
+        // Only a running process uploads the kept file, so no shortage of room refuses the start.
+        staging
+            .room_for(0, u64::MAX)
+            .expect("a backlog to upload never refuses the start");
         let quarantined: Vec<Vec<u8>> = std::fs::read_dir(staging.dir().join(QUARANTINE_DIR))
             .expect("quarantine dir")
             .map(|entry| std::fs::read(entry.expect("entry").path()).expect("read"))
@@ -2318,6 +2369,75 @@ mod tests {
         };
         let backend = create_backend(&config, &staging).expect("bare path -> file backend");
         assert_eq!(backend.name(), "file");
+    }
+
+    /// The request line of the one HTTP request the test socket takes, which
+    /// it answers 403 so the client does not retry.
+    async fn answer_one_request_forbidden(listener: tokio::net::TcpListener) -> String {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        socket
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("answer");
+        String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// An `s3:` section holding only credentials, as the chart's
+    /// `S3_ACCESS_KEY_ID` Secret leaves it, still addresses the bucket the
+    /// destination names, and the store's own refusal reaches the error an
+    /// operator reads.
+    #[tokio::test]
+    async fn an_s3_destination_addresses_its_bucket_and_reports_the_refusal() {
+        for (section_bucket, addressed) in
+            [("", "url-bucket"), ("section-bucket", "section-bucket")]
+        {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+            let server = tokio::spawn(answer_one_request_forbidden(listener));
+            let config = ArchiveConfig {
+                destination: "s3://url-bucket/archive".to_string(),
+                s3: Some(S3Config {
+                    region: Some("us-east-1".to_string()),
+                    endpoint: Some(endpoint),
+                    access_key_id: Some("probe-key".to_string()),
+                    secret_access_key: Some("probe-secret".to_string().into()),
+                    bucket: section_bucket.to_string(),
+                    allow_http: true,
+                }),
+                ..Default::default()
+            };
+            let (_dir, staging) = staging();
+
+            let backend = create_backend(&config, &staging).expect("s3 backend builds");
+            let err = dfe_archiver_core::storage::probe_sink(backend.as_ref())
+                .await
+                .expect_err("the store answered 403");
+            let request = server.await.expect("server task");
+
+            assert!(
+                request.starts_with(&format!("GET /{addressed}")),
+                "section bucket {section_bucket:?} must address {addressed}, the client sent: {request}"
+            );
+            assert!(
+                err.to_string().contains("403"),
+                "the store's refusal must reach the error, got: {err}"
+            );
+        }
     }
 
     #[test]

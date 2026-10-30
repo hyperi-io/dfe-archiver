@@ -11,10 +11,15 @@ use thiserror::Error;
 /// Result type alias for archiver operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Boxed dynamic error source -- preserves the original error chain so
-/// `tracing::error!(error = %e, ...)` plus `e.source()` walks reach the
-/// underlying scalo / `object_store` / rdkafka diagnostic.
+/// Boxed dynamic error source, kept so `e.source()` walks reach the underlying
+/// scalo / `object_store` / rdkafka diagnostic.
 pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// `: <source>` when there is one. Every log line and dead letter formats the
+/// error with `%e`, so a cause left out of `Display` reaches no operator.
+fn cause(source: Option<&BoxSource>) -> String {
+    source.map(|e| format!(": {e}")).unwrap_or_default()
+}
 
 /// Main error type for the archiver
 #[derive(Error, Debug)]
@@ -26,7 +31,7 @@ pub enum Error {
     /// Inbound transport error, on the bus or the Push listener. `source`
     /// carries the underlying `scalo::transport::TransportError` (or rdkafka
     /// error) when the failure originated outside this crate.
-    #[error("transport error: {message}")]
+    #[error("transport error: {message}{}", cause(.source.as_ref()))]
     Transport {
         message: String,
         #[source]
@@ -35,7 +40,7 @@ pub enum Error {
 
     /// Storage backend error. `source` carries the underlying
     /// `object_store::Error` or filesystem error when available.
-    #[error("storage error: {message}")]
+    #[error("storage error: {message}{}", cause(.source.as_ref()))]
     Storage {
         message: String,
         #[source]
@@ -44,7 +49,7 @@ pub enum Error {
 
     /// The store refused this object for good: retrying the same object gets
     /// the same answer, so its records are dropped rather than retried.
-    #[error("refused by the store: {message}")]
+    #[error("refused by the store: {message}{}", cause(.source.as_ref()))]
     Refused {
         message: String,
         #[source]
@@ -53,7 +58,7 @@ pub enum Error {
 
     /// A staged file's local copy cannot be read back -- gone, not readable,
     /// or shorter than what was written -- which no retry of its upload changes.
-    #[error("staged copy unreadable: {message}")]
+    #[error("staged copy unreadable: {message}{}", cause(.source.as_ref()))]
     Unreadable {
         message: String,
         #[source]
@@ -377,17 +382,38 @@ mod tests {
         assert!(matches!(err, Error::Serialization(_)));
     }
 
+    /// Every log line formats the error with `%e`, so the cause has to be in
+    /// `Display`: "s3: list failed" alone hides a refused connection, a 403 or
+    /// a clock-skew rejection behind the same words.
     #[test]
-    fn test_transport_with_preserves_source_chain() {
+    fn a_wrapped_error_names_its_cause() {
         use std::error::Error as _;
 
-        let inner = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "broker down");
-        let err = Error::transport_with("recv failed", inner);
+        let cause = || std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "broker down");
+        let cases = [
+            (
+                Error::transport_with("recv failed", cause()),
+                "transport error: recv failed: broker down",
+            ),
+            (
+                Error::storage_with("s3: list failed", cause()),
+                "storage error: s3: list failed: broker down",
+            ),
+            (
+                Error::refused_with("s3: put failed", cause()),
+                "refused by the store: s3: put failed: broker down",
+            ),
+            (
+                Error::unreadable_with("reading the staged copy failed", cause()),
+                "staged copy unreadable: reading the staged copy failed: broker down",
+            ),
+            (Error::storage("no cause"), "storage error: no cause"),
+        ];
+        for (err, display) in cases {
+            assert_eq!(err.to_string(), display);
+        }
 
-        // Top-level message is the wrapper text only.
-        assert_eq!(format!("{err}"), "transport error: recv failed");
-
-        // source() walks reach the underlying io::Error.
+        let err = Error::transport_with("recv failed", cause());
         let src = err.source().expect("source set");
         assert_eq!(src.to_string(), "broker down");
     }

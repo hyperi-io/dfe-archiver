@@ -70,6 +70,9 @@ const DRAIN_UPLOAD_LIMIT: Duration = Duration::from_secs(20);
 /// The directory under `buffer.spool_dir` where object-store files are staged.
 const STAGING_DIR: &str = "uploads";
 
+/// Free space the spool volume needs at startup when staging holds nothing to upload.
+const MIN_FREE_SPOOL_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// The first retry of a failed upload, doubling to `UPLOAD_RETRY_MAX`.
 const UPLOAD_RETRY_FIRST: Duration = Duration::from_millis(500);
 
@@ -965,7 +968,6 @@ fn buffer_config(
         max_hot_bytes: usize::try_from(hot_bytes_cap).unwrap_or(usize::MAX),
         hot_buffer_age_secs: config.buffer.flush_age_secs,
         spool_dir: config.buffer.spool_dir.clone().into(),
-        min_free_disk_bytes: 1024 * 1024 * 1024,
     }
 }
 
@@ -980,21 +982,21 @@ impl Archiver {
     /// which shares the same `MetricsManager` as the HTTP server.
     ///
     /// `memory_guard` is the runtime's cgroup-aware guard (the one feeding the
-    /// self-regulation governor); the archiver accounts in-flight bytes on it so
+    /// self-regulation governor). The archiver accounts in-flight bytes on it so
     /// the inbound brake reflects real archiver pressure. `governor`, when
     /// `Some`, attaches the inbound brake to the receiver -- the Kafka
     /// pause-partitions gate, or the Push listener's `Unavailable` shed
-    /// (default-on self-regulation); `None` means self-regulation is disabled.
+    /// (default-on self-regulation). `None` means self-regulation is disabled.
     ///
     /// `scaling` is the runtime's unified `ScalingPressure` engine, shared so
     /// the archiver's loops drive the value the runtime writes into the
     /// `scaling_pressure` gauge KEDA scales on. `None` when the runtime's
-    /// `scaling` feature is off; a standalone engine (registering the same
-    /// components) is built as a fallback.
+    /// `scaling` feature is off, and then a standalone engine (registering the
+    /// same components) is built as a fallback.
     ///
     /// # Errors
     ///
-    /// Returns an error when the transport, the hot buffers, the dead-letter queue or the staging directory cannot be set up.
+    /// Returns an error when the transport, the hot buffers, the dead-letter queue or the staging directory cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -1053,6 +1055,7 @@ impl Archiver {
 
         let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
         let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
+        staging.ensure_room(MIN_FREE_SPOOL_BYTES)?;
         let held_records = Arc::new(AtomicU64::new(0));
         attach_intake_caps(governor, &memory_guard, &held_records, &staging);
 
@@ -1668,7 +1671,7 @@ impl Archiver {
 
     /// Drive the sink circuit-open scaling gate from a local write cycle's
     /// outcome (mirrors dfe-loader's `ClickHouse` sink latch). The sink is
-    /// "dead" when a whole cycle wrote nothing but saw errors; it recovers the
+    /// "dead" when a whole cycle wrote nothing but saw errors, and recovers the
     /// moment any write succeeds.
     fn update_sink_circuit(&self, cycle_ok: usize, cycle_err: usize) {
         let open = if cycle_ok > 0 {

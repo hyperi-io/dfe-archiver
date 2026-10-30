@@ -6,13 +6,13 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
+use crate::Result;
 use crate::types::{KafkaMessage, KafkaOffset};
-use crate::{Error, Result};
 use compact_str::CompactString;
 use dashmap::DashMap;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{debug, info, trace};
@@ -45,9 +45,6 @@ pub struct TieredBufferConfig {
 
     /// Spool directory, created at construction.
     pub spool_dir: PathBuf,
-
-    /// Free space the spool volume must have at construction (bytes).
-    pub min_free_disk_bytes: u64,
 }
 
 impl Default for TieredBufferConfig {
@@ -59,7 +56,6 @@ impl Default for TieredBufferConfig {
             max_hot_bytes: usize::MAX,
             hot_buffer_age_secs: 30,
             spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
-            min_free_disk_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -206,33 +202,17 @@ pub struct BufferStats {
     pub current_hot_bytes: AtomicUsize,
 }
 
-/// Check available disk space on the volume containing the given path
-fn get_available_disk_space(path: &Path) -> std::io::Result<u64> {
-    use fs2::available_space;
-    available_space(path)
-}
-
 impl TieredBufferManager {
     /// Create new tiered buffer manager
     ///
     /// # Errors
     ///
-    /// Returns an error when the spool directory cannot be created or has less free space than `min_free_disk_bytes`.
+    /// Returns an error when the spool directory cannot be created.
     pub fn new(config: TieredBufferConfig) -> Result<Self> {
         std::fs::create_dir_all(&config.spool_dir)?;
 
-        let available = get_available_disk_space(&config.spool_dir).unwrap_or(0);
-        if available < config.min_free_disk_bytes {
-            return Err(Error::storage(format!(
-                "insufficient disk space: {} bytes available, {} required",
-                available, config.min_free_disk_bytes
-            )));
-        }
-
         info!(
             spool_dir = %config.spool_dir.display(),
-            min_free_disk = config.min_free_disk_bytes,
-            available_disk = available,
             "Tiered buffer manager initialized"
         );
 

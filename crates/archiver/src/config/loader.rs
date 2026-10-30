@@ -176,23 +176,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
         }
     }
 
-    if config.buffer.flush_bytes == 0 {
-        return Err(Error::Config(
-            "buffer.flush_bytes must be greater than 0: it is the size at which a destination's buffer flushes into its archive file".to_string(),
-        ));
-    }
-
-    if config.buffer.flush_records == 0 {
-        return Err(Error::Config(
-            "buffer.flush_records must be greater than 0: it is the record count at which a destination's buffer flushes into its archive file".to_string(),
-        ));
-    }
-
-    if config.buffer.writer_parallelism == 0 {
-        return Err(Error::Config(
-            "buffer.writer_parallelism must be greater than 0: it is how many object-store uploads run at once".to_string(),
-        ));
-    }
+    require_counts(config)?;
 
     // The tiered buffer creates this directory at construction, so an empty
     // value fails the boot with an errno the operator cannot place.
@@ -256,6 +240,40 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// Refuse a zero for a count the pipeline cannot run at zero.
+/// `kafka.batch_size` is read by the receive loop on both transports.
+fn require_counts(config: &Config) -> Result<()> {
+    for (value, key, what) in [
+        (
+            config.kafka.batch_size,
+            "kafka.batch_size",
+            "how many records one receive takes, on either transport",
+        ),
+        (
+            config.buffer.flush_bytes,
+            "buffer.flush_bytes",
+            "the size at which a destination's buffer flushes into its archive file",
+        ),
+        (
+            config.buffer.flush_records,
+            "buffer.flush_records",
+            "the record count at which a destination's buffer flushes into its archive file",
+        ),
+        (
+            config.buffer.writer_parallelism,
+            "buffer.writer_parallelism",
+            "how many object-store uploads run at once",
+        ),
+    ] {
+        if value == 0 {
+            return Err(Error::Config(format!(
+                "{key} must be greater than 0: it is {what}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -500,28 +518,33 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 
+    /// A zero size or record threshold would flush every record on its own,
+    /// zero upload slots would never upload, and a zero batch receives nothing
+    /// while the listener keeps answering pushes, on either transport.
     #[test]
-    fn test_zero_flush_bytes_fails() {
-        let mut config = Config::default();
-        config.kafka.brokers = vec!["localhost:9092".to_string()];
-        config.buffer.flush_bytes = 0;
-
-        assert!(validate_config(&config).is_err());
-    }
-
-    /// A zero record threshold would flush every record on its own, and zero
-    /// upload slots would never upload.
-    #[test]
-    fn zero_flush_records_or_writer_parallelism_fails() {
-        let mut config = Config::default();
-        config.kafka.brokers = vec!["localhost:9092".to_string()];
-        config.buffer.flush_records = 0;
-        assert!(validate_config(&config).is_err());
-
-        let mut config = Config::default();
-        config.kafka.brokers = vec!["localhost:9092".to_string()];
-        config.buffer.writer_parallelism = 0;
-        assert!(validate_config(&config).is_err());
+    fn a_zero_count_or_size_fails() {
+        let keys = [
+            "kafka.batch_size",
+            "buffer.flush_bytes",
+            "buffer.flush_records",
+            "buffer.writer_parallelism",
+        ];
+        for transport in [TRANSPORT_KAFKA, TRANSPORT_GRPC] {
+            for key in keys {
+                let mut config = Config {
+                    transport: transport.to_string(),
+                    ..Config::default()
+                };
+                match key {
+                    "kafka.batch_size" => config.kafka.batch_size = 0,
+                    "buffer.flush_bytes" => config.buffer.flush_bytes = 0,
+                    "buffer.flush_records" => config.buffer.flush_records = 0,
+                    _ => config.buffer.writer_parallelism = 0,
+                }
+                let err = validate_config(&config).expect_err(key);
+                assert!(err.to_string().contains(key), "{transport}: {err}");
+            }
+        }
     }
 
     #[test]

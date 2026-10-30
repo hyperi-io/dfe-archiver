@@ -207,13 +207,13 @@ brokers, a codec or routing mode that does not exist.
 
 ### Message Processing Pipeline
 
-1. **Ingest**: Batch receive from the configured transport (10K messages default)
-2. **Routing**: Determine destination based on topic or JSON expression
-3. **Buffering**: Buffer per destination in memory. A buffer the LRU evicts flushes into its file
-4. **Flush Triggers**: Size (`flush_bytes`, 1 MiB), records (100K), age (60s), or the shared cap on every buffer together
-5. **Compression**: Compress the flushed batch with the configured codec
-6. **File Write**: Append it to the destination's open file, local or staged. A staged file uploads in the background once it closes
-7. **Release**: Commit offsets once the file holding their records is complete (a no-op on `grpc`)
+1. Receive a batch from the configured transport (10K messages default).
+2. Route each record to its destination by topic or JSON field.
+3. Buffer per destination in memory. A buffer the LRU evicts flushes into its file.
+4. Flush a buffer at `flush_bytes` (1 MiB), 100K records, 60 s of age, or the shared cap on every buffer together.
+5. Compress the flushed batch with the configured codec.
+6. Append it to the destination's open file, local or staged. A staged file uploads in the background once it closes.
+7. Commit offsets once the file holding their records is complete (a no-op on `grpc`).
 
 ### Critical Path Optimizations
 
@@ -406,7 +406,7 @@ Only archive files: the open file of a local destination, and under `<buffer.spo
 
 ### Protection Mechanisms
 
-1. **Free space at startup**: the archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume, read through the `fs2` crate.
+1. **Free space at startup**: the archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume, read through the `fs2` crate once staging is recovered. When recovery kept complete files to upload it starts anyway and warns, because only a running archiver uploads them, and a write that finds the disk full waits for those uploads.
 2. **Staged bytes**: a pressure source on the self-regulation latch, read against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit past which kubelet evicts the pod. Intake pauses at the latch's `pause_above`, so a store outage turns into consumer lag rather than disk growth.
 3. **Quarantine**: at most 1 GiB. A file past it is removed and counted.
 4. **A full disk**: a local write that fails is held and retried, never dropped, and the loop receives nothing until it lands. See [At-Least-Once Delivery](#at-least-once-delivery).
