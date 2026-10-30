@@ -55,7 +55,7 @@ fn env_example_assignments() -> Vec<(String, String)> {
 /// 3. `.env.example` starts the binary. It says `cp .env.example .env`, and
 ///    dotenvy loads that file before config resolves, so every name in it is a
 ///    live override.
-/// 4. `ARCHIVER_SPOOL_DIR` moves the spool. It is the deployment's only
+/// 4. `DFE_ARCHIVER_SPOOL_DIR` moves the spool. It is the deployment's only
 ///    way off the default path, and the image is the only place that path
 ///    exists, so a name that reaches nothing is a boot failure in a container.
 #[test]
@@ -101,7 +101,7 @@ fn deployment_env_surface_reaches_the_settings_it_names() {
             version_check.api_url
         );
 
-        // Beyond "it validated": .env.example's own ARCHIVER_DESTINATION has to
+        // Beyond "it validated": .env.example's own DFE_ARCHIVER_DESTINATION has to
         // be the destination, or none of the assignments reached the config.
         assert_eq!(config.archive.destination, "file:///tmp/dfe-archiver-test");
         assert_eq!(config.buffer.spool_dir, "/tmp/dfe-archiver-spool");
@@ -157,19 +157,32 @@ fn test_default_config_validates() {
     validate_config(&config).expect("default config should validate");
 }
 
-/// `config-check` run by the binary from `dir` on the fixture config, returning
-/// what it printed.
-fn config_check_in(dir: &std::path::Path) -> String {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-archiver"))
+/// `config-check` run by the binary from `dir` on the fixture config with
+/// `envs` set, returning what it printed.
+fn config_check_with(dir: &std::path::Path, envs: &[(&str, &str)]) -> String {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-archiver"));
+    command
         .args(["--config", &fixture_path(), "config-check"])
-        .current_dir(dir)
-        .env_remove("ARCHIVER_CONFIG")
-        .env_remove("ARCHIVER_DESTINATION")
+        .current_dir(dir);
+    for name in [
+        "ARCHIVER_CONFIG",
+        "ARCHIVER_DESTINATION",
+        "DFE_ARCHIVER_CONFIG",
+        "DFE_ARCHIVER_DESTINATION",
+    ] {
+        command.env_remove(name);
+    }
+    let out = command
+        .envs(envs.iter().copied())
         .output()
         .expect("the binary runs");
     let printed = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "config-check failed:\n{printed}");
     printed
+}
+
+fn config_check_in(dir: &std::path::Path) -> String {
+    config_check_with(dir, &[])
 }
 
 /// The binary reads the `.env` in its working directory and no other.
@@ -183,7 +196,7 @@ fn a_dotenv_in_a_parent_directory_is_not_loaded() {
     std::fs::create_dir(&project).expect("project dir");
     std::fs::write(
         root.path().join(".env"),
-        "ARCHIVER_DESTINATION=file:///tmp/from_parent_dotenv\n",
+        "DFE_ARCHIVER_DESTINATION=file:///tmp/from_parent_dotenv\n",
     )
     .expect("parent .env");
 
@@ -196,7 +209,7 @@ fn a_dotenv_in_a_parent_directory_is_not_loaded() {
     // The project's own .env still loads.
     std::fs::write(
         project.join(".env"),
-        "ARCHIVER_DESTINATION=file:///tmp/from_project_dotenv\n",
+        "DFE_ARCHIVER_DESTINATION=file:///tmp/from_project_dotenv\n",
     )
     .expect("project .env");
     let printed = config_check_in(&project);
@@ -204,4 +217,113 @@ fn a_dotenv_in_a_parent_directory_is_not_loaded() {
         printed.contains("from_project_dotenv"),
         "the project's own .env did not reach the config"
     );
+}
+
+/// A deployment still on the old names keeps working, and a new name outranks
+/// its old spelling wherever both are set, in the environment or in `.env`.
+#[test]
+fn a_legacy_env_name_reaches_the_config_and_the_new_name_wins() {
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+    let cases: [Case; 3] = [
+        (
+            "",
+            &[("ARCHIVER_DESTINATION", "file:///tmp/legacy_env")],
+            "legacy_env",
+        ),
+        (
+            "ARCHIVER_DESTINATION=file:///tmp/legacy_dotenv\n",
+            &[],
+            "legacy_dotenv",
+        ),
+        (
+            "ARCHIVER_DESTINATION=file:///tmp/legacy_dotenv\n",
+            &[("DFE_ARCHIVER_DESTINATION", "file:///tmp/new_env")],
+            "new_env",
+        ),
+    ];
+    for (dotenv, envs, expected) in cases {
+        let project = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(project.path().join(".env"), dotenv).expect("project .env");
+
+        let printed = config_check_with(project.path(), envs);
+
+        assert!(printed.contains(expected), "{envs:?}: {printed}");
+        for other in ["legacy_env", "legacy_dotenv", "new_env"] {
+            assert!(
+                other == expected || !printed.contains(other),
+                "{other} outranked {expected}: {printed}"
+            );
+        }
+    }
+}
+
+/// Every flat suffix `Config::apply_flat_env` reads, with a value that moves
+/// the setting off its default.
+const FLAT_ENV_CASES: [(&str, &str); 30] = [
+    ("TRANSPORT", "grpc"),
+    ("GRPC_LISTEN", "0.0.0.0:7000"),
+    ("KAFKA_BROKERS", "broker-a:9092,broker-b:9092"),
+    ("KAFKA_GROUP_ID", "group-x"),
+    ("KAFKA_TOPICS", "topic-a,topic-b"),
+    ("KAFKA_TOPIC_INCLUDE", "_land$"),
+    ("KAFKA_TOPIC_EXCLUDE", "_dlq$"),
+    ("KAFKA_TOPIC_REFRESH_SECS", "7"),
+    ("KAFKA_SASL_MECHANISM", "SCRAM-SHA-512"),
+    ("KAFKA_SECURITY_PROTOCOL", "SASL_SSL"),
+    ("KAFKA_SASL_USER", "user-x"),
+    ("KAFKA_SASL_PASSWORD", "password-x"),
+    ("KAFKA_SSL_CA_LOCATION", "/etc/ca.pem"),
+    ("KAFKA_ALLOW_INSECURE_TRANSPORT", "true"),
+    ("DLQ_ENABLED", "false"),
+    ("DLQ_TOPIC", "dlq-x"),
+    ("DLQ_MODE", "file_only"),
+    ("DESTINATION", "file:///tmp/x"),
+    ("PATH_TEMPLATE", "{year}/{month}"),
+    ("COMPRESSION_CODEC", "gzip"),
+    ("FLUSH_BYTES", "2048"),
+    ("FLUSH_INTERVAL_SECS", "9"),
+    ("MULTIPART_CHUNK_SIZE", "6291456"),
+    ("SPOOL_DIR", "/tmp/spool-x"),
+    ("S3_BUCKET", "bucket-x"),
+    ("S3_REGION", "region-x"),
+    ("S3_ACCESS_KEY_ID", "key-x"),
+    ("S3_SECRET_ACCESS_KEY", "secret-x"),
+    ("S3_ENDPOINT", "http://localhost:9000"),
+    ("S3_ALLOW_HTTP", "true"),
+];
+
+/// Each flat name moves its setting under the contract's prefix, and
+/// `LEGACY_FLAT_ENV` lists exactly the old spellings with no `ARCHIVER_` prefix,
+/// so a reader added without its old name or a stale list entry fails here.
+#[test]
+fn every_flat_env_name_is_read_under_the_contract_prefix() {
+    use dfe_archiver_core::config::{ENV_PREFIX, LEGACY_FLAT_ENV};
+    use scalo::config::flat_env::ApplyFlatEnv;
+
+    let effective = |config: &Config| {
+        scalo::expose_during(|| serde_json::to_value(config)).expect("config serialises")
+    };
+    let baseline = effective(&Config::default());
+    assert_eq!(deployment_contract().env_prefix, ENV_PREFIX);
+
+    for (suffix, value) in FLAT_ENV_CASES {
+        let name = format!("{ENV_PREFIX}_{suffix}");
+        let mut config = Config::default();
+        temp_env::with_var(&name, Some(value), || config.apply_flat_env(ENV_PREFIX));
+        assert_ne!(effective(&config), baseline, "{name} reaches no setting");
+    }
+
+    let mut prefixed: Vec<&str> = FLAT_ENV_CASES
+        .iter()
+        .map(|(suffix, _)| *suffix)
+        .filter(|suffix| {
+            ["KAFKA_", "DLQ_", "S3_"]
+                .iter()
+                .any(|p| suffix.starts_with(p))
+        })
+        .collect();
+    let mut listed: Vec<&str> = LEGACY_FLAT_ENV.to_vec();
+    prefixed.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(listed, prefixed);
 }

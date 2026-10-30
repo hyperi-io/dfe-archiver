@@ -8,7 +8,7 @@
 
 // Runs against LocalStack, so the S3 write path is exercised with no AWS
 // account and no manual setup -- just Docker. `common::acquire_s3` prefers a
-// live bucket when S3_BUCKET comes with credentials.
+// live bucket when DFE_ARCHIVER_S3_BUCKET comes with credentials.
 //
 // LocalStack rather than the dev-stack MinIO: the rest of the fleet already
 // standardises on it, and a per-test container cleans itself up where a shared
