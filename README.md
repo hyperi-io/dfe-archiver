@@ -17,13 +17,13 @@ contract).
 
 ## Features
 
-- **Multiple destinations**: File, MinIO, S3, GCS, Azure Blob
-- **Compression**: Zstd (default), LZ4, Snappy, Gzip, or none, each in its standard framed format (LZ4 frames `.lz4`, the snappy framing format `.sz`, gzip members `.gz`, zstd frames `.zst`), so the codec's own tools read an archive file whole
-- **Smart routing**: By JSON field expressions (e.g., `_org_id`) or topic
-- **Rolling archives**: By final compressed file size (1GB default) or time (1 hour default)
-- **At-least-once delivery** on Kafka: an offset is committed once the archive file holding its record is complete
-- **Memory-capped**: every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first
-- **Disk-bounded**: intake pauses as staged uploads near 8 GiB, and a full disk holds intake rather than dropping records
+- Writes to a local path, MinIO, S3, GCS or Azure Blob.
+- Compresses with zstd (default), LZ4, Snappy, gzip or none, each in its standard framed format (LZ4 frames `.lz4`, the snappy framing format `.sz`, gzip members `.gz`, zstd frames `.zst`), so the codec's own tools read an archive file whole.
+- Routes by JSON field (`_org_id` by default) or by topic.
+- Rolls a file at 1 GiB compressed or at the roll interval: 300 s while Kafka offsets are held or on `grpc`, otherwise 3600 s.
+- On Kafka an offset is committed once the archive file holding its record is complete, so delivery is at-least-once.
+- Every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first.
+- Intake pauses as staged uploads near 8 GiB, and a full disk holds intake rather than dropping records.
 
 ## Architecture
 
@@ -248,7 +248,7 @@ Every file name carries a component unique to the writer, so two replicas writin
 
 The only files on local disk are archive files: a local destination's open files, and under `<buffer.spool_dir>/uploads` each object-store file until the store takes it.
 
-- The archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume.
+- The archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume. When files a previous process staged are waiting to upload it starts anyway, so a backlog left by a store outage never stops the restart that uploads it.
 - Intake pauses as staged bytes near 8 GiB, under the spool volume's 10 GiB `emptyDir` limit, so a store outage becomes consumer lag.
 - The quarantine directory holds at most 1 GiB. A file past it is removed and counted in `staged_files_removed_total{reason="quarantine_full"}`.
 - A local write that fails on a full disk is held and retried, never dropped.
