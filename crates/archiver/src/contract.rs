@@ -7,7 +7,7 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
-use dfe_archiver_core::config::TRANSPORT_GRPC;
+use dfe_archiver_core::config::{ENV_PREFIX, TRANSPORT_GRPC};
 use scalo::deployment::{
     DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaContract,
     NativeDepsContract, OciLabels, PortContract, ResourceList, ResourcesContract,
@@ -36,7 +36,7 @@ pub fn deployment_contract() -> DeploymentContract {
             startup_budget_seconds: 120,
             ..HealthContract::default()
         },
-        env_prefix: "ARCHIVER".into(),
+        env_prefix: ENV_PREFIX.into(),
         metric_prefix: "archiver".into(),
         config_mount_path: "/etc/dfe/archiver.yaml".into(),
         image_registry: "ghcr.io/hyperi-io".into(),
@@ -95,12 +95,12 @@ pub fn deployment_contract() -> DeploymentContract {
 
 /// The Secrets the chart mounts as env vars.
 ///
-/// `Config::apply_flat_env` reads these under the `KAFKA_` and `S3_` prefixes,
-/// never `ARCHIVER_`. The S3 group is optional because only an `s3://`
+/// `Config::apply_flat_env` reads these as `<ENV_PREFIX>_KAFKA_*` and
+/// `<ENV_PREFIX>_S3_*`. The S3 group is optional because only an `s3://`
 /// destination reads it.
 fn secrets() -> Vec<SecretGroupContract> {
     let env = |env_var: &str, key_name: &str, secret_key: &str| SecretEnvContract {
-        env_var: env_var.into(),
+        env_var: format!("{ENV_PREFIX}_{env_var}"),
         key_name: key_name.into(),
         secret_key: secret_key.into(),
     };

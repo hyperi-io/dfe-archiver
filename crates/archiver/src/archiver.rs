@@ -1020,7 +1020,7 @@ impl Archiver {
 
         // The runtime's unified ScalingPressure, so the archiver's loops drive
         // the engine that emits the KEDA gauge. Its thresholds come from the
-        // `scaling` cascade section (`ARCHIVER_SCALING__*`), not from this
+        // `scaling` cascade section (`DFE_ARCHIVER_SCALING__*`), not from this
         // file's config. `None` only when the `scaling` feature is compiled
         // out, where a standalone engine keeps the components registered.
         let scaling = scaling.unwrap_or_else(|| {

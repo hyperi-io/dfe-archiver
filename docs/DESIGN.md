@@ -258,11 +258,11 @@ One writer per destination, up to `archive.max_writers` (1024). Past it the leas
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `buffer.flush_bytes` / `ARCHIVER_FLUSH_BYTES` | 1 MiB | Size at which a destination's buffer flushes into its file. Each buffer holds up to this plus one record |
+| `buffer.flush_bytes` / `DFE_ARCHIVER_FLUSH_BYTES` | 1 MiB | Size at which a destination's buffer flushes into its file. Each buffer holds up to this plus one record |
 | `buffer.flush_records` | 100,000 | Record count at which a destination's buffer flushes, whatever its size |
-| `buffer.flush_age_secs` / `ARCHIVER_FLUSH_INTERVAL_SECS` | 60 | Age at which a buffer flushes whatever its size |
+| `buffer.flush_age_secs` / `DFE_ARCHIVER_FLUSH_INTERVAL_SECS` | 60 | Age at which a buffer flushes whatever its size |
 | `buffer.writer_parallelism` | 2 | Object-store uploads at once, each holding four parts of `archive.multipart_chunk_size` |
-| `buffer.spool_dir` / `ARCHIVER_SPOOL_DIR` | `/var/spool/dfe/archiver` | Parent of the staging directory, `uploads/` |
+| `buffer.spool_dir` / `DFE_ARCHIVER_SPOOL_DIR` | `/var/spool/dfe/archiver` | Parent of the staging directory, `uploads/` |
 | `archive.max_writers` | 1024 | Open archive writers, one per destination |
 
 The 64-buffer count and the quarter share are fixed, not configured.
@@ -575,8 +575,8 @@ archive:
   destination: s3://bucket-name/prefix
   s3:
     region: ap-southeast-2
-    access_key_id: ${S3_ACCESS_KEY_ID}
-    secret_access_key: ${S3_SECRET_ACCESS_KEY}
+    access_key_id: ${DFE_ARCHIVER_S3_ACCESS_KEY_ID}
+    secret_access_key: ${DFE_ARCHIVER_S3_SECRET_ACCESS_KEY}
 ```
 
 ### MinIO (S3-Compatible)
@@ -649,7 +649,7 @@ reduce the number of HTTP requests but increase memory per upload, four chunks e
 Configuration follows a cascade (highest to lowest priority):
 
 1. CLI arguments (`--kafka-brokers`, etc.)
-2. Environment variables (`KAFKA_BROKERS`, etc.)
+2. Environment variables (`DFE_ARCHIVER_KAFKA_BROKERS`, etc.)
 3. `.env` file
 4. Config file (`config.yaml`)
 5. Built-in defaults
@@ -658,34 +658,38 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
-| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
-| `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
-| `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
-| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
-| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
-| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
-| `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
-| `KAFKA_SASL_USER` | SASL username | (none) |
-| `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output destination URL | (none -- idles) |
-| `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
-| `ARCHIVER_MULTIPART_CHUNK_SIZE` | Multipart upload chunk size | `8388608` (8MB) |
-| `S3_BUCKET` | S3 bucket name | (from config) |
-| `S3_REGION` | S3 region | (from config) |
-| `S3_ACCESS_KEY_ID` | S3 access key | (from env chain) |
-| `S3_SECRET_ACCESS_KEY` | S3 secret key | (from env chain) |
-| `S3_ENDPOINT` | S3 endpoint (for MinIO) | (none) |
-| `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
-| `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
-| `ARCHIVER_MEMORY_CGROUP_HEADROOM` | Fraction of the cgroup limit to use | `0.85` |
-| `ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD` | Ratio that forces scaling pressure to 100 | `0.8` |
-| `ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
+| `DFE_ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `DFE_ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | (none) |
+| `DFE_ARCHIVER_KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
+| `DFE_ARCHIVER_KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
+| `DFE_ARCHIVER_KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `DFE_ARCHIVER_KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
+| `DFE_ARCHIVER_KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_USER` | SASL username | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_PASSWORD` | SASL password | (none) |
+| `DFE_ARCHIVER_DESTINATION` | Output destination URL | (none -- idles) |
+| `DFE_ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
+| `DFE_ARCHIVER_MULTIPART_CHUNK_SIZE` | Multipart upload chunk size | `8388608` (8MB) |
+| `DFE_ARCHIVER_S3_BUCKET` | S3 bucket name | (from config) |
+| `DFE_ARCHIVER_S3_REGION` | S3 region | (from config) |
+| `DFE_ARCHIVER_S3_ACCESS_KEY_ID` | S3 access key | (from env chain) |
+| `DFE_ARCHIVER_S3_SECRET_ACCESS_KEY` | S3 secret key | (from env chain) |
+| `DFE_ARCHIVER_S3_ENDPOINT` | S3 endpoint (for MinIO) | (none) |
+| `DFE_ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
+| `DFE_ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
+| `DFE_ARCHIVER_MEMORY_CGROUP_HEADROOM` | Fraction of the cgroup limit to use | `0.85` |
+| `DFE_ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD` | Ratio that forces scaling pressure to 100 | `0.8` |
+| `DFE_ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard is built by the scalo runtime from the `ARCHIVER_MEMORY_*` variables above and never reads a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the config cascade, where the config file is the settings layer and env outranks it. The single-underscore names are read directly; the double-underscore ones nest into the cascade (`ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
+The memory guard is built by the scalo runtime from the `DFE_ARCHIVER_MEMORY_*` variables above and never reads a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the config cascade, where the config file is the settings layer and env outranks it. The single-underscore names are read directly. The double-underscore ones nest into the cascade (`DFE_ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
+
+#### Legacy names
+
+The pre-prefix names still work and are deprecated: `ARCHIVER_X` is now `DFE_ARCHIVER_X`, and `KAFKA_X`, `DLQ_X` and `S3_X` are now `DFE_ARCHIVER_KAFKA_X`, `DFE_ARCHIVER_DLQ_X` and `DFE_ARCHIVER_S3_X`. `legacy_env::adopt_legacy_names` runs in `main` after `.env` loads and before any thread starts. It copies each old variable to its new name when the new one is unset, so the new name wins when both are set, and `warn_on_legacy_names` logs one warning listing the old names found. The whole `ARCHIVER_` prefix is copied because the scalo cascade reads any `ARCHIVER_SECTION__KEY`. The `KAFKA_`, `DLQ_` and `S3_` names are an explicit list (`LEGACY_FLAT_ENV`), so another tool's `KAFKA_*` variables are left alone. An empty new variable counts as set, so it blocks the copy.
 
 ### Full Config Example
 
@@ -801,9 +805,9 @@ KEDA scales on the `dfe_scaling_pressure` composite, not on a raw Kafka lag trig
 
 ```bash
 docker run -d \
-  -e KAFKA_BROKERS=kafka:9092 \
-  -e KAFKA_TOPICS=events \
-  -e ARCHIVER_DESTINATION=s3://bucket/archive \
+  -e DFE_ARCHIVER_KAFKA_BROKERS=kafka:9092 \
+  -e DFE_ARCHIVER_KAFKA_TOPICS=events \
+  -e DFE_ARCHIVER_DESTINATION=s3://bucket/archive \
   -v /data/spool:/var/spool/dfe/archiver \
   ghcr.io/hyperi-io/dfe-archiver:latest
 ```

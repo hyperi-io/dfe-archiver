@@ -7,19 +7,17 @@
 // Copyright:    (c) 2026 HyperI Pty Ltd
 
 use dfe_archiver_core::archive::{PATH_TEMPLATE_PLACEHOLDERS, unknown_placeholders};
-use dfe_archiver_core::config::{Config, TRANSPORT_GRPC, TRANSPORT_KAFKA};
+use dfe_archiver_core::config::{Config, ENV_PREFIX, TRANSPORT_GRPC, TRANSPORT_KAFKA};
 use dfe_archiver_core::{Error, Result};
 use scalo::config::flat_env::{ApplyFlatEnv, Normalize};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-/// The env prefix for the scalo config cascade. Must equal the contract's
-/// `env_prefix` and `ServiceApp::env_prefix` -- it is the prefix the charts
-/// build their `<PREFIX>_SECTION__KEY` variables from.
-const ENV_PREFIX: &str = "ARCHIVER";
+/// The variable that names the config file.
+const CONFIG_ENV: &str = "DFE_ARCHIVER_CONFIG";
 
 /// Where the config file is looked for when neither `--config` nor
-/// `ARCHIVER_CONFIG` names one, first match wins.
+/// `DFE_ARCHIVER_CONFIG` names one, first match wins.
 const DEFAULT_CONFIG_PATHS: [&str; 3] = [
     "config.yaml",
     "config/settings.yaml",
@@ -33,7 +31,7 @@ const DEFAULT_CONFIG_PATHS: [&str; 3] = [
 /// `self_regulation` and `scaling` through `from_cascade()`,
 /// which returns each type's own default when the cascade was never set up --
 /// indistinguishable from a cascade that says "default", and silent. Without
-/// this call no `ARCHIVER_*__*` variable a chart renders reaches anything, and
+/// this call no `DFE_ARCHIVER_*__*` variable a chart renders reaches anything, and
 /// without `config_file` in it no scalo section in that file does.
 ///
 /// The config reloader re-enters on SIGHUP and on every file change, and the
@@ -88,7 +86,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     };
 
     // Apply flat env overrides (preserves existing env var contract)
-    config.apply_flat_env("UNUSED");
+    config.apply_flat_env(ENV_PREFIX);
     config.normalize();
 
     validate_config(&config)?;
@@ -100,13 +98,13 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
 }
 
 /// The config file to load and what named it: `--config`, then
-/// `ARCHIVER_CONFIG`, then the first of [`DEFAULT_CONFIG_PATHS`] that exists.
+/// `DFE_ARCHIVER_CONFIG`, then the first of [`DEFAULT_CONFIG_PATHS`] that exists.
 fn config_source(config_path: Option<&str>) -> Option<(String, &'static str)> {
     if let Some(path) = config_path {
         return Some((path.to_string(), "--config"));
     }
-    if let Ok(path) = std::env::var("ARCHIVER_CONFIG") {
-        return Some((path, "ARCHIVER_CONFIG"));
+    if let Ok(path) = std::env::var(CONFIG_ENV) {
+        return Some((path, CONFIG_ENV));
     }
     DEFAULT_CONFIG_PATHS
         .into_iter()

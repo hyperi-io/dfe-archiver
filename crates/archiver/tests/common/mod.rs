@@ -163,7 +163,7 @@ pub fn load_dotenv() {
 /// Kafka connection config for the active test mode.
 ///
 /// Docker mode: `localhost:19092`, PLAINTEXT, no SASL.
-/// Remote mode: from env vars (`KAFKA_BROKERS`, `KAFKA_SASL_MECHANISM`, etc.)
+/// Remote mode: from env vars (`DFE_ARCHIVER_KAFKA_BROKERS`, `DFE_ARCHIVER_KAFKA_SASL_MECHANISM`, etc.)
 pub struct KafkaTestConfig {
     pub brokers: String,
     pub security_protocol: String,
@@ -195,12 +195,13 @@ pub fn kafka_test_config() -> KafkaTestConfig {
             sasl_password: None,
         },
         TestMode::Remote => KafkaTestConfig {
-            brokers: env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
-            security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
+            brokers: env::var("DFE_ARCHIVER_KAFKA_BROKERS")
+                .unwrap_or_else(|_| "localhost:9092".into()),
+            security_protocol: env::var("DFE_ARCHIVER_KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "SASL_PLAINTEXT".into()),
-            sasl_mechanism: env::var("KAFKA_SASL_MECHANISM").ok(),
-            sasl_user: env::var("KAFKA_SASL_USER").ok(),
-            sasl_password: env::var("KAFKA_SASL_PASSWORD").ok(),
+            sasl_mechanism: env::var("DFE_ARCHIVER_KAFKA_SASL_MECHANISM").ok(),
+            sasl_user: env::var("DFE_ARCHIVER_KAFKA_SASL_USER").ok(),
+            sasl_password: env::var("DFE_ARCHIVER_KAFKA_SASL_PASSWORD").ok(),
         },
     }
 }
@@ -798,7 +799,7 @@ impl S3Fixture {
 
 /// An S3 target for `test`, writing into `bucket`.
 ///
-/// Live first, but only when `S3_BUCKET` comes with credentials -- a bucket name
+/// Live first, but only when `DFE_ARCHIVER_S3_BUCKET` comes with credentials -- a bucket name
 /// on its own is not evidence of access, and the repo's `.env` sets one with no
 /// keys, which is exactly the case that has to fall through to the emulator.
 ///
@@ -814,28 +815,28 @@ pub async fn acquire_s3(test: &str, bucket: &str) -> Option<S3Fixture> {
     use testcontainers::runners::AsyncRunner;
 
     load_dotenv();
-    if let Ok(live_bucket) = env::var("S3_BUCKET") {
-        let key_id = env::var("S3_ACCESS_KEY_ID").ok();
-        let secret = env::var("S3_SECRET_ACCESS_KEY").ok();
+    if let Ok(live_bucket) = env::var("DFE_ARCHIVER_S3_BUCKET") {
+        let key_id = env::var("DFE_ARCHIVER_S3_ACCESS_KEY_ID").ok();
+        let secret = env::var("DFE_ARCHIVER_S3_SECRET_ACCESS_KEY").ok();
         if key_id.is_some() && secret.is_some() {
             return Some(S3Fixture {
                 config: dfe_archiver::config::S3Config {
                     bucket: live_bucket,
-                    region: env::var("S3_REGION")
+                    region: env::var("DFE_ARCHIVER_S3_REGION")
                         .ok()
                         .or_else(|| Some("ap-southeast-2".to_string())),
                     access_key_id: key_id,
                     secret_access_key: secret
                         .map(dfe_archiver::config::sensitive::SensitiveString::from),
-                    endpoint: env::var("S3_ENDPOINT").ok(),
-                    allow_http: env::var("S3_ALLOW_HTTP")
+                    endpoint: env::var("DFE_ARCHIVER_S3_ENDPOINT").ok(),
+                    allow_http: env::var("DFE_ARCHIVER_S3_ALLOW_HTTP")
                         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
                 },
                 container: None,
             });
         }
         eprintln!(
-            "S3_BUCKET is set but S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY are not -- using LocalStack"
+            "DFE_ARCHIVER_S3_BUCKET is set but DFE_ARCHIVER_S3_ACCESS_KEY_ID/DFE_ARCHIVER_S3_SECRET_ACCESS_KEY are not -- using LocalStack"
         );
     }
 

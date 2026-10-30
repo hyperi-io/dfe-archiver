@@ -6,9 +6,9 @@ description: |-
   Covers the archiver's own sections only. The memory guard, the metrics
   listener and the scaling-pressure engine are scalo's, built by
   `ServiceRuntime` before the archiver exists, and are configured through the
-  cascade (`ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
-  `METRICS_ADDR` / `ARCHIVER_METRICS__ADDRESS` for the listener,
-  `ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
+  cascade (`DFE_ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
+  `METRICS_ADDR` / `DFE_ARCHIVER_METRICS__ADDRESS` for the listener,
+  `DFE_ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
   `scaling:` block here parsed, validated and reached nothing.
 
   ## Hot-reload behavior
