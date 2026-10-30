@@ -7,7 +7,7 @@
 # Copyright:    (c) 2026 HyperI Pty Ltd
 #
 # Usage:
-#   ARCHIVER_CONFIG=config.dev.yaml cargo run
+#   DFE_ARCHIVER_CONFIG=config.dev.yaml cargo run
 #
 # Requires:
 #   docker compose -f docker-compose.dev.yaml up -d
@@ -48,9 +48,9 @@ buffer:
   writer_parallelism: 2
 
 # The memory guard is scalo's and is configured by env, not from this file:
-#   ARCHIVER_MEMORY_LIMIT_BYTES (0 = auto-detect from the cgroup)
-#   ARCHIVER_MEMORY_PRESSURE_THRESHOLD
-#   ARCHIVER_MEMORY_CGROUP_HEADROOM
+#   DFE_ARCHIVER_MEMORY_LIMIT_BYTES (0 = auto-detect from the cgroup)
+#   DFE_ARCHIVER_MEMORY_PRESSURE_THRESHOLD
+#   DFE_ARCHIVER_MEMORY_CGROUP_HEADROOM
 
 routing:
   mode: "expression"
@@ -69,9 +69,9 @@ compression:
 # `metrics:` and `scaling:` sections resolve from the config cascade, where this
 # file is the settings layer and env outranks it:
 #
-#   --metrics-addr / METRICS_ADDR / ARCHIVER_METRICS__ADDRESS / metrics.address
-#   ARCHIVER_SCALING__ENABLED / scaling.enabled
-#   ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD   (0.0-1.0; forces pressure to 100)
+#   --metrics-addr / METRICS_ADDR / DFE_ARCHIVER_METRICS__ADDRESS / metrics.address
+#   DFE_ARCHIVER_SCALING__ENABLED / scaling.enabled
+#   DFE_ARCHIVER_SCALING__MEMORY_GATE_THRESHOLD   (0.0-1.0; forces pressure to 100)
 #
 # The composite KEDA scales on is the weighted kafka_lag + buffer_depth +
 # memory set in scaling_components(), gated by the object-store circuit, and

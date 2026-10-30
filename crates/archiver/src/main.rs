@@ -18,9 +18,10 @@ use dfe_archiver::config::{
     ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
 };
 use dfe_archiver::contract::deployment_contract;
+use dfe_archiver::legacy_env::{adopt_legacy_names, warn_on_legacy_names};
 use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
 use dfe_archiver::{Archiver, restart_required_changes};
-use dfe_archiver_core::config::HELD_OFFSET_BYTES;
+use dfe_archiver_core::config::{ENV_PREFIX, HELD_OFFSET_BYTES};
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
 use scalo::logger::security;
 use std::sync::Arc;
@@ -62,7 +63,7 @@ impl ServiceApp for App {
     }
 
     fn env_prefix(&self) -> &'static str {
-        "ARCHIVER"
+        ENV_PREFIX
     }
 
     fn version_info(&self) -> VersionInfo {
@@ -93,6 +94,8 @@ impl ServiceApp for App {
     /// read. `Config::idle_reason` is the whole predicate, so the charts, the
     /// tests and this hook cannot disagree about what "no work" means.
     fn work_state(&self, config: &Self::Config) -> scalo::lifecycle::WorkState {
+        // The first hook that runs with the logger up, and one an idle archiver still reaches.
+        warn_on_legacy_names();
         config
             .idle_reason()
             .map_or(scalo::lifecycle::WorkState::Active, |reason| {
@@ -361,6 +364,13 @@ fn main() {
     // dotenvy::dotenv() would load the first .env in any parent directory.
     dotenvy::from_path(".env").ok();
 
+    // After .env so a legacy name set there is copied, and before any thread
+    // starts so the scalo cascade and memory guard see the new names.
+    if let Err(e) = adopt_legacy_names() {
+        eprintln!("fatal: could not map the legacy ARCHIVER_/KAFKA_/DLQ_/S3_ variables: {e}");
+        std::process::exit(1);
+    }
+
     let app = App::parse();
 
     // Handle deployment contract commands before run_app
@@ -427,7 +437,7 @@ mod tests {
     use scalo::version_check::VersionCheckConfig;
 
     /// The env opt-out the charts render from the app's own prefix.
-    const ENABLED_VAR: &str = "ARCHIVER_VERSION_CHECK__ENABLED";
+    const ENABLED_VAR: &str = "DFE_ARCHIVER_VERSION_CHECK__ENABLED";
 
     /// A config that passes `validate_config`, plus `extra` top-level YAML.
     fn config_yaml(extra: &str) -> String {
@@ -437,7 +447,7 @@ mod tests {
     /// The version check `ServiceRuntime::build` resolves after `load_config`
     /// reads `yaml` as the config file, with the env opt-out at `enabled`.
     ///
-    /// `via_env` names the file by `ARCHIVER_CONFIG` instead of `--config`. The
+    /// `via_env` names the file by `DFE_ARCHIVER_CONFIG` instead of `--config`. The
     /// cascade is a process-global `OnceLock`, so each caller needs its own
     /// process, which nextest gives every test.
     fn resolved_version_check(
@@ -452,7 +462,7 @@ mod tests {
         let named_by = if via_env { Some(path) } else { None };
 
         temp_env::with_vars(
-            [(ENABLED_VAR, enabled), ("ARCHIVER_CONFIG", named_by)],
+            [(ENABLED_VAR, enabled), ("DFE_ARCHIVER_CONFIG", named_by)],
             || {
                 assert!(
                     scalo::config::try_get().is_none(),
@@ -499,7 +509,7 @@ mod tests {
         let resolved = resolved_version_check(&yaml, None, true);
         assert!(
             !resolved.enabled,
-            "version_check.enabled: false in the ARCHIVER_CONFIG file must stop the check"
+            "version_check.enabled: false in the DFE_ARCHIVER_CONFIG file must stop the check"
         );
     }
 

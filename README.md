@@ -61,9 +61,9 @@ Nothing spools to disk ahead of the writers: the only local files are the archiv
 cargo build --release
 
 # Run with environment variables
-KAFKA_BROKERS=localhost:9092 \
-KAFKA_TOPICS=events \
-ARCHIVER_DESTINATION=file://./data/archive \
+DFE_ARCHIVER_KAFKA_BROKERS=localhost:9092 \
+DFE_ARCHIVER_KAFKA_TOPICS=events \
+DFE_ARCHIVER_DESTINATION=file://./data/archive \
 ./target/release/dfe-archiver
 
 # Or with config file
@@ -84,26 +84,28 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
-| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | `0.0.0.0:6000` |
-| `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
-| `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
-| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none: every topic) |
-| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
-| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
-| `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
-| `KAFKA_SASL_USER` | SASL username | (none) |
-| `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
-| `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
-| `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
-| `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
-| `ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
+| `DFE_ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `DFE_ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | `0.0.0.0:6000` |
+| `DFE_ARCHIVER_KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
+| `DFE_ARCHIVER_KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
+| `DFE_ARCHIVER_KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none: every topic) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `DFE_ARCHIVER_KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
+| `DFE_ARCHIVER_KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_USER` | SASL username | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_PASSWORD` | SASL password | (none) |
+| `DFE_ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
+| `DFE_ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
+| `DFE_ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
+| `DFE_ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
+| `DFE_ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard belongs to the scalo runtime and reads only the `ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and an `ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
+The memory guard belongs to the scalo runtime and reads only the `DFE_ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and a `DFE_ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
+
+The names before the `DFE_ARCHIVER_` prefix still work and are deprecated: `ARCHIVER_X` is now `DFE_ARCHIVER_X`, and `KAFKA_X`, `DLQ_X` and `S3_X` are now `DFE_ARCHIVER_KAFKA_X`, `DFE_ARCHIVER_DLQ_X` and `DFE_ARCHIVER_S3_X`. At startup each old variable is copied to its new name when the new one is unset, so the new name wins when both are set, and one warning lists the old names found. Only the `KAFKA_`, `DLQ_` and `S3_` names the archiver reads are copied (the 21 in `LEGACY_FLAT_ENV`), so another tool's `KAFKA_*` variables in the same container are left alone.
 
 ### Which transport, and idling until configured
 

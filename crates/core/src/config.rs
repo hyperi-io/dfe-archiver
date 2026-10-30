@@ -22,9 +22,9 @@ pub use scalo::dlq::DlqConfig;
 /// Covers the archiver's own sections only. The memory guard, the metrics
 /// listener and the scaling-pressure engine are scalo's, built by
 /// `ServiceRuntime` before the archiver exists, and are configured through the
-/// cascade (`ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
-/// `METRICS_ADDR` / `ARCHIVER_METRICS__ADDRESS` for the listener,
-/// `ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
+/// cascade (`DFE_ARCHIVER_MEMORY_*` for the guard, `--metrics-addr` /
+/// `METRICS_ADDR` / `DFE_ARCHIVER_METRICS__ADDRESS` for the listener,
+/// `DFE_ARCHIVER_SCALING__*` for the engine). A parallel `memory:` / `metrics:` /
 /// `scaling:` block here parsed, validated and reached nothing.
 ///
 /// ## Hot-reload behavior
@@ -581,27 +581,59 @@ impl Default for CompressionConfig {
     }
 }
 
+/// The env prefix of every variable the archiver reads, and of the scalo
+/// cascade. Must equal the deployment contract's `env_prefix`, which the
+/// charts build their `<PREFIX>_SECTION__KEY` variables from.
+pub const ENV_PREFIX: &str = "DFE_ARCHIVER";
+
+/// The old spellings of the flat variables read below that did not start with
+/// `ARCHIVER_`, which the binary copies to their `DFE_ARCHIVER_` names at startup.
+pub const LEGACY_FLAT_ENV: [&str; 21] = [
+    "KAFKA_BROKERS",
+    "KAFKA_GROUP_ID",
+    "KAFKA_TOPICS",
+    "KAFKA_TOPIC_INCLUDE",
+    "KAFKA_TOPIC_EXCLUDE",
+    "KAFKA_TOPIC_REFRESH_SECS",
+    "KAFKA_SASL_MECHANISM",
+    "KAFKA_SECURITY_PROTOCOL",
+    "KAFKA_SASL_USER",
+    "KAFKA_SASL_PASSWORD",
+    "KAFKA_SSL_CA_LOCATION",
+    "KAFKA_ALLOW_INSECURE_TRANSPORT",
+    "DLQ_ENABLED",
+    "DLQ_TOPIC",
+    "DLQ_MODE",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_ENDPOINT",
+    "S3_ALLOW_HTTP",
+];
+
 /// Apply flat environment variable overrides.
 ///
-/// Uses multiple prefixes to preserve the existing env var contract:
-/// `KAFKA_*`, `ARCHIVER_*`, `DLQ_*`, `S3_*`. Single underscore throughout,
-/// because these are the archiver's own sections. The double-underscore names
-/// (`ARCHIVER_VERSION_CHECK__ENABLED` and the rest) belong to the scalo runtime
-/// sections and reach them through the cascade, never through here.
+/// Every name is `<prefix>_<KEY>` with a single underscore, because these are
+/// the archiver's own sections: `DFE_ARCHIVER_KAFKA_BROKERS`,
+/// `DFE_ARCHIVER_DLQ_ENABLED`, `DFE_ARCHIVER_S3_BUCKET`,
+/// `DFE_ARCHIVER_DESTINATION`. The double-underscore names
+/// (`DFE_ARCHIVER_VERSION_CHECK__ENABLED` and the rest) belong to the scalo
+/// runtime sections and reach them through the cascade, never through here.
 ///
-/// CRITICAL: These env var names are the contract with dfe-engine.
-/// Do NOT rename them.
+/// The old names (`KAFKA_BROKERS`, `ARCHIVER_DESTINATION`) are not read here:
+/// the binary copies them to these names at startup.
 ///
-/// `ARCHIVER_MEMORY_*` is absent by design: those names belong to scalo's
+/// `DFE_ARCHIVER_MEMORY_*` is absent by design: those names belong to scalo's
 /// `MemoryGuard`, which reads them itself. Mapping them here would shadow the
 /// guard with an unread second copy, and reject its `0` (auto-detect from the
 /// cgroup) as invalid.
 impl ApplyFlatEnv for Config {
-    fn apply_flat_env(&mut self, _prefix: &str) {
-        self.apply_transport_env();
-        self.apply_kafka_env();
-        self.apply_dlq_env();
-        self.apply_archive_env();
+    fn apply_flat_env(&mut self, prefix: &str) {
+        self.apply_transport_env(prefix);
+        self.apply_kafka_env(prefix);
+        self.apply_dlq_env(prefix);
+        self.apply_archive_env(prefix);
     }
 }
 
@@ -609,51 +641,51 @@ impl Config {
     /// Which transport carries records in, and where its listener binds. The
     /// chart sets these from the deployment-wide `kafka.mode` dial, so a
     /// brokerless profile authors no config blob to switch the archiver over.
-    fn apply_transport_env(&mut self) {
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "TRANSPORT") {
+    fn apply_transport_env(&mut self, prefix: &str) {
+        if let Some(v) = flat_env::flat_env_string(prefix, "TRANSPORT") {
             self.transport = v;
         }
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "GRPC_LISTEN") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "GRPC_LISTEN") {
             self.grpc.listen = Some(v);
         }
     }
 
     /// The broker, its credentials, and which topics to read.
-    fn apply_kafka_env(&mut self) {
-        if let Some(v) = flat_env::flat_env_list("KAFKA", "BROKERS") {
+    fn apply_kafka_env(&mut self, prefix: &str) {
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
             self.kafka.brokers = v;
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "GROUP_ID") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_GROUP_ID") {
             self.kafka.group_id = v;
         }
-        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPICS") {
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TOPICS") {
             self.kafka.topics = v;
         }
-        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPIC_INCLUDE") {
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TOPIC_INCLUDE") {
             self.kafka.topic_include = v;
         }
-        if let Some(v) = flat_env::flat_env_list("KAFKA", "TOPIC_EXCLUDE") {
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TOPIC_EXCLUDE") {
             self.kafka.topic_exclude = v;
         }
-        if let Some(v) = flat_env::flat_env_parsed::<u64>("KAFKA", "TOPIC_REFRESH_SECS") {
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "KAFKA_TOPIC_REFRESH_SECS") {
             self.kafka.topic_refresh_secs = v;
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "SASL_MECHANISM") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_MECHANISM") {
             self.kafka.sasl_mechanism = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "SECURITY_PROTOCOL") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SECURITY_PROTOCOL") {
             self.kafka.security_protocol = v;
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "SASL_USER") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_USER") {
             self.kafka.sasl_username = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string_sensitive("KAFKA", "SASL_PASSWORD") {
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
             self.kafka.sasl_password = Some(SensitiveString::from(v));
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "SSL_CA_LOCATION") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SSL_CA_LOCATION") {
             self.kafka.ssl_ca_location = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string("KAFKA", "ALLOW_INSECURE_TRANSPORT") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_ALLOW_INSECURE_TRANSPORT") {
             self.kafka.allow_insecure_transport =
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         }
@@ -661,15 +693,15 @@ impl Config {
 
     /// Fleet-uniform DLQ names. TOPIC routes every entry to one fixed topic
     /// (the per-app standard) rather than per-destination suffix topics.
-    fn apply_dlq_env(&mut self) {
-        if let Some(v) = flat_env::flat_env_bool("DLQ", "ENABLED") {
+    fn apply_dlq_env(&mut self, prefix: &str) {
+        if let Some(v) = flat_env::flat_env_bool(prefix, "DLQ_ENABLED") {
             self.dlq.enabled = v;
         }
-        if let Some(v) = flat_env::flat_env_string("DLQ", "TOPIC") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_TOPIC") {
             self.dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
             self.dlq.kafka.common_topic = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string("DLQ", "MODE") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_MODE") {
             use scalo::dlq::DlqMode;
             self.dlq.mode = match v.as_str() {
                 "fan_out" => DlqMode::FanOut,
@@ -680,7 +712,7 @@ impl Config {
                     // A typo'd mode must not silently pick a backend -- cascade
                     // includes the file backend, an EROFS no-op deployed, and
                     // the archiver aborts boot when that backend fails to init.
-                    tracing::warn!(mode = %other, "unknown DLQ_MODE, using cascade");
+                    tracing::warn!(mode = %other, "unknown DFE_ARCHIVER_DLQ_MODE, using cascade");
                     DlqMode::Cascade
                 }
             };
@@ -690,51 +722,51 @@ impl Config {
     /// Where archives are written, how they are rolled and compressed, where
     /// they are staged, plus the metrics address and the S3 credentials
     /// the same operator supplies.
-    fn apply_archive_env(&mut self) {
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "DESTINATION") {
+    fn apply_archive_env(&mut self, prefix: &str) {
+        if let Some(v) = flat_env::flat_env_string(prefix, "DESTINATION") {
             self.archive.destination = v;
         }
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "PATH_TEMPLATE") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "PATH_TEMPLATE") {
             self.archive.path_template = v;
         }
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "COMPRESSION_CODEC") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "COMPRESSION_CODEC") {
             self.compression.codec = v;
         }
-        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "FLUSH_BYTES") {
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "FLUSH_BYTES") {
             self.buffer.flush_bytes = v;
         }
-        if let Some(v) = flat_env::flat_env_parsed::<u64>("ARCHIVER", "FLUSH_INTERVAL_SECS") {
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "FLUSH_INTERVAL_SECS") {
             self.buffer.flush_age_secs = v;
         }
-        if let Some(v) = flat_env::flat_env_parsed::<usize>("ARCHIVER", "MULTIPART_CHUNK_SIZE") {
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MULTIPART_CHUNK_SIZE") {
             self.archive.multipart_chunk_size = v;
         }
-        if let Some(v) = flat_env::flat_env_string("ARCHIVER", "SPOOL_DIR") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "SPOOL_DIR") {
             self.buffer.spool_dir = v;
         }
 
         // S3
-        if let Some(v) = flat_env::flat_env_string("S3", "BUCKET") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "S3_BUCKET") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.bucket = v;
         }
-        if let Some(v) = flat_env::flat_env_string("S3", "REGION") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "S3_REGION") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.region = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string_sensitive("S3", "ACCESS_KEY_ID") {
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "S3_ACCESS_KEY_ID") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.access_key_id = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string_sensitive("S3", "SECRET_ACCESS_KEY") {
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "S3_SECRET_ACCESS_KEY") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.secret_access_key = Some(SensitiveString::from(v));
         }
-        if let Some(v) = flat_env::flat_env_string("S3", "ENDPOINT") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "S3_ENDPOINT") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.endpoint = Some(v);
         }
-        if let Some(v) = flat_env::flat_env_string("S3", "ALLOW_HTTP") {
+        if let Some(v) = flat_env::flat_env_string(prefix, "S3_ALLOW_HTTP") {
             let s3 = self.archive.s3.get_or_insert_with(S3Config::default);
             s3.allow_http = matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         }
