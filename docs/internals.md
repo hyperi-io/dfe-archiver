@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-archiver
-  File:         docs/DESIGN.md
+  File:         docs/internals.md
   Purpose:      Architecture and design documentation
   Language:     Markdown
 

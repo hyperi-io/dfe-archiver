@@ -10,7 +10,7 @@
 
 # Archiving
 
-The archiver keeps a compressed copy of every record it receives, in files you can read with standard tools. This page is for the person running it. The design behind it is [DESIGN.md](DESIGN.md).
+The archiver keeps a compressed copy of every record it receives, in files you can read with standard tools. This page is for the person running it. The design behind it is [internals.md](internals.md).
 
 ## What it writes
 

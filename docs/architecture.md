@@ -12,7 +12,7 @@
 
 Where things live and which way the dependencies point. The design itself --
 the pipeline, the rolling model, the storage backends -- is
-[DESIGN.md](DESIGN.md).
+[internals.md](internals.md).
 
 ## Codemap
 
