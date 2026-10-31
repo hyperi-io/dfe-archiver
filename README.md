@@ -8,14 +8,14 @@
   Copyright:    (c) 2026 HyperI Pty Ltd
 -->
 
-# DFE Archiver
+# dfe-archiver
 
-High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
-Built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane runtime
-(config cascade, logging, metrics, Kafka transport, tiered sink, deployment
-contract).
+[![Build Status](https://github.com/hyperi-io/dfe-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-archiver/actions)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 
-## Features
+Writes a DFE deployment's Kafka or gRPC streams to compressed files in a local path or an object store. Each record's payload is written as one line, exactly as it arrived, beside the copy dfe-loader puts in ClickHouse. Kafka keys, offsets and timestamps are not kept, so a replay gets the payloads back but not their Kafka metadata.
+
+## What it gives you
 
 - Writes to a local path, MinIO, S3, GCS or Azure Blob.
 - Compresses with zstd (default), LZ4, Snappy, gzip or none, each in its standard framed format (LZ4 frames `.lz4`, the snappy framing format `.sz`, gzip members `.gz`, zstd frames `.zst`), so the codec's own tools read an archive file whole.
