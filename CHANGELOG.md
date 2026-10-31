@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.42](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.41...v1.7.42) (2026-10-31)
+
+### Bug Fixes
+
+* name the store's error, keep the URL bucket, start with a staged backlog ([#152](https://github.com/hyperi-io/dfe-archiver/issues/152)) ([b654533](https://github.com/hyperi-io/dfe-archiver/commit/b6545334e9e97b7c9fe9b90b93ecd307a8541198))
+* rebuild on scalo 2.14.23 and run Quality on ARC ([0d7f0d7](https://github.com/hyperi-io/dfe-archiver/commit/0d7f0d7313000413f6e709c5dfe4d1f6b215b69c))
+* take libz-sys 1.1.31 for RUSTSEC-2026-0418 ([#150](https://github.com/hyperi-io/dfe-archiver/issues/150)) ([14ac54d](https://github.com/hyperi-io/dfe-archiver/commit/14ac54d4ccb5f6463aa6c957b0a4283007449cbe))
+
 ## [1.7.41](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.40...v1.7.41) (2026-10-29)
 
 ### Bug Fixes
