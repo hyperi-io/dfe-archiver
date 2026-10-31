@@ -344,7 +344,7 @@ dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kaf
 | `crates/archiver/src/config/loader.rs` | `init_cascade` -- the call that makes `ARCHIVER_*__*` reach anything. |
 | `crates/archiver/src/bin/pgo_driver.rs` | The second `[[bin]]`, gated on `required-features = ["pgo-driver"]`. The gate keeps it out of the release payload: hyperi-ci skips feature-gated binaries when packaging, and verifies BOLT on the first packaged binary only. |
 | `Dockerfile` | Generated from `contract.rs`. Its header names the generator and schema version. |
-| `docs/architecture.md` | Crate map and the one-way rules. `docs/DESIGN.md` is the pipeline design. |
+| `docs/architecture.md` | Crate map and the one-way rules. `docs/internals.md` is the pipeline design. |
 | `.hyperi-ci.yaml` | PGO and BOLT settings, and which gates block versus warn. `.config/nextest.toml` and `scripts/pgo-workload.sh` are what it drives. |
 
 ### Commands that prove a change
