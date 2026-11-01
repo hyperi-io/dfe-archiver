@@ -34,11 +34,17 @@ KAFKA_DIGEST="sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df65
 # renovate: datasource=docker depName=localstack/localstack versioning=semver
 LOCALSTACK_TAG="4.14"
 
+# scalo's TLS broker makes its certificates in this image. The same pin as scalo's transport::kafka::test_support.
+# renovate: datasource=docker depName=alpine/openssl
+OPENSSL_TAG="3.5.9"
+OPENSSL_DIGEST="sha256:1c361a204e9791bec6202bccbd1065eafaa65cb5a1a9a06ae000238569fba6a2"
+
 IMAGES=(
     "mcr.microsoft.com/azure-storage/azurite:${AZURITE_TAG}"
     "fsouza/fake-gcs-server:${FAKE_GCS_TAG}"
     "apache/kafka:${KAFKA_TAG}@${KAFKA_DIGEST}"
     "localstack/localstack:${LOCALSTACK_TAG}"
+    "alpine/openssl:${OPENSSL_TAG}@${OPENSSL_DIGEST}"
 )
 
 main() {

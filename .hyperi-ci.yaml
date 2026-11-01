@@ -39,7 +39,22 @@ test:
   enabled: true
   coverage: true
   # min_coverage: 80       # Fail if coverage below this percentage
+  # A release runs the full tier. docs/testing.md says which tests are core, which full, and why full skips these.
+  full:
+    required_for_release: true
+    rust:
+      # Need a live GCS bucket, the developer's compose stack or a remote broker, none of which a CI runner has.
+      skip:
+        - "gcs::test_gcs_basic_operations"
+        - "gcs::test_gcs_multipart_large_file"
+        - "gcs::test_gcs_archive_roundtrip"
+        - "gcs::test_gcs_rolling_by_size"
+        - "minio::"
+        - "kafka::test_kafka_"
+        - "pipeline::test_e2e_kafka_to_"
   rust:
+    # Required, not auto: the metric tests read a process-global metrics recorder, and only nextest gives each test a process of its own.
+    nextest: true
     tier: all               # "unit", "integration", "e2e", or "all"
     # Feature sets to test (match quality.rust.features for consistency)
     features:
