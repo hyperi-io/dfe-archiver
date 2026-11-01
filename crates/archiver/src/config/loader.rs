@@ -99,6 +99,14 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     Ok(config)
 }
 
+/// The config file [`load_config`] reads for `config_path`, which the
+/// reloader watches: `--config`, then `ARCHIVER_CONFIG`, then the first
+/// default location that exists.
+#[must_use]
+pub fn config_file(config_path: Option<&str>) -> Option<String> {
+    config_source(config_path).map(|(path, _)| path)
+}
+
 /// The config file to load and what named it: `--config`, then
 /// `ARCHIVER_CONFIG`, then the first of [`DEFAULT_CONFIG_PATHS`] that exists.
 fn config_source(config_path: Option<&str>) -> Option<(String, &'static str)> {
@@ -333,6 +341,28 @@ mod tests {
         config.kafka.brokers = vec!["localhost:9092".to_string()];
 
         validate_config(&config).expect("default config should be valid");
+    }
+
+    /// The file the reloader watches is the one `load_config` read, whichever
+    /// of `--config`, `ARCHIVER_CONFIG` or a default location named it.
+    #[test]
+    fn the_watched_config_file_is_the_one_loaded() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let named = dir.path().join("named.yaml").display().to_string();
+        let cases = [
+            (Some("cli.yaml"), None, Some("cli.yaml")),
+            (Some("cli.yaml"), Some(named.as_str()), Some("cli.yaml")),
+            (None, Some(named.as_str()), Some(named.as_str())),
+            (None, None, None),
+        ];
+        for (cli, env, want) in cases {
+            let watched = temp_env::with_var("ARCHIVER_CONFIG", env, || config_file(cli));
+            assert_eq!(
+                watched.as_deref(),
+                want,
+                "--config {cli:?}, ARCHIVER_CONFIG {env:?}"
+            );
+        }
     }
 
     /// A key the archiver no longer reads is ignored, so a config file that
