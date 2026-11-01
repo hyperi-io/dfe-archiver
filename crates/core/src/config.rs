@@ -65,7 +65,9 @@ pub struct Config {
     /// Compression configuration
     pub compression: CompressionConfig,
 
-    /// Dead letter queue configuration
+    /// Dead letter queue configuration. A field a `dlq:` block leaves out
+    /// keeps the archiver's default.
+    #[serde(deserialize_with = "dlq_over_archiver_defaults")]
     pub dlq: DlqConfig,
 }
 
@@ -79,22 +81,55 @@ impl Default for Config {
             buffer: BufferConfig::default(),
             routing: RoutingConfig::default(),
             compression: CompressionConfig::default(),
-            // Fleet DLQ standard defaults: fixed per-app topic, routing=common,
-            // and the fleet's spool path rather than scalo's /var/spool/scalo/dlq.
-            // Archiver entry destinations are archive PATHS (slashes), so
-            // scalo's per-table default would build invalid topic names.
-            // Applies when the config file has no `dlq:` key; a partial `dlq:`
-            // block reverts nested fields to scalo's own defaults.
-            dlq: {
-                let mut dlq = DlqConfig::default();
-                dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
-                dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-                dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
-                // A committed dead letter's cut tail is lost, so keep it whole.
-                dlq.max_payload_bytes = None;
-                dlq
-            },
+            dlq: archiver_dlq_defaults(),
         }
+    }
+}
+
+/// The fleet DLQ standard: a fixed per-app topic, the fleet's spool path, and
+/// whole payloads. Archiver destinations are archive paths with slashes, so
+/// scalo's per-table routing would build invalid topic names.
+fn archiver_dlq_defaults() -> DlqConfig {
+    let mut dlq = DlqConfig::default();
+    dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
+    dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
+    dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
+    // A committed dead letter's cut tail is lost, so keep it whole.
+    dlq.max_payload_bytes = None;
+    dlq
+}
+
+/// Read a `dlq:` block over [`archiver_dlq_defaults`], so a field it leaves
+/// out keeps the archiver's value rather than scalo's.
+fn dlq_over_archiver_defaults<'de, D>(deserializer: D) -> Result<DlqConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let set = serde_json::Value::deserialize(deserializer)?;
+    if set.is_null() {
+        return Ok(archiver_dlq_defaults());
+    }
+    let mut merged = serde_json::to_value(archiver_dlq_defaults()).map_err(D::Error::custom)?;
+    overlay(&mut merged, set);
+    serde_json::from_value(merged).map_err(D::Error::custom)
+}
+
+/// Write `set` over `base`, merging objects key by key.
+fn overlay(base: &mut serde_json::Value, set: serde_json::Value) {
+    use serde_json::Value;
+    match (base, set) {
+        (Value::Object(base), Value::Object(set)) => {
+            for (key, value) in set {
+                match base.get_mut(&key) {
+                    Some(slot) => overlay(slot, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, set) => *base = set,
     }
 }
 

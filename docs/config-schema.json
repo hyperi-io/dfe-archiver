@@ -100,7 +100,7 @@
       }
     },
     "dlq": {
-      "description": "Dead letter queue configuration",
+      "description": "Dead letter queue configuration. A field a `dlq:` block leaves out\nkeeps the archiver's default.",
       "$ref": "#/$defs/DlqConfig",
       "default": {
         "enabled": true,

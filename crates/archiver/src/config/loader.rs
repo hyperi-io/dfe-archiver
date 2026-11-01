@@ -320,24 +320,51 @@ mod tests {
         );
     }
 
-    /// A config file with no `dlq:` key takes the archiver's DLQ defaults, not
-    /// scalo's `/var/spool/scalo/dlq` and per-table routing.
+    /// A config file takes the archiver's DLQ defaults for every `dlq` field it
+    /// leaves out, not scalo's `/var/spool/scalo/dlq`, per-table routing and
+    /// 512 KiB payload cap, whether it has no `dlq:` key or a partial one.
     #[test]
-    fn a_config_file_without_a_dlq_key_gets_the_archiver_dlq_defaults() {
+    fn a_config_file_gets_the_archiver_dlq_defaults_it_does_not_set() {
+        use scalo::dlq::DlqMode;
+        let cases = [
+            ("", DlqMode::Cascade, 5000),
+            ("dlq:\n  mode: kafka_only\n", DlqMode::KafkaOnly, 5000),
+            (
+                "dlq:\n  kafka:\n    send_timeout_ms: 1000\n",
+                DlqMode::Cascade,
+                1000,
+            ),
+        ];
         let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "kafka:\n  brokers: [\"localhost:9092\"]\n").expect("write config");
+        for (dlq, mode, send_timeout_ms) in cases {
+            std::fs::write(
+                &path,
+                format!("kafka:\n  brokers: [\"localhost:9092\"]\n{dlq}"),
+            )
+            .expect("write config");
 
-        let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
-        assert_eq!(
-            config.dlq.file.path,
-            std::path::PathBuf::from("/var/spool/dfe/dlq")
-        );
-        assert_eq!(config.dlq.kafka.routing, scalo::dlq::DlqRouting::Common);
-        assert_eq!(
-            config.dlq.kafka.common_topic.as_deref(),
-            Some("dfe_archiver_dlq")
-        );
+            let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
+            let dlq_config = &config.dlq;
+            assert_eq!(dlq_config.mode, mode, "{dlq:?}");
+            assert_eq!(dlq_config.kafka.send_timeout_ms, send_timeout_ms, "{dlq:?}");
+            assert_eq!(
+                dlq_config.file.path,
+                std::path::PathBuf::from("/var/spool/dfe/dlq"),
+                "{dlq:?}"
+            );
+            assert_eq!(
+                dlq_config.kafka.routing,
+                scalo::dlq::DlqRouting::Common,
+                "{dlq:?}"
+            );
+            assert_eq!(
+                dlq_config.kafka.common_topic.as_deref(),
+                Some("dfe_archiver_dlq"),
+                "{dlq:?}"
+            );
+            assert_eq!(dlq_config.max_payload_bytes, None, "{dlq:?}");
+        }
     }
 
     #[test]
