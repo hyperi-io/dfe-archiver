@@ -242,6 +242,8 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    require_dlq_topic_names(config)?;
+
     Ok(())
 }
 
@@ -292,6 +294,28 @@ fn require_gcs_key_json(config: &Config) -> Result<()> {
         return Err(Error::Config(
             "archive.gcs.service_account_key holds the service account key's JSON itself, \
              and a path to the key file goes in archive.gcs.credentials_path"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse per-table DLQ routing under expression routing: it names each DLQ
+/// topic after the record's destination, whose segments are joined with `/`,
+/// which no Kafka topic name can hold, so every dead letter fails delivery.
+fn require_dlq_topic_names(config: &Config) -> Result<()> {
+    let dlq = &config.dlq;
+    if !config.is_direct()
+        && config.routing.mode == "expression"
+        && dlq.enabled
+        && dlq.kafka.enabled
+        && dlq.mode != scalo::dlq::DlqMode::FileOnly
+        && dlq.kafka.routing == scalo::dlq::DlqRouting::PerTable
+    {
+        return Err(Error::Config(
+            "dlq.kafka.routing: per_table names a topic after each archive destination, \
+             and expression routing puts a '/' in every one, which no Kafka topic can hold \
+             (use dlq.kafka.routing: common)"
                 .to_string(),
         ));
     }
@@ -385,6 +409,38 @@ mod tests {
                 "{dlq:?}"
             );
             assert_eq!(dlq_config.max_payload_bytes, None, "{dlq:?}");
+        }
+    }
+
+    /// Per-table DLQ routing names a Kafka topic after each destination, and
+    /// expression routing puts a `/` in every one, which no topic name holds.
+    #[test]
+    fn per_table_dlq_routing_is_refused_where_destinations_hold_a_slash() {
+        use scalo::dlq::{DlqMode as M, DlqRouting as R};
+        let cases = [
+            ("expression", R::PerTable, M::Cascade, true, false),
+            ("expression", R::PerTable, M::KafkaOnly, true, false),
+            ("expression", R::PerTable, M::FanOut, true, false),
+            ("expression", R::PerTable, M::FileOnly, true, true),
+            ("expression", R::PerTable, M::Cascade, false, true),
+            ("expression", R::Common, M::Cascade, true, true),
+            ("topic", R::PerTable, M::Cascade, true, true),
+        ];
+        for (routing_mode, routing, mode, enabled, valid) in cases {
+            let mut config = Config::default();
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            config.routing.mode = routing_mode.to_string();
+            config.dlq.kafka.routing = routing;
+            config.dlq.mode = mode;
+            config.dlq.enabled = enabled;
+            let case = format!("{routing_mode} {routing:?} {mode:?} enabled={enabled}");
+            match validate_config(&config) {
+                Ok(()) => assert!(valid, "{case}: accepted"),
+                Err(e) => {
+                    assert!(!valid, "{case}: {e}");
+                    assert!(e.to_string().contains("dlq.kafka.routing"), "{case}: {e}");
+                }
+            }
         }
     }
 
