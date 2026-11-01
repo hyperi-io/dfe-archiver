@@ -385,6 +385,25 @@ async fn sync_dir(dir: &Path) -> std::io::Result<()> {
     tokio::fs::File::open(dir).await?.sync_all().await
 }
 
+/// The directories that hold the entries `create_dir_all(dir)` would add:
+/// every ancestor above `dir` up to and including the nearest that exists.
+async fn new_entry_parents(dir: &Path) -> Vec<PathBuf> {
+    let mut missing = 0;
+    for ancestor in dir.ancestors() {
+        let exists = ancestor.as_os_str().is_empty()
+            || tokio::fs::try_exists(ancestor).await.unwrap_or(false);
+        if exists {
+            break;
+        }
+        missing += 1;
+    }
+    dir.ancestors()
+        .skip(1)
+        .take(missing)
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 #[async_trait]
 impl StorageBackend for FileBackend {
     async fn create(&self, path: &str) -> Result<()> {
@@ -399,9 +418,13 @@ impl StorageBackend for FileBackend {
         };
 
         if let Some(parent) = full_path.parent() {
+            let entries = new_entry_parents(parent).await;
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(refuse_name)?;
+            for dir in &entries {
+                sync_dir(dir).await?;
+            }
         }
 
         OpenOptions::new()
@@ -445,8 +468,9 @@ impl StorageBackend for FileBackend {
     }
 
     /// Syncs the file, then every directory from its parent up to the base
-    /// path, because `create` may have made any of them and a directory entry
-    /// is durable only once its parent is synced.
+    /// path, because a directory entry is durable only once its parent is
+    /// synced. `create` synced the entries of any directory it made at or
+    /// above the base path.
     async fn close(&self, path: &str) -> Result<Closed> {
         let full_path = self.full_path(path)?;
         tokio::fs::File::open(&full_path).await?.sync_all().await?;
@@ -1450,6 +1474,36 @@ mod tests {
             .close(&path)
             .await
             .expect("close syncs up to the working directory");
+    }
+
+    /// Every directory `create` makes, the destination itself included, has
+    /// its entry in a parent that is synced, up to the nearest one that was
+    /// already there.
+    #[tokio::test]
+    async fn test_new_directories_are_synced_into_the_parent_that_existed() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let root = temp_dir.path();
+        let dir = root.join("dest/hour");
+        let cases: [(&[&str], Vec<PathBuf>); 3] = [
+            (&[], vec![root.join("dest"), root.to_path_buf()]),
+            (&["dest"], vec![root.join("dest")]),
+            (&["dest", "dest/hour"], Vec::new()),
+        ];
+        for (existing, want) in cases {
+            for made in existing {
+                std::fs::create_dir_all(root.join(made)).expect("make dir");
+            }
+            assert_eq!(
+                new_entry_parents(&dir).await,
+                want,
+                "with {existing:?} already there"
+            );
+        }
+
+        let backend = FileBackend::new(root.join("fresh"));
+        backend.create("hour/file.jsonl").await.expect("create");
+        backend.close("hour/file.jsonl").await.expect("close");
+        assert!(root.join("fresh/hour/file.jsonl").is_file());
     }
 
     #[tokio::test]
