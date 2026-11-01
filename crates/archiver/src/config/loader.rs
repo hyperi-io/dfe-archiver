@@ -206,6 +206,8 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    require_gcs_key_json(config)?;
+
     let valid_codecs = ["none", "zstd", "lz4", "snappy", "gzip"];
     if !valid_codecs.contains(&config.compression.codec.as_str()) {
         return Err(Error::Config(format!(
@@ -277,8 +279,27 @@ fn require_counts(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a `gcs.service_account_key` that is not JSON: the GCS client parses
+/// it as the key itself, so a path there fails every client build and leaves
+/// the writes retrying.
+fn require_gcs_key_json(config: &Config) -> Result<()> {
+    let key = config
+        .archive
+        .gcs
+        .as_ref()
+        .and_then(|gcs| gcs.service_account_key.as_ref());
+    if key.is_some_and(|key| !key.expose().trim_start().starts_with('{')) {
+        return Err(Error::Config(
+            "archive.gcs.service_account_key holds the service account key's JSON itself, \
+             and a path to the key file goes in archive.gcs.credentials_path"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -823,6 +844,60 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(at_the_line.long_held_roll_interval(), None);
+    }
+
+    /// `service_account_key` reaches the GCS client as the key's JSON, so a
+    /// path there fails every client build, and every write with it.
+    #[test]
+    fn a_gcs_service_account_key_is_json_and_a_path_is_refused() {
+        use dfe_archiver_core::config::GcsConfig;
+        use dfe_archiver_core::config::sensitive::SensitiveString;
+        let cases = [
+            (r#"{"type":"service_account"}"#, true),
+            ("  {\n  \"type\": \"service_account\"\n}", true),
+            ("/path/to/key.json", false),
+            ("", false),
+        ];
+        for (key, valid) in cases {
+            let mut config = Config::default();
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            config.archive.gcs = Some(GcsConfig {
+                service_account_key: Some(SensitiveString::from(key)),
+                ..GcsConfig::default()
+            });
+            let result = validate_config(&config);
+            if valid {
+                result.unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            } else {
+                let err = result.expect_err(key).to_string();
+                assert!(err.contains("credentials_path"), "{key:?}: {err}");
+            }
+        }
+    }
+
+    /// Every YAML example under the README's storage backends loads and
+    /// validates as written, so an operator who copies one gets a config the
+    /// archiver accepts.
+    #[test]
+    fn the_readme_storage_examples_are_valid_configs() {
+        let readme = include_str!("../../../../README.md");
+        let section = readme
+            .split_once("## Storage Backends")
+            .and_then(|(_, rest)| rest.split("\n## ").next())
+            .expect("a Storage Backends section");
+        let examples: Vec<&str> = section
+            .split("```yaml\n")
+            .skip(1)
+            .filter_map(|block| block.split_once("```").map(|(yaml, _)| yaml))
+            .collect();
+        assert!(examples.len() >= 4, "{examples:?}");
+        for yaml in examples {
+            let mut config: Config =
+                scalo::yaml::from_str(yaml, "README.md", scalo::yaml::Profile::Config)
+                    .unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            validate_config(&config).unwrap_or_else(|e| panic!("{yaml}: {e}"));
+        }
     }
 
     #[test]

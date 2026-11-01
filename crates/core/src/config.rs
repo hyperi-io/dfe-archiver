@@ -472,8 +472,9 @@ impl Default for ArchiveConfig {
     }
 }
 
-/// S3 configuration
+/// S3 configuration. A section with no `bucket` takes the destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct S3Config {
     pub region: Option<String>,
     pub endpoint: Option<String>,
@@ -481,12 +482,12 @@ pub struct S3Config {
     pub secret_access_key: Option<SensitiveString>,
     pub bucket: String,
     /// Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS required).
-    #[serde(default)]
     pub allow_http: bool,
 }
 
-/// GCS configuration
+/// GCS configuration. A section with no `bucket` takes the destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct GcsConfig {
     pub project_id: Option<String>,
     pub service_account_key: Option<SensitiveString>,
@@ -494,8 +495,10 @@ pub struct GcsConfig {
     pub bucket: String,
 }
 
-/// Azure Blob configuration
+/// Azure Blob configuration. A section with no `container` takes the
+/// destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct AzureConfig {
     pub account_name: String,
     pub account_key: Option<SensitiveString>,
