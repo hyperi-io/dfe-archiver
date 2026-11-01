@@ -499,6 +499,15 @@ enum Written {
     Withheld(StagedBatch, Error),
 }
 
+/// What closing aged files does with a writer a write holds.
+#[derive(Clone, Copy)]
+enum Busy {
+    /// Wait for the write to finish with it.
+    Wait,
+    /// Pass it by, as a write waiting for disk must: it may hold it itself.
+    Skip,
+}
+
 /// Why a failing write stopped retrying.
 enum WriteStop {
     /// Refused for good: retrying the same records gets the same answer.
@@ -1215,7 +1224,7 @@ impl Archiver {
                     let mut settled = self.write_staged(aged).await;
                     // Runs after the aged batches so an active destination rolls
                     // through the write path, leaving only idle files here.
-                    settled.absorb(self.close_aged_writers().await);
+                    settled.absorb(self.close_aged_writers(Busy::Wait).await);
                     settled.absorb(self.collect_evictions());
                     settled.absorb(self.collect_uploads());
                     self.release_settled(settled).await;
@@ -1746,11 +1755,16 @@ impl Archiver {
     /// write it again after a backoff, or why it stops. A failure no retry
     /// changes stops at once. Any other is retried until shutdown has waited
     /// `DRAIN_WRITE_RETRY_LIMIT` on it.
+    ///
+    /// While it waits, aged files of the writers no write holds close and
+    /// upload into `settled`, because a full staging disk frees only as the
+    /// store takes files.
     async fn after_write_failure(
         &self,
         retry: &mut WriteRetry,
         destination: &str,
         error: Error,
+        settled: &mut Settled,
     ) -> Option<WriteStop> {
         self.metrics.record_error();
         // Per backend, so the per-backend sink error counter moves.
@@ -1788,6 +1802,8 @@ impl Archiver {
                 "A local archive write failed again"
             );
         }
+        let closed = self.close_aged_writers(Busy::Skip).await;
+        settled.absorb(self.dispatch_uploads(closed));
         let wake_on_shutdown = retry.shutdown_seen.is_none();
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -1806,6 +1822,7 @@ impl Archiver {
     /// staging that cannot be created -- is retried with backoff and jitter
     /// while the batch and its offsets are held. The loop receives nothing
     /// until this returns, so nothing later is read or committed past it.
+    /// Files rolled or aged meanwhile upload at once rather than at return.
     #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
     async fn write_batch(&self, mut batch: StagedBatch) -> (Written, Settled) {
         let start = Instant::now();
@@ -1823,7 +1840,7 @@ impl Archiver {
             let writer_arc = match self.writer_for(batch.destination.as_str()) {
                 Ok(writer) => writer,
                 Err(e) => match self
-                    .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                    .after_write_failure(&mut retry, batch.destination.as_str(), e, &mut settled)
                     .await
                 {
                     Some(stop) => break Err(stop),
@@ -1852,9 +1869,15 @@ impl Archiver {
                         break Ok(flush_stats);
                     }
                     Err(e) => {
-                        settled.absorb(writer.take_settled());
+                        // A file this write rolled uploads now: a full disk waits on it.
+                        settled.absorb(self.dispatch_uploads(writer.take_settled()));
                         if let Some(stop) = self
-                            .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                            .after_write_failure(
+                                &mut retry,
+                                batch.destination.as_str(),
+                                e,
+                                &mut settled,
+                            )
                             .await
                         {
                             break Err(stop);
@@ -1945,7 +1968,7 @@ impl Archiver {
     /// this a destination that stops receiving data holds its file open until
     /// shutdown, and an active one overruns the interval by however long it
     /// waits for the next batch.
-    async fn close_aged_writers(&self) -> Settled {
+    async fn close_aged_writers(&self, busy: Busy) -> Settled {
         // The parking_lot lock guards the map only, so the writers are
         // snapshotted and it is released before awaiting any writer's mutex.
         let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
@@ -1958,7 +1981,13 @@ impl Archiver {
 
         let mut settled = Settled::default();
         for (dest, writer_arc) in writers {
-            let mut writer = writer_arc.lock().await;
+            let mut writer = match busy {
+                Busy::Wait => writer_arc.lock().await,
+                Busy::Skip => match writer_arc.try_lock() {
+                    Ok(writer) => writer,
+                    Err(_) => continue,
+                },
+            };
             match writer.close_if_aged().await {
                 Ok(Some(close_stats)) => {
                     debug!(

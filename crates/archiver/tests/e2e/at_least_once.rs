@@ -807,6 +807,11 @@ fn direct_to_file(dir: &Path) -> Config {
 
 /// Push `ids` to the listener `config` binds, retrying each until it is answered.
 async fn push_all(config: &Config, ids: std::ops::Range<u64>) {
+    push_to(config, "traffic", ids).await;
+}
+
+/// [`push_all`], routed to `key`.
+async fn push_to(config: &Config, key: &str, ids: std::ops::Range<u64>) {
     let listen = config.grpc.listen.clone().expect("listen address");
     let sender = GrpcTransport::new(&GrpcConfig {
         endpoint: Some(format!("http://{listen}")),
@@ -816,10 +821,7 @@ async fn push_all(config: &Config, ids: std::ops::Range<u64>) {
     .expect("sender");
     for id in ids {
         let deadline = Instant::now() + Duration::from_secs(45);
-        while !matches!(
-            sender.send("traffic", record(id).into()).await,
-            SendResult::Ok
-        ) {
+        while !matches!(sender.send(key, record(id).into()).await, SendResult::Ok) {
             assert!(Instant::now() < deadline, "the listener never took a push");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1260,6 +1262,136 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
         vec![0, 2],
         "only the pushes the listener answered are archived"
     );
+}
+
+/// Staging that refuses new files and keeps the ones in it readable, as a
+/// full disk does. Dropping it accepts new files again.
+struct StagingRefusal(std::path::PathBuf);
+
+impl StagingRefusal {
+    /// Refuse new files under `spool`'s staging, or `None` for a user the
+    /// directory's mode does not bind.
+    fn start(spool: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let staging = spool.join("uploads");
+        let refusal = Self(staging.clone());
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o555))
+            .expect("make staging read-only");
+        let probe = staging.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            std::fs::remove_file(&probe).expect("remove probe");
+            return None;
+        }
+        Some(refusal)
+    }
+}
+
+impl Drop for StagingRefusal {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Bytes in the staged files under `spool`.
+fn staged_bytes(spool: &Path) -> u64 {
+    std::fs::read_dir(spool.join("uploads")).map_or(0, |entries| {
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .filter(std::fs::Metadata::is_file)
+            .map(|meta| meta.len())
+            .sum()
+    })
+}
+
+/// The direct transport into the store, flushing each destination's buffer
+/// every five records, with the age timer far past the test.
+fn direct_to_store(store: &S3StoreFixture, spool: &Path) -> Config {
+    let mut config = archive_to(store, spool);
+    config.transport = TRANSPORT_GRPC.to_string();
+    config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
+    config.buffer.flush_records = 5;
+    config.buffer.flush_age_secs = 60;
+    config
+}
+
+/// A write held for a staging disk that frees only once the store takes a
+/// file: `start` leaves a file open, staging then refuses new files, `stall`
+/// starts the held write, and the refusal lifts once an object lands. Every
+/// record is archived once.
+async fn a_held_write_frees_its_own_disk(
+    test: &str,
+    configure: impl FnOnce(&mut Config),
+    stall: (&str, std::ops::Range<u64>),
+) {
+    init_logs();
+    let Some(store) = common::acquire_s3_store(test).await else {
+        return;
+    };
+    store.create_bucket(BUCKET).await;
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = direct_to_store(&store, spool.path());
+    configure(&mut config);
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    push_to(&config, "open", 0..5).await;
+    wait_until("the first file holds its records", || async {
+        staged_bytes(spool.path()) > 0
+    })
+    .await;
+    let Some(refusal) = StagingRefusal::start(spool.path()) else {
+        eprintln!("skipped: this user writes through a read-only directory");
+        stop(&archiver, running).await;
+        return;
+    };
+    let (key, stalled) = stall;
+    push_to(&config, key, stalled.clone()).await;
+    wait_until("the held write failed", || async {
+        counter(&manager, "archive_errors_total") >= 1
+    })
+    .await;
+    wait_until(
+        "a file reached the store while the write waited",
+        || async { !store.keys(BUCKET).await.is_empty() },
+    )
+    .await;
+    drop(refusal);
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        ids(&store.lines(BUCKET).await),
+        (0..stalled.end).collect::<Vec<_>>(),
+        "every record lands once"
+    );
+}
+
+/// A write that rolls a file and then cannot stage the next one uploads the
+/// rolled file while it waits, because that upload is what frees the disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_waiting_for_disk_uploads_the_file_it_rolled() {
+    a_held_write_frees_its_own_disk(
+        "held_write_rolled",
+        |config| config.archive.roll_size_bytes = 1,
+        ("open", 5..10),
+    )
+    .await;
+}
+
+/// While one destination's write waits for disk, another destination's file
+/// still closes at its roll interval and uploads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_waiting_for_disk_lets_an_aged_file_close_and_upload() {
+    a_held_write_frees_its_own_disk(
+        "held_write_aged",
+        |config| config.archive.roll_interval_secs = Some(2),
+        ("stalled", 5..10),
+    )
+    .await;
 }
 
 /// On the direct transport nothing delivers a stopped process's records
