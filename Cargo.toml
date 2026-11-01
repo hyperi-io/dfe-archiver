@@ -4,7 +4,7 @@
 # Language:     TOML
 #
 # License:      BUSL-1.1
-# Copyright:    (c) 2026 HyperI Pty Ltd
+# Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 [workspace]
 resolver = "2"
@@ -23,7 +23,7 @@ edition = "2024"
 rust-version = "1.94"
 license = "BUSL-1.1"
 repository = "https://github.com/hyperi-io/dfe-archiver"
-authors = ["HyperI Pty Ltd <engineering@hyperi.io>"]
+authors = ["HYPERI PTY LIMITED <engineering@hyperi.io>"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 use dfe_archiver_core::archive::{PATH_TEMPLATE_PLACEHOLDERS, unknown_placeholders};
 use dfe_archiver_core::config::{Config, TRANSPORT_GRPC, TRANSPORT_KAFKA};

@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 use dfe_archiver::config::{Config, load_config, validate_config};
 use dfe_archiver::contract::deployment_contract;

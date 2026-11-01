@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 // Runs against Azurite, Microsoft's own Azure Blob emulator, so the Azure write
 // path is exercised with no Azure subscription and no manual setup -- just

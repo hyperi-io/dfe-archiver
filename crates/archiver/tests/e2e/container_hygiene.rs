@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! The naming and cleanup convention for containers this suite starts.
 //!

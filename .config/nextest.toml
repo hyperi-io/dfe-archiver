@@ -4,7 +4,7 @@
 # Language:     TOML
 #
 # License:      BUSL-1.1
-# Copyright:    (c) 2026 HyperI Pty Ltd
+# Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 # Setup scripts are still experimental in nextest, and pull-test-images is one.
 experimental = ["setup-scripts"]

@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! At-least-once delivery, proved against a real S3-compatible store
 //! (`LocalStack`, through the `minio://` destination) and a real Kafka.
