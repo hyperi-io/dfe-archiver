@@ -39,6 +39,7 @@ futures = { workspace = true }
 
 # Utilities
 compact_str = { workspace = true }
+parking_lot = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = { workspace = true }
 # Free space on the staging volume, checked at startup.

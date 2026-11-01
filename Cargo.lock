@@ -1478,6 +1478,7 @@ dependencies = [
  "futures",
  "lz4_flex",
  "object_store",
+ "parking_lot 0.13.0",
  "percent-encoding",
  "rdkafka",
  "scalo",

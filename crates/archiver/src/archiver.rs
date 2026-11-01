@@ -1228,6 +1228,7 @@ impl Archiver {
                     settled.absorb(self.collect_evictions());
                     settled.absorb(self.collect_uploads());
                     self.release_settled(settled).await;
+                    self.staging.retry_removals().await;
                 }
 
                 result = async {

@@ -123,6 +123,16 @@ pub enum Quarantined {
 pub struct Staging {
     dir: PathBuf,
     bytes: Arc<AtomicU64>,
+    /// Files done with whose removal failed, still counted in `bytes` until
+    /// [`retry_removals`](Self::retry_removals) removes them.
+    stranded: Arc<parking_lot::Mutex<Vec<Stranded>>>,
+}
+
+/// A staged file done with that could not be removed.
+#[derive(Debug)]
+struct Stranded {
+    local: PathBuf,
+    size: u64,
 }
 
 impl Staging {
@@ -137,6 +147,7 @@ impl Staging {
         Ok(Self {
             dir,
             bytes: Arc::new(AtomicU64::new(0)),
+            stranded: Arc::new(parking_lot::Mutex::new(Vec::new())),
         })
     }
 
@@ -287,6 +298,50 @@ impl Staging {
         &self.dir
     }
 
+    /// Remove a staged file done with, and its manifest, counting its `size`
+    /// off the total once the file is gone. One that cannot be removed stays
+    /// counted, because it still holds the disk, and is retried by
+    /// [`retry_removals`](Self::retry_removals).
+    async fn remove(&self, local: &Path, size: u64) {
+        match remove_staged(local).await {
+            Ok(()) => {
+                self.bytes.fetch_sub(size, Ordering::Relaxed);
+            }
+            Err(e) => {
+                warn!(
+                    local = %local.display(),
+                    error = %e,
+                    "Could not remove a staged file; its bytes stay counted against the staging cap and the removal is retried"
+                );
+                self.stranded.lock().push(Stranded {
+                    local: local.to_path_buf(),
+                    size,
+                });
+            }
+        }
+    }
+
+    /// Remove again the files whose removal failed, and return how many are
+    /// still there.
+    pub async fn retry_removals(&self) -> usize {
+        let pending = std::mem::take(&mut *self.stranded.lock());
+        let mut left = Vec::new();
+        for file in pending {
+            match remove_staged(&file.local).await {
+                Ok(()) => {
+                    self.bytes.fetch_sub(file.size, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    debug!(local = %file.local.display(), error = %e, "A staged file still cannot be removed");
+                    left.push(file);
+                }
+            }
+        }
+        let count = left.len();
+        self.stranded.lock().extend(left);
+        count
+    }
+
     /// A local file name no other staged file shares, this process's or a
     /// previous one's whose files are still here.
     fn next_file(&self) -> PathBuf {
@@ -300,6 +355,22 @@ impl Staging {
         self.dir
             .join(format!("{process:016x}-{n}.{STAGED_EXTENSION}"))
     }
+}
+
+/// Remove a staged file, which may already be gone, then its manifest.
+async fn remove_staged(local: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(local).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let manifest = with_suffix(local, MANIFEST_SUFFIX);
+    if let Err(e) = tokio::fs::remove_file(&manifest).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(manifest = %manifest.display(), error = %e, "Could not remove a staged file's manifest");
+    }
+    Ok(())
 }
 
 /// Remove `path`, which may already be gone.
@@ -863,31 +934,17 @@ struct StagedUpload {
 }
 
 impl StagedUpload {
-    /// Count the local copy off the staging total, once. `false` when it was
-    /// already given up.
-    fn release_bytes(&self) -> bool {
-        if self.removed.swap(true, Ordering::AcqRel) {
-            return false;
-        }
-        self.staging.bytes.fetch_sub(self.size, Ordering::Relaxed);
-        true
+    /// Take the local copy to give up, once. `false` when it was already
+    /// given up.
+    fn give_up(&self) -> bool {
+        !self.removed.swap(true, Ordering::AcqRel)
     }
 
     /// Remove the local copy and its manifest, and count its bytes off the
-    /// staging total.
+    /// staging total once it is gone.
     async fn remove_local(&self) {
-        if !self.release_bytes() {
-            return;
-        }
-        for path in [
-            self.local.clone(),
-            with_suffix(&self.local, MANIFEST_SUFFIX),
-        ] {
-            if let Err(e) = tokio::fs::remove_file(&path).await
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(local = %path.display(), error = %e, "Could not remove a staged file");
-            }
+        if self.give_up() {
+            self.staging.remove(&self.local, self.size).await;
         }
     }
 
@@ -1054,9 +1111,10 @@ impl PendingUpload for StagedUpload {
     }
 
     async fn quarantine(&self) -> bool {
-        if !self.release_bytes() {
+        if !self.give_up() {
             return false;
         }
+        self.staging.bytes.fetch_sub(self.size, Ordering::Relaxed);
         let staging = self.staging.clone();
         let local = self.local.clone();
         // Blocking filesystem calls, so off the runtime's worker threads.
@@ -1226,13 +1284,8 @@ impl StorageBackend for ObjectStoreBackend {
         let Some(staged) = self.open.lock().await.remove(path) else {
             return;
         };
-        self.staging.bytes.fetch_sub(staged.size, Ordering::Relaxed);
         drop(staged.file);
-        if let Err(e) = tokio::fs::remove_file(&staged.local).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(local = %staged.local.display(), error = %e, "Could not remove an abandoned staged file");
-        }
+        self.staging.remove(&staged.local, staged.size).await;
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
@@ -2053,6 +2106,43 @@ mod tests {
 
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// A staged copy that cannot be removed stays in the staging total, so
+    /// the intake cap still sees the disk it holds, and its removal is
+    /// retried until it goes.
+    #[tokio::test]
+    async fn a_staged_copy_that_cannot_be_removed_stays_counted_until_it_goes() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"held\n")
+            .await
+            .expect("append");
+        let Closed::Pending(upload) = backend.close("events/a.jsonl").await.expect("close") else {
+            unreachable!("an object-store file is staged");
+        };
+        let local = std::fs::read_dir(staging.dir())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == STAGED_EXTENSION))
+            .expect("the staged copy");
+        // No user, root included, can remove_file a directory.
+        std::fs::remove_file(&local).expect("remove the copy");
+        std::fs::create_dir(&local).expect("a directory in its place");
+        std::fs::write(local.join("pin"), b"").expect("pin the directory");
+
+        upload.discard().await;
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 5);
+        assert_eq!(staging.retry_removals().await, 1, "still a directory");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 5);
+
+        std::fs::remove_dir_all(&local).expect("clear the directory");
+        std::fs::write(&local, b"held\n").expect("the copy back");
+        assert_eq!(staging.retry_removals().await, 0);
+        assert!(!local.exists(), "the retry removed the copy");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
     }
 
     /// Leave in staging, as a process that stopped would, one complete file
