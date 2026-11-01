@@ -364,7 +364,7 @@
           "default": 8388608
         },
         "max_writers": {
-          "description": "Maximum number of concurrent archive writers (one per unique routing\ndestination). When the cap is reached, the least-recently-used writer\nis evicted and closed asynchronously. Caps file-handle use and bounds\nthe `dfe_archiver_unique_destinations` metric for expression-routed\npods on high-cardinality keys (e.g. per-org-id routing).",
+          "description": "Maximum number of archive writers open at once, one per routing\ndestination, evicted ones still closing included. At the cap the\nleast recently used writer is evicted and closed in the background,\nand a write for a new destination waits for that close. Caps file\nhandles and bounds `dfe_archiver_unique_destinations` on\nhigh-cardinality keys such as per-org routing.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,

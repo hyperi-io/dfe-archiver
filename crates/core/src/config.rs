@@ -411,11 +411,12 @@ pub struct ArchiveConfig {
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
     pub multipart_chunk_size: usize,
 
-    /// Maximum number of concurrent archive writers (one per unique routing
-    /// destination). When the cap is reached, the least-recently-used writer
-    /// is evicted and closed asynchronously. Caps file-handle use and bounds
-    /// the `dfe_archiver_unique_destinations` metric for expression-routed
-    /// pods on high-cardinality keys (e.g. per-org-id routing).
+    /// Maximum number of archive writers open at once, one per routing
+    /// destination, evicted ones still closing included. At the cap the
+    /// least recently used writer is evicted and closed in the background,
+    /// and a write for a new destination waits for that close. Caps file
+    /// handles and bounds `dfe_archiver_unique_destinations` on
+    /// high-cardinality keys such as per-org routing.
     pub max_writers: usize,
 
     /// S3-specific configuration

@@ -27,6 +27,7 @@
 
 use crate::config::{Config, SharedConfig};
 use crate::metrics::{ArchiverMetrics, DropReason, QuarantineReason, RemovalReason};
+use crate::writers::{Closing, Lookup, SharedWriter, WriterCache};
 use dfe_archiver_core::archive::{ArchiveWriter, FlushStats, PendingFile, RollingPolicy, Settled};
 use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
@@ -36,7 +37,6 @@ use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::{BackendFactory, ReceivedBatch, SourceTransport, Staging};
-use lru::LruCache;
 use rayon::prelude::*;
 use scalo::dlq::{Dlq, DlqEntry, DlqSource};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
@@ -48,12 +48,11 @@ use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{DeadLetterReason, DeliveryStatus, KafkaToken, SinkConfirmation};
 use scalo::{AckHeldSource, SelfRegulationGovernor};
 use std::hash::BuildHasher;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -537,12 +536,10 @@ pub struct Archiver {
     router: Router,
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
-    /// Active archive writers per destination, capped LRU cache.
-    /// On overflow the least-recently-used writer is evicted and closed in
-    /// a spawned task. Each writer has its own `tokio::Mutex` for
-    /// independent async I/O -- the outer `parking_lot::Mutex` only guards
-    /// map ops (lookup / insert / evict-pop), which are O(1).
-    writers: parking_lot::Mutex<LruCache<String, Arc<Mutex<ArchiveWriter>>>>,
+    /// Open archive writers per destination, at most `archive.max_writers`
+    /// counting the evicted ones still closing. Each writer has its own
+    /// `tokio::Mutex`, so destinations never contend.
+    writers: Arc<WriterCache>,
     /// Closes of LRU-evicted writers, each returning what its file settled.
     /// Collected every cycle and awaited at drain, so an evicted file's
     /// offsets are released once it completes and never before.
@@ -1050,15 +1047,13 @@ impl Archiver {
             "Archiver initialized"
         );
 
-        // Writer LRU cache -- clamp to at least 1 to satisfy NonZeroUsize.
-        let writer_cap = NonZeroUsize::new(config.archive.max_writers).unwrap_or(NonZeroUsize::MIN);
-
         let routing_fallback_guards = router
             .expression_fields()
             .iter()
             .map(|_| AtomicU64::new(0))
             .collect();
 
+        let writers = Arc::new(WriterCache::new(config.archive.max_writers));
         let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
         let backends = BackendFactory::new(&config.archive, &staging)?;
         let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
@@ -1087,7 +1082,7 @@ impl Archiver {
             router,
             buffer,
             metrics,
-            writers: parking_lot::Mutex::new(LruCache::new(writer_cap)),
+            writers,
             evictions: parking_lot::Mutex::new(JoinSet::new()),
             staging,
             backends,
@@ -1701,8 +1696,7 @@ impl Archiver {
             self.staging.bytes().load(Ordering::Relaxed),
         );
 
-        let writer_count = self.writers.lock().len();
-        self.metrics.set_unique_destinations(writer_count);
+        self.metrics.set_unique_destinations(self.writers.len());
 
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
@@ -1720,31 +1714,23 @@ impl Archiver {
 
     /// The destination's writer, created on first use.
     ///
-    /// The LRU lock guards only the map ops (O(1)), and the write happens on
-    /// the writer's own Mutex. If an insertion overflows the cap, the oldest
-    /// writer is evicted and closed in the background.
-    fn writer_for(&self, destination: &str) -> Result<Arc<Mutex<ArchiveWriter>>> {
-        let (writer, evicted) = {
-            let mut cache = self.writers.lock();
-            if let Some(w) = cache.get(destination) {
-                (Arc::clone(w), None)
-            } else {
+    /// With `archive.max_writers` open or closing, the least recently used
+    /// writer is evicted and closed in the background, and a new one waits
+    /// for that close to finish.
+    async fn writer_for(&self, destination: &str) -> Result<SharedWriter> {
+        let lookup = self
+            .writers
+            .lookup(destination, |evicted, writer, slot| {
+                self.spawn_evicted_writer_close(evicted, writer, slot);
+            })
+            .await;
+        match lookup {
+            Lookup::Open(writer) => Ok(writer),
+            Lookup::Vacant(slot) => {
                 debug!(destination, "Creating new archive writer");
-                let writer = Arc::new(Mutex::new(self.create_writer(destination)?));
-                let evicted = cache.push(destination.to_string(), Arc::clone(&writer));
-                // `push` only returns Some when the inserted key REPLACED an
-                // existing key, OR when capacity overflowed. The replacement
-                // case is impossible here because we just confirmed the key
-                // wasn't present.
-                let overflow = evicted.filter(|(k, _)| k != destination);
-                (writer, overflow)
+                Ok(slot.fill(destination, self.create_writer(destination)?))
             }
-        };
-
-        if let Some((evicted_key, evicted_writer)) = evicted {
-            self.spawn_evicted_writer_close(evicted_key, evicted_writer);
         }
-        Ok(writer)
     }
 
     /// Decide what a failed write of `destination`'s batch does next: `None` to
@@ -1833,7 +1819,7 @@ impl Archiver {
         let mut retry = WriteRetry::default();
         let mut settled = Settled::default();
         let outcome = loop {
-            let writer_arc = match self.writer_for(batch.destination.as_str()) {
+            let writer_arc = match self.writer_for(batch.destination.as_str()).await {
                 Ok(writer) => writer,
                 Err(e) => match self
                     .after_write_failure(&mut retry, batch.destination.as_str(), e, &mut settled)
@@ -1967,13 +1953,7 @@ impl Archiver {
     async fn close_aged_writers(&self, busy: Busy) -> Settled {
         // The parking_lot lock guards the map only, so the writers are
         // snapshotted and it is released before awaiting any writer's mutex.
-        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
-            let cache = self.writers.lock();
-            cache
-                .iter()
-                .map(|(dest, writer)| (dest.clone(), Arc::clone(writer)))
-                .collect()
-        };
+        let writers = self.writers.snapshot();
 
         let mut settled = Settled::default();
         for (dest, writer_arc) in writers {
@@ -2009,8 +1989,8 @@ impl Archiver {
         settled
     }
 
-    /// Close an LRU-evicted writer in the background so it never blocks the
-    /// hot path. The task returns what the file settled, which
+    /// Close an LRU-evicted writer in the background, holding its `slot`
+    /// until the close finishes. The task returns what the file settled, which
     /// [`collect_evictions`](Self::collect_evictions) and
     /// [`await_evictions`](Self::await_evictions) release. The writer's own
     /// Mutex is held during close, and a write to the same destination
@@ -2019,7 +1999,8 @@ impl Archiver {
     fn spawn_evicted_writer_close(
         &self,
         destination: String,
-        writer_arc: Arc<Mutex<ArchiveWriter>>,
+        writer_arc: SharedWriter,
+        slot: Closing,
     ) {
         let metrics = Arc::clone(&self.metrics);
         debug!(destination = %destination, "Evicting LRU archive writer");
@@ -2045,7 +2026,10 @@ impl Archiver {
                     metrics.record_error();
                 }
             }
-            writer.take_settled()
+            let settled = writer.take_settled();
+            drop(writer);
+            drop(slot);
+            settled
         });
     }
 
@@ -2177,14 +2161,7 @@ impl Archiver {
 
     /// Complete every open file, concurrently, and return what they settled.
     async fn close_all_writers(&self) -> Settled {
-        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
-            let mut cache = self.writers.lock();
-            let mut all = Vec::with_capacity(cache.len());
-            while let Some(entry) = cache.pop_lru() {
-                all.push(entry);
-            }
-            all
-        };
+        let writers = self.writers.take_all();
         debug!(writer_count = writers.len(), "Closing archive writers");
 
         let closed = futures::future::join_all(writers.into_iter().map(|(dest, writer_arc)| {

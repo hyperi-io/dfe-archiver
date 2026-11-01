@@ -252,7 +252,7 @@ Nothing spills to disk ahead of the writers. The only files on local disk are th
 
 ### Archive writers
 
-One writer per destination, up to `archive.max_writers` (1024). Past it the least recently used writer is closed in the background, and its file completes as on a roll. A writer holds no write buffer between flushes: 1024 writers that have each flushed once held 1.2 MB between them, measured with jemalloc, where a 1 MiB buffer kept per writer held 1 GiB.
+One writer per destination, up to `archive.max_writers` (1024). Past it the least recently used writer is closed in the background, and its file completes as on a roll. A writer still closing keeps its place under the cap, so a write for a new destination waits for that close. A writer holds no write buffer between flushes: 1024 writers that have each flushed once held 1.2 MB between them, measured with jemalloc, where a 1 MiB buffer kept per writer held 1 GiB.
 
 ### Buffer Configuration
 

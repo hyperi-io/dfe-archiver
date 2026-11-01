@@ -32,6 +32,7 @@ mod archiver;
 pub mod config;
 pub mod contract;
 pub mod metrics;
+mod writers;
 
 pub use archiver::{Archiver, restart_required_changes};
 
