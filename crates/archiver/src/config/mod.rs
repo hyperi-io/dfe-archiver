@@ -9,6 +9,6 @@
 mod loader;
 
 pub use dfe_archiver_core::config::*;
-pub use loader::{load_config, validate_config};
+pub use loader::{config_file, load_config, validate_config};
 pub use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 pub use scalo::config::shared::SharedConfig;

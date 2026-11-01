@@ -65,7 +65,9 @@ pub struct Config {
     /// Compression configuration
     pub compression: CompressionConfig,
 
-    /// Dead letter queue configuration
+    /// Dead letter queue configuration. A field a `dlq:` block leaves out
+    /// keeps the archiver's default.
+    #[serde(deserialize_with = "dlq_over_archiver_defaults")]
     pub dlq: DlqConfig,
 }
 
@@ -79,20 +81,55 @@ impl Default for Config {
             buffer: BufferConfig::default(),
             routing: RoutingConfig::default(),
             compression: CompressionConfig::default(),
-            // Fleet DLQ standard defaults: fixed per-app topic, routing=common,
-            // and the fleet's spool path rather than scalo's /var/spool/scalo/dlq.
-            // Archiver entry destinations are archive PATHS (slashes), so
-            // scalo's per-table default would build invalid topic names.
-            // Applies when the config file has no `dlq:` key; a partial `dlq:`
-            // block reverts nested fields to scalo's own defaults.
-            dlq: {
-                let mut dlq = DlqConfig::default();
-                dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
-                dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
-                dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
-                dlq
-            },
+            dlq: archiver_dlq_defaults(),
         }
+    }
+}
+
+/// The fleet DLQ standard: a fixed per-app topic, the fleet's spool path, and
+/// whole payloads. Archiver destinations are archive paths with slashes, so
+/// scalo's per-table routing would build invalid topic names.
+fn archiver_dlq_defaults() -> DlqConfig {
+    let mut dlq = DlqConfig::default();
+    dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
+    dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
+    dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
+    // A committed dead letter's cut tail is lost, so keep it whole.
+    dlq.max_payload_bytes = None;
+    dlq
+}
+
+/// Read a `dlq:` block over [`archiver_dlq_defaults`], so a field it leaves
+/// out keeps the archiver's value rather than scalo's.
+fn dlq_over_archiver_defaults<'de, D>(deserializer: D) -> Result<DlqConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let set = serde_json::Value::deserialize(deserializer)?;
+    if set.is_null() {
+        return Ok(archiver_dlq_defaults());
+    }
+    let mut merged = serde_json::to_value(archiver_dlq_defaults()).map_err(D::Error::custom)?;
+    overlay(&mut merged, set);
+    serde_json::from_value(merged).map_err(D::Error::custom)
+}
+
+/// Write `set` over `base`, merging objects key by key.
+fn overlay(base: &mut serde_json::Value, set: serde_json::Value) {
+    use serde_json::Value;
+    match (base, set) {
+        (Value::Object(base), Value::Object(set)) => {
+            for (key, value) in set {
+                match base.get_mut(&key) {
+                    Some(slot) => overlay(slot, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, set) => *base = set,
     }
 }
 
@@ -374,11 +411,12 @@ pub struct ArchiveConfig {
     /// Multipart upload chunk size in bytes (min 5MB for S3 compatibility)
     pub multipart_chunk_size: usize,
 
-    /// Maximum number of concurrent archive writers (one per unique routing
-    /// destination). When the cap is reached, the least-recently-used writer
-    /// is evicted and closed asynchronously. Caps file-handle use and bounds
-    /// the `dfe_archiver_unique_destinations` metric for expression-routed
-    /// pods on high-cardinality keys (e.g. per-org-id routing).
+    /// Maximum number of archive writers open at once, one per routing
+    /// destination, evicted ones still closing included. At the cap the
+    /// least recently used writer is evicted and closed in the background,
+    /// and a write for a new destination waits for that close. Caps file
+    /// handles and bounds `dfe_archiver_unique_destinations` on
+    /// high-cardinality keys such as per-org routing.
     pub max_writers: usize,
 
     /// S3-specific configuration
@@ -435,8 +473,9 @@ impl Default for ArchiveConfig {
     }
 }
 
-/// S3 configuration
+/// S3 configuration. A section with no `bucket` takes the destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct S3Config {
     pub region: Option<String>,
     pub endpoint: Option<String>,
@@ -444,12 +483,12 @@ pub struct S3Config {
     pub secret_access_key: Option<SensitiveString>,
     pub bucket: String,
     /// Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS required).
-    #[serde(default)]
     pub allow_http: bool,
 }
 
-/// GCS configuration
+/// GCS configuration. A section with no `bucket` takes the destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct GcsConfig {
     pub project_id: Option<String>,
     pub service_account_key: Option<SensitiveString>,
@@ -457,8 +496,10 @@ pub struct GcsConfig {
     pub bucket: String,
 }
 
-/// Azure Blob configuration
+/// Azure Blob configuration. A section with no `container` takes the
+/// destination URL's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
 pub struct AzureConfig {
     pub account_name: String,
     pub account_key: Option<SensitiveString>,

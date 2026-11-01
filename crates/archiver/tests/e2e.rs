@@ -30,6 +30,8 @@ mod container_hygiene;
 mod gcs;
 #[path = "e2e/kafka.rs"]
 mod kafka;
+#[path = "e2e/kafka_tls.rs"]
+mod kafka_tls;
 #[path = "e2e/minio.rs"]
 mod minio;
 #[path = "e2e/pipeline.rs"]

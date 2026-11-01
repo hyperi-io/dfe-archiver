@@ -807,6 +807,11 @@ fn direct_to_file(dir: &Path) -> Config {
 
 /// Push `ids` to the listener `config` binds, retrying each until it is answered.
 async fn push_all(config: &Config, ids: std::ops::Range<u64>) {
+    push_to(config, "traffic", ids).await;
+}
+
+/// [`push_all`], routed to `key`.
+async fn push_to(config: &Config, key: &str, ids: std::ops::Range<u64>) {
     let listen = config.grpc.listen.clone().expect("listen address");
     let sender = GrpcTransport::new(&GrpcConfig {
         endpoint: Some(format!("http://{listen}")),
@@ -816,10 +821,7 @@ async fn push_all(config: &Config, ids: std::ops::Range<u64>) {
     .expect("sender");
     for id in ids {
         let deadline = Instant::now() + Duration::from_secs(45);
-        while !matches!(
-            sender.send("traffic", record(id).into()).await,
-            SendResult::Ok
-        ) {
+        while !matches!(sender.send(key, record(id).into()).await, SendResult::Ok) {
             assert!(Instant::now() < deadline, "the listener never took a push");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1260,6 +1262,205 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
         vec![0, 2],
         "only the pushes the listener answered are archived"
     );
+}
+
+/// The signal a write past `RLIMIT_FSIZE` raises on Linux, which kills the
+/// process unless it is caught.
+const SIGXFSZ: i32 = 25;
+
+/// The error a write past `RLIMIT_FSIZE` fails with once `SIGXFSZ` is caught.
+const EFBIG: i32 = 27;
+
+/// Set on the child process [`in_child_process`] runs a test in.
+const CHILD_ENV: &str = "DFE_ARCHIVER_TEST_IN_CHILD";
+
+/// Run the test `name` of this module again in a child process of its own,
+/// so a process-wide file-size cap reaches no other test, under nextest or
+/// `cargo test` alike. `true` in the parent, once the child passed.
+async fn in_child_process(name: &str) -> bool {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return false;
+    }
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let test = format!("{module}::{name}");
+    let output = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .output()
+        .await
+        .expect("run the test in a child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    print!("{stdout}");
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{test} did not pass in its child process"
+    );
+    true
+}
+
+/// `prlimit` on this process with `args`, its output on success.
+fn prlimit(args: &[&str]) -> String {
+    let output = std::process::Command::new("prlimit")
+        .arg(format!("--pid={}", std::process::id()))
+        .args(args)
+        .output()
+        .expect("run prlimit, from util-linux");
+    assert!(
+        output.status.success(),
+        "prlimit {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A file-size cap on this process: an append past it fails, as an append to
+/// a full disk does, and root is held to it like any other user. Dropping it
+/// restores the cap it replaced.
+struct FileSizeCap {
+    restore: String,
+    _caught: tokio::signal::unix::Signal,
+}
+
+impl FileSizeCap {
+    /// Cap files at `bytes`, failing unless a write into `dir` past it is refused.
+    fn set(bytes: usize, dir: &Path) -> Self {
+        let caught =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(SIGXFSZ))
+                .expect("catch SIGXFSZ");
+        let restore = prlimit(&["--fsize", "--noheadings", "--raw", "--output=SOFT"])
+            .trim()
+            .to_string();
+        prlimit(&[&format!("--fsize={bytes}:")]);
+        let cap = Self {
+            restore,
+            _caught: caught,
+        };
+        let probe = dir.join("cap-probe");
+        let written = std::fs::write(&probe, vec![0u8; 2 * bytes]);
+        let _ = std::fs::remove_file(&probe);
+        assert_eq!(
+            written.err().and_then(|e| e.raw_os_error()),
+            Some(EFBIG),
+            "a write past the {bytes}-byte cap was not refused"
+        );
+        cap
+    }
+}
+
+impl Drop for FileSizeCap {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("prlimit")
+            .arg(format!("--pid={}", std::process::id()))
+            .arg(format!("--fsize={}:", self.restore))
+            .status();
+    }
+}
+
+/// Bytes in the staged files under `spool`.
+fn staged_bytes(spool: &Path) -> u64 {
+    std::fs::read_dir(spool.join("uploads")).map_or(0, |entries| {
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .filter(std::fs::Metadata::is_file)
+            .map(|meta| meta.len())
+            .sum()
+    })
+}
+
+/// The direct transport into the store, flushing each destination's buffer
+/// every five records, with the age timer far past the test.
+fn direct_to_store(store: &S3StoreFixture, spool: &Path) -> Config {
+    let mut config = archive_to(store, spool);
+    config.transport = TRANSPORT_GRPC.to_string();
+    config.grpc.listen = Some(format!("127.0.0.1:{}", common::free_low_port(&[])));
+    config.buffer.flush_records = 5;
+    config.buffer.flush_age_secs = 60;
+    config
+}
+
+/// A write held for a staging disk that frees only once the store takes a
+/// file: the first five records leave a file open, a file-size cap then
+/// refuses every append, `stall` starts the held write, and the cap lifts once
+/// an object lands. Every record is archived once.
+async fn a_held_write_frees_its_own_disk(
+    test: &str,
+    configure: impl FnOnce(&mut Config),
+    stall: (&str, std::ops::Range<u64>),
+) {
+    init_logs();
+    let Some(store) = common::acquire_s3_store(test).await else {
+        return;
+    };
+    store.create_bucket(BUCKET).await;
+    let spool = tempfile::TempDir::new().expect("spool");
+    let mut config = direct_to_store(&store, spool.path());
+    configure(&mut config);
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    push_to(&config, "open", 0..5).await;
+    wait_until("the first file holds its records", || async {
+        staged_bytes(spool.path()) > 0
+    })
+    .await;
+    // Above a staged manifest, below one flush of five records.
+    let cap = FileSizeCap::set(4096, &spool.path().join("uploads"));
+    let (key, stalled) = stall;
+    push_to(&config, key, stalled.clone()).await;
+    wait_until("the held write failed", || async {
+        counter(&manager, "archive_errors_total") >= 1
+    })
+    .await;
+    wait_until(
+        "a file reached the store while the write waited",
+        || async { !store.keys(BUCKET).await.is_empty() },
+    )
+    .await;
+    drop(cap);
+    stop(&archiver, running).await;
+
+    assert_eq!(
+        ids(&store.lines(BUCKET).await),
+        (0..stalled.end).collect::<Vec<_>>(),
+        "every record lands once"
+    );
+}
+
+/// A write that rolls a file and then cannot stage the next one uploads the
+/// rolled file while it waits, because that upload is what frees the disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_waiting_for_disk_uploads_the_file_it_rolled() {
+    if in_child_process("a_write_waiting_for_disk_uploads_the_file_it_rolled").await {
+        return;
+    }
+    a_held_write_frees_its_own_disk(
+        "held_write_rolled",
+        |config| config.archive.roll_size_bytes = 1,
+        ("open", 5..10),
+    )
+    .await;
+}
+
+/// While one destination's write waits for disk, another destination's file
+/// still closes at its roll interval and uploads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_waiting_for_disk_lets_an_aged_file_close_and_upload() {
+    if in_child_process("a_write_waiting_for_disk_lets_an_aged_file_close_and_upload").await {
+        return;
+    }
+    a_held_write_frees_its_own_disk(
+        "held_write_aged",
+        |config| config.archive.roll_interval_secs = Some(2),
+        ("stalled", 5..10),
+    )
+    .await;
 }
 
 /// On the direct transport nothing delivers a stopped process's records

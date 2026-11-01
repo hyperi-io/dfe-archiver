@@ -99,6 +99,14 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     Ok(config)
 }
 
+/// The config file [`load_config`] reads for `config_path`, which the
+/// reloader watches: `--config`, then `ARCHIVER_CONFIG`, then the first
+/// default location that exists.
+#[must_use]
+pub fn config_file(config_path: Option<&str>) -> Option<String> {
+    config_source(config_path).map(|(path, _)| path)
+}
+
 /// The config file to load and what named it: `--config`, then
 /// `ARCHIVER_CONFIG`, then the first of [`DEFAULT_CONFIG_PATHS`] that exists.
 fn config_source(config_path: Option<&str>) -> Option<(String, &'static str)> {
@@ -206,6 +214,8 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ));
     }
 
+    require_gcs_key_json(config)?;
+
     let valid_codecs = ["none", "zstd", "lz4", "snappy", "gzip"];
     if !valid_codecs.contains(&config.compression.codec.as_str()) {
         return Err(Error::Config(format!(
@@ -239,6 +249,8 @@ pub fn validate_config(config: &Config) -> Result<()> {
                 .to_string(),
         ));
     }
+
+    require_dlq_topic_names(config)?;
 
     Ok(())
 }
@@ -277,8 +289,49 @@ fn require_counts(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a `gcs.service_account_key` that is not JSON: the GCS client parses
+/// it as the key itself, so a path there fails every client build and leaves
+/// the writes retrying.
+fn require_gcs_key_json(config: &Config) -> Result<()> {
+    let key = config
+        .archive
+        .gcs
+        .as_ref()
+        .and_then(|gcs| gcs.service_account_key.as_ref());
+    if key.is_some_and(|key| !key.expose().trim_start().starts_with('{')) {
+        return Err(Error::Config(
+            "archive.gcs.service_account_key holds the service account key's JSON itself, \
+             and a path to the key file goes in archive.gcs.credentials_path"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse per-table DLQ routing under expression routing: it names each DLQ
+/// topic after the record's destination, whose segments are joined with `/`,
+/// which no Kafka topic name can hold, so every dead letter fails delivery.
+fn require_dlq_topic_names(config: &Config) -> Result<()> {
+    let dlq = &config.dlq;
+    if !config.is_direct()
+        && config.routing.mode == "expression"
+        && dlq.enabled
+        && dlq.kafka.enabled
+        && dlq.mode != scalo::dlq::DlqMode::FileOnly
+        && dlq.kafka.routing == scalo::dlq::DlqRouting::PerTable
+    {
+        return Err(Error::Config(
+            "dlq.kafka.routing: per_table names a topic after each archive destination, \
+             and expression routing puts a '/' in every one, which no Kafka topic can hold \
+             (use dlq.kafka.routing: common)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -288,6 +341,28 @@ mod tests {
         config.kafka.brokers = vec!["localhost:9092".to_string()];
 
         validate_config(&config).expect("default config should be valid");
+    }
+
+    /// The file the reloader watches is the one `load_config` read, whichever
+    /// of `--config`, `ARCHIVER_CONFIG` or a default location named it.
+    #[test]
+    fn the_watched_config_file_is_the_one_loaded() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let named = dir.path().join("named.yaml").display().to_string();
+        let cases = [
+            (Some("cli.yaml"), None, Some("cli.yaml")),
+            (Some("cli.yaml"), Some(named.as_str()), Some("cli.yaml")),
+            (None, Some(named.as_str()), Some(named.as_str())),
+            (None, None, None),
+        ];
+        for (cli, env, want) in cases {
+            let watched = temp_env::with_var("ARCHIVER_CONFIG", env, || config_file(cli));
+            assert_eq!(
+                watched.as_deref(),
+                want,
+                "--config {cli:?}, ARCHIVER_CONFIG {env:?}"
+            );
+        }
     }
 
     /// A key the archiver no longer reads is ignored, so a config file that
@@ -320,24 +395,83 @@ mod tests {
         );
     }
 
-    /// A config file with no `dlq:` key takes the archiver's DLQ defaults, not
-    /// scalo's `/var/spool/scalo/dlq` and per-table routing.
+    /// A config file takes the archiver's DLQ defaults for every `dlq` field it
+    /// leaves out, not scalo's `/var/spool/scalo/dlq`, per-table routing and
+    /// 512 KiB payload cap, whether it has no `dlq:` key or a partial one.
     #[test]
-    fn a_config_file_without_a_dlq_key_gets_the_archiver_dlq_defaults() {
+    fn a_config_file_gets_the_archiver_dlq_defaults_it_does_not_set() {
+        use scalo::dlq::DlqMode;
+        let cases = [
+            ("", DlqMode::Cascade, 5000),
+            ("dlq:\n  mode: kafka_only\n", DlqMode::KafkaOnly, 5000),
+            (
+                "dlq:\n  kafka:\n    send_timeout_ms: 1000\n",
+                DlqMode::Cascade,
+                1000,
+            ),
+        ];
         let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "kafka:\n  brokers: [\"localhost:9092\"]\n").expect("write config");
+        for (dlq, mode, send_timeout_ms) in cases {
+            std::fs::write(
+                &path,
+                format!("kafka:\n  brokers: [\"localhost:9092\"]\n{dlq}"),
+            )
+            .expect("write config");
 
-        let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
-        assert_eq!(
-            config.dlq.file.path,
-            std::path::PathBuf::from("/var/spool/dfe/dlq")
-        );
-        assert_eq!(config.dlq.kafka.routing, scalo::dlq::DlqRouting::Common);
-        assert_eq!(
-            config.dlq.kafka.common_topic.as_deref(),
-            Some("dfe_archiver_dlq")
-        );
+            let config = load_from_file(path.to_str().expect("utf-8 path")).expect("config loads");
+            let dlq_config = &config.dlq;
+            assert_eq!(dlq_config.mode, mode, "{dlq:?}");
+            assert_eq!(dlq_config.kafka.send_timeout_ms, send_timeout_ms, "{dlq:?}");
+            assert_eq!(
+                dlq_config.file.path,
+                std::path::PathBuf::from("/var/spool/dfe/dlq"),
+                "{dlq:?}"
+            );
+            assert_eq!(
+                dlq_config.kafka.routing,
+                scalo::dlq::DlqRouting::Common,
+                "{dlq:?}"
+            );
+            assert_eq!(
+                dlq_config.kafka.common_topic.as_deref(),
+                Some("dfe_archiver_dlq"),
+                "{dlq:?}"
+            );
+            assert_eq!(dlq_config.max_payload_bytes, None, "{dlq:?}");
+        }
+    }
+
+    /// Per-table DLQ routing names a Kafka topic after each destination, and
+    /// expression routing puts a `/` in every one, which no topic name holds.
+    #[test]
+    fn per_table_dlq_routing_is_refused_where_destinations_hold_a_slash() {
+        use scalo::dlq::{DlqMode as M, DlqRouting as R};
+        let cases = [
+            ("expression", R::PerTable, M::Cascade, true, false),
+            ("expression", R::PerTable, M::KafkaOnly, true, false),
+            ("expression", R::PerTable, M::FanOut, true, false),
+            ("expression", R::PerTable, M::FileOnly, true, true),
+            ("expression", R::PerTable, M::Cascade, false, true),
+            ("expression", R::Common, M::Cascade, true, true),
+            ("topic", R::PerTable, M::Cascade, true, true),
+        ];
+        for (routing_mode, routing, mode, enabled, valid) in cases {
+            let mut config = Config::default();
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            config.routing.mode = routing_mode.to_string();
+            config.dlq.kafka.routing = routing;
+            config.dlq.mode = mode;
+            config.dlq.enabled = enabled;
+            let case = format!("{routing_mode} {routing:?} {mode:?} enabled={enabled}");
+            match validate_config(&config) {
+                Ok(()) => assert!(valid, "{case}: accepted"),
+                Err(e) => {
+                    assert!(!valid, "{case}: {e}");
+                    assert!(e.to_string().contains("dlq.kafka.routing"), "{case}: {e}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -796,6 +930,60 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(at_the_line.long_held_roll_interval(), None);
+    }
+
+    /// `service_account_key` reaches the GCS client as the key's JSON, so a
+    /// path there fails every client build, and every write with it.
+    #[test]
+    fn a_gcs_service_account_key_is_json_and_a_path_is_refused() {
+        use dfe_archiver_core::config::GcsConfig;
+        use dfe_archiver_core::config::sensitive::SensitiveString;
+        let cases = [
+            (r#"{"type":"service_account"}"#, true),
+            ("  {\n  \"type\": \"service_account\"\n}", true),
+            ("/path/to/key.json", false),
+            ("", false),
+        ];
+        for (key, valid) in cases {
+            let mut config = Config::default();
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            config.archive.gcs = Some(GcsConfig {
+                service_account_key: Some(SensitiveString::from(key)),
+                ..GcsConfig::default()
+            });
+            let result = validate_config(&config);
+            if valid {
+                result.unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            } else {
+                let err = result.expect_err(key).to_string();
+                assert!(err.contains("credentials_path"), "{key:?}: {err}");
+            }
+        }
+    }
+
+    /// Every YAML example under the README's storage backends loads and
+    /// validates as written, so an operator who copies one gets a config the
+    /// archiver accepts.
+    #[test]
+    fn the_readme_storage_examples_are_valid_configs() {
+        let readme = include_str!("../../../../README.md");
+        let section = readme
+            .split_once("## Storage Backends")
+            .and_then(|(_, rest)| rest.split("\n## ").next())
+            .expect("a Storage Backends section");
+        let examples: Vec<&str> = section
+            .split("```yaml\n")
+            .skip(1)
+            .filter_map(|block| block.split_once("```").map(|(yaml, _)| yaml))
+            .collect();
+        assert!(examples.len() >= 4, "{examples:?}");
+        for yaml in examples {
+            let mut config: Config =
+                scalo::yaml::from_str(yaml, "README.md", scalo::yaml::Profile::Config)
+                    .unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            config.kafka.brokers = vec!["localhost:9092".to_string()];
+            validate_config(&config).unwrap_or_else(|e| panic!("{yaml}: {e}"));
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@
 
 use crate::config::{Config, SharedConfig};
 use crate::metrics::{ArchiverMetrics, DropReason, QuarantineReason, RemovalReason};
+use crate::writers::{Closing, Lookup, SharedWriter, WriterCache};
 use dfe_archiver_core::archive::{ArchiveWriter, FlushStats, PendingFile, RollingPolicy, Settled};
 use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
@@ -35,9 +36,7 @@ use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
-use dfe_archiver_io::storage::create_backend;
-use dfe_archiver_io::{ReceivedBatch, SourceTransport, Staging};
-use lru::LruCache;
+use dfe_archiver_io::{BackendFactory, ReceivedBatch, SourceTransport, Staging};
 use rayon::prelude::*;
 use scalo::dlq::{Dlq, DlqEntry, DlqSource};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
@@ -49,12 +48,11 @@ use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{DeadLetterReason, DeliveryStatus, KafkaToken, SinkConfirmation};
 use scalo::{AckHeldSource, SelfRegulationGovernor};
 use std::hash::BuildHasher;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -499,6 +497,15 @@ enum Written {
     Withheld(StagedBatch, Error),
 }
 
+/// What closing aged files does with a writer a write holds.
+#[derive(Clone, Copy)]
+enum Busy {
+    /// Wait for the write to finish with it.
+    Wait,
+    /// Pass it by, as a write waiting for disk must: it may hold it itself.
+    Skip,
+}
+
 /// Why a failing write stopped retrying.
 enum WriteStop {
     /// Refused for good: retrying the same records gets the same answer.
@@ -529,18 +536,18 @@ pub struct Archiver {
     router: Router,
     buffer: TieredBufferManager,
     metrics: Arc<ArchiverMetrics>,
-    /// Active archive writers per destination, capped LRU cache.
-    /// On overflow the least-recently-used writer is evicted and closed in
-    /// a spawned task. Each writer has its own `tokio::Mutex` for
-    /// independent async I/O -- the outer `parking_lot::Mutex` only guards
-    /// map ops (lookup / insert / evict-pop), which are O(1).
-    writers: parking_lot::Mutex<LruCache<String, Arc<Mutex<ArchiveWriter>>>>,
+    /// Open archive writers per destination, at most `archive.max_writers`
+    /// counting the evicted ones still closing. Each writer has its own
+    /// `tokio::Mutex`, so destinations never contend.
+    writers: Arc<WriterCache>,
     /// Closes of LRU-evicted writers, each returning what its file settled.
     /// Collected every cycle and awaited at drain, so an evicted file's
     /// offsets are released once it completes and never before.
     evictions: parking_lot::Mutex<JoinSet<Settled>>,
     /// Local disk where object-store files wait for their upload.
     staging: Staging,
+    /// The destination's backends, every writer's on the one store client.
+    backends: BackendFactory,
     /// Uploads of staged files, each returning what its file settled.
     /// Collected every cycle and waited on, with a limit, at drain.
     uploads: parking_lot::Mutex<JoinSet<Settled>>,
@@ -795,7 +802,7 @@ fn record_dead_letters(
 /// What a completed archive file proves: a completion the object store
 /// answered, or a file written on this node.
 ///
-/// Decided by the destination scheme, as `create_backend` decides the backend.
+/// Decided by the destination scheme, as `BackendFactory::new` decides the backend.
 fn sink_confirmation(archive: &ArchiveConfig) -> SinkConfirmation {
     let destination = archive.destination.as_str();
     if destination.starts_with("file://") || !destination.contains("://") {
@@ -903,7 +910,7 @@ fn recover_staging(
 /// backend of this destination. A file no backend of it can take is
 /// quarantined.
 fn adopt_recovered(
-    archive: &ArchiveConfig,
+    backends: &BackendFactory,
     staging: &Staging,
     files: Vec<RecoveredFile>,
     metrics: &ArchiverMetrics,
@@ -911,14 +918,10 @@ fn adopt_recovered(
     if files.is_empty() {
         return Vec::new();
     }
-    let backend = create_backend(archive, staging);
+    let backend = backends.backend();
     let mut uploads = Vec::with_capacity(files.len());
     for file in files {
-        let adopted = match &backend {
-            Ok(backend) => backend.adopt(file),
-            Err(_) => Err(file),
-        };
-        match adopted {
+        match backend.adopt(file) {
             Ok(upload) => {
                 // The routed destination is not recorded, so the path stands in for a dead letter.
                 let destination = upload.path().to_string();
@@ -996,7 +999,7 @@ impl Archiver {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transport, the hot buffers, the dead-letter queue or the staging directory cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
+    /// Returns an error when the transport, the hot buffers, the dead-letter queue, the staging directory or the destination's store client cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -1025,9 +1028,10 @@ impl Archiver {
         // `scaling` cascade section (`ARCHIVER_SCALING__*`), not from this
         // file's config. `None` only when the `scaling` feature is compiled
         // out, where a standalone engine keeps the components registered.
+        // `run_app` has already refused a `scaling` section that does not parse.
         let scaling = scaling.unwrap_or_else(|| {
             Arc::new(ScalingPressure::new(
-                scalo::scaling::ScalingPressureConfig::from_cascade(),
+                scalo::scaling::ScalingPressureConfig::from_cascade().unwrap_or_default(),
                 crate::scaling_components(),
             ))
         });
@@ -1044,16 +1048,15 @@ impl Archiver {
             "Archiver initialized"
         );
 
-        // Writer LRU cache -- clamp to at least 1 to satisfy NonZeroUsize.
-        let writer_cap = NonZeroUsize::new(config.archive.max_writers).unwrap_or(NonZeroUsize::MIN);
-
         let routing_fallback_guards = router
             .expression_fields()
             .iter()
             .map(|_| AtomicU64::new(0))
             .collect();
 
+        let writers = Arc::new(WriterCache::new(config.archive.max_writers));
         let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
+        let backends = BackendFactory::new(&config.archive, &staging)?;
         let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
         staging.ensure_room(MIN_FREE_SPOOL_BYTES)?;
         let held_records = Arc::new(AtomicU64::new(0));
@@ -1080,9 +1083,10 @@ impl Archiver {
             router,
             buffer,
             metrics,
-            writers: parking_lot::Mutex::new(LruCache::new(writer_cap)),
+            writers,
             evictions: parking_lot::Mutex::new(JoinSet::new()),
             staging,
+            backends,
             uploads: parking_lot::Mutex::new(JoinSet::new()),
             uploader,
             held_records,
@@ -1097,7 +1101,7 @@ impl Archiver {
             routing_fallback_guards,
         };
         let uploads = adopt_recovered(
-            &archiver.startup_config.archive,
+            &archiver.backends,
             &archiver.staging,
             recovered,
             &archiver.metrics,
@@ -1131,11 +1135,7 @@ impl Archiver {
     async fn verify_sink(&self) {
         let destination = &self.startup_config.archive.destination;
         let backend = self.startup_config.archive.backend_name();
-        let probe = match create_backend(&self.startup_config.archive, &self.staging) {
-            Ok(client) => probe_sink(client.as_ref()).await,
-            Err(e) => Err(e),
-        };
-        match probe {
+        match probe_sink(self.backends.backend().as_ref()).await {
             Ok(()) => {
                 info!(backend, destination = %destination, "Archive sink verified");
                 self.sink.set(false);
@@ -1215,10 +1215,11 @@ impl Archiver {
                     let mut settled = self.write_staged(aged).await;
                     // Runs after the aged batches so an active destination rolls
                     // through the write path, leaving only idle files here.
-                    settled.absorb(self.close_aged_writers().await);
+                    settled.absorb(self.close_aged_writers(Busy::Wait).await);
                     settled.absorb(self.collect_evictions());
                     settled.absorb(self.collect_uploads());
                     self.release_settled(settled).await;
+                    self.staging.retry_removals().await;
                 }
 
                 result = async {
@@ -1696,8 +1697,7 @@ impl Archiver {
             self.staging.bytes().load(Ordering::Relaxed),
         );
 
-        let writer_count = self.writers.lock().len();
-        self.metrics.set_unique_destinations(writer_count);
+        self.metrics.set_unique_destinations(self.writers.len());
 
         self.scaling
             .set_component("buffer_depth", stats.current_hot_buffers as f64);
@@ -1715,42 +1715,39 @@ impl Archiver {
 
     /// The destination's writer, created on first use.
     ///
-    /// The LRU lock guards only the map ops (O(1)), and the write happens on
-    /// the writer's own Mutex. If an insertion overflows the cap, the oldest
-    /// writer is evicted and closed in the background.
-    fn writer_for(&self, destination: &str) -> Result<Arc<Mutex<ArchiveWriter>>> {
-        let (writer, evicted) = {
-            let mut cache = self.writers.lock();
-            if let Some(w) = cache.get(destination) {
-                (Arc::clone(w), None)
-            } else {
+    /// With `archive.max_writers` open or closing, the least recently used
+    /// writer is evicted and closed in the background, and a new one waits
+    /// for that close to finish.
+    async fn writer_for(&self, destination: &str) -> Result<SharedWriter> {
+        let lookup = self
+            .writers
+            .lookup(destination, |evicted, writer, slot| {
+                self.spawn_evicted_writer_close(evicted, writer, slot);
+            })
+            .await;
+        match lookup {
+            Lookup::Open(writer) => Ok(writer),
+            Lookup::Vacant(slot) => {
                 debug!(destination, "Creating new archive writer");
-                let writer = Arc::new(Mutex::new(self.create_writer(destination)?));
-                let evicted = cache.push(destination.to_string(), Arc::clone(&writer));
-                // `push` only returns Some when the inserted key REPLACED an
-                // existing key, OR when capacity overflowed. The replacement
-                // case is impossible here because we just confirmed the key
-                // wasn't present.
-                let overflow = evicted.filter(|(k, _)| k != destination);
-                (writer, overflow)
+                Ok(slot.fill(destination, self.create_writer(destination)?))
             }
-        };
-
-        if let Some((evicted_key, evicted_writer)) = evicted {
-            self.spawn_evicted_writer_close(evicted_key, evicted_writer);
         }
-        Ok(writer)
     }
 
     /// Decide what a failed write of `destination`'s batch does next: `None` to
     /// write it again after a backoff, or why it stops. A failure no retry
     /// changes stops at once. Any other is retried until shutdown has waited
     /// `DRAIN_WRITE_RETRY_LIMIT` on it.
+    ///
+    /// While it waits, aged files of the writers no write holds close and
+    /// upload into `settled`, because a full staging disk frees only as the
+    /// store takes files.
     async fn after_write_failure(
         &self,
         retry: &mut WriteRetry,
         destination: &str,
         error: Error,
+        settled: &mut Settled,
     ) -> Option<WriteStop> {
         self.metrics.record_error();
         // Per backend, so the per-backend sink error counter moves.
@@ -1788,6 +1785,8 @@ impl Archiver {
                 "A local archive write failed again"
             );
         }
+        let closed = self.close_aged_writers(Busy::Skip).await;
+        settled.absorb(self.dispatch_uploads(closed));
         let wake_on_shutdown = retry.shutdown_seen.is_none();
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -1806,6 +1805,7 @@ impl Archiver {
     /// staging that cannot be created -- is retried with backoff and jitter
     /// while the batch and its offsets are held. The loop receives nothing
     /// until this returns, so nothing later is read or committed past it.
+    /// Files rolled or aged meanwhile upload at once rather than at return.
     #[instrument(skip(self, batch), fields(destination = %batch.destination, records = batch.record_count))]
     async fn write_batch(&self, mut batch: StagedBatch) -> (Written, Settled) {
         let start = Instant::now();
@@ -1820,10 +1820,10 @@ impl Archiver {
         let mut retry = WriteRetry::default();
         let mut settled = Settled::default();
         let outcome = loop {
-            let writer_arc = match self.writer_for(batch.destination.as_str()) {
+            let writer_arc = match self.writer_for(batch.destination.as_str()).await {
                 Ok(writer) => writer,
                 Err(e) => match self
-                    .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                    .after_write_failure(&mut retry, batch.destination.as_str(), e, &mut settled)
                     .await
                 {
                     Some(stop) => break Err(stop),
@@ -1852,9 +1852,15 @@ impl Archiver {
                         break Ok(flush_stats);
                     }
                     Err(e) => {
-                        settled.absorb(writer.take_settled());
+                        // A file this write rolled uploads now: a full disk waits on it.
+                        settled.absorb(self.dispatch_uploads(writer.take_settled()));
                         if let Some(stop) = self
-                            .after_write_failure(&mut retry, batch.destination.as_str(), e)
+                            .after_write_failure(
+                                &mut retry,
+                                batch.destination.as_str(),
+                                e,
+                                &mut settled,
+                            )
                             .await
                         {
                             break Err(stop);
@@ -1945,20 +1951,20 @@ impl Archiver {
     /// this a destination that stops receiving data holds its file open until
     /// shutdown, and an active one overruns the interval by however long it
     /// waits for the next batch.
-    async fn close_aged_writers(&self) -> Settled {
+    async fn close_aged_writers(&self, busy: Busy) -> Settled {
         // The parking_lot lock guards the map only, so the writers are
         // snapshotted and it is released before awaiting any writer's mutex.
-        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
-            let cache = self.writers.lock();
-            cache
-                .iter()
-                .map(|(dest, writer)| (dest.clone(), Arc::clone(writer)))
-                .collect()
-        };
+        let writers = self.writers.snapshot();
 
         let mut settled = Settled::default();
         for (dest, writer_arc) in writers {
-            let mut writer = writer_arc.lock().await;
+            let mut writer = match busy {
+                Busy::Wait => writer_arc.lock().await,
+                Busy::Skip => match writer_arc.try_lock() {
+                    Ok(writer) => writer,
+                    Err(_) => continue,
+                },
+            };
             match writer.close_if_aged().await {
                 Ok(Some(close_stats)) => {
                     debug!(
@@ -1984,8 +1990,8 @@ impl Archiver {
         settled
     }
 
-    /// Close an LRU-evicted writer in the background so it never blocks the
-    /// hot path. The task returns what the file settled, which
+    /// Close an LRU-evicted writer in the background, holding its `slot`
+    /// until the close finishes. The task returns what the file settled, which
     /// [`collect_evictions`](Self::collect_evictions) and
     /// [`await_evictions`](Self::await_evictions) release. The writer's own
     /// Mutex is held during close, and a write to the same destination
@@ -1994,7 +2000,8 @@ impl Archiver {
     fn spawn_evicted_writer_close(
         &self,
         destination: String,
-        writer_arc: Arc<Mutex<ArchiveWriter>>,
+        writer_arc: SharedWriter,
+        slot: Closing,
     ) {
         let metrics = Arc::clone(&self.metrics);
         debug!(destination = %destination, "Evicting LRU archive writer");
@@ -2020,7 +2027,10 @@ impl Archiver {
                     metrics.record_error();
                 }
             }
-            writer.take_settled()
+            let settled = writer.take_settled();
+            drop(writer);
+            drop(slot);
+            settled
         });
     }
 
@@ -2073,10 +2083,8 @@ impl Archiver {
             destination, self.startup_config.archive.path_template
         );
 
-        let storage = create_backend(&archive_config, &self.staging)?;
-
         Ok(
-            ArchiveWriter::new(archive_config, policy, compressor, storage)
+            ArchiveWriter::new(archive_config, policy, compressor, self.backends.backend())
                 .with_destination(destination),
         )
     }
@@ -2154,14 +2162,7 @@ impl Archiver {
 
     /// Complete every open file, concurrently, and return what they settled.
     async fn close_all_writers(&self) -> Settled {
-        let writers: Vec<(String, Arc<Mutex<ArchiveWriter>>)> = {
-            let mut cache = self.writers.lock();
-            let mut all = Vec::with_capacity(cache.len());
-            while let Some(entry) = cache.pop_lru() {
-                all.push(entry);
-            }
-            all
-        };
+        let writers = self.writers.take_all();
         debug!(writer_count = writers.len(), "Closing archive writers");
 
         let closed = futures::future::join_all(writers.into_iter().map(|(dest, writer_arc)| {
@@ -3542,6 +3543,38 @@ mod tests {
         assert!(
             matches!(refused, Some(DeadLetterReason::TooLarge { limit, .. }) if limit < BASIC_TOPIC_CEILING),
             "an entry over the topic ceiling reaches the write: {refused:?}"
+        );
+        dlq.shutdown().await.expect("dlq shutdown");
+    }
+
+    /// A dead letter past scalo's 512 KiB payload cap keeps every byte under
+    /// the default config, because its offset is committed once the DLQ
+    /// confirms it and no copy of the tail is left anywhere else.
+    #[tokio::test]
+    async fn a_dead_letter_keeps_its_whole_payload_under_the_default_config() {
+        let dir = tempfile::TempDir::new().expect("dlq dir");
+        let mut config = Config::default();
+        config.dlq.file.path = dir.path().to_path_buf();
+        let dlq = spawn_dlq(&config).expect("dlq");
+        let payload = vec![b'x'; 600 * 1024];
+
+        let Screened { writable, refused } = screen_dead_letters(
+            &dlq,
+            vec![(
+                DlqEntry::new("dfe-archiver", "storage_write_failed", payload.clone()),
+                (),
+            )],
+        );
+
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(writable.len(), 1, "one entry to write");
+        let (entry, ()) = &writable[0];
+        assert!(
+            !entry.truncated && entry.payload == payload,
+            "the DLQ copy is {} of {} bytes, truncated: {}",
+            entry.payload.len(),
+            payload.len(),
+            entry.truncated
         );
         dlq.shutdown().await.expect("dlq shutdown");
     }

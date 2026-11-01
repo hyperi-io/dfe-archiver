@@ -123,6 +123,16 @@ pub enum Quarantined {
 pub struct Staging {
     dir: PathBuf,
     bytes: Arc<AtomicU64>,
+    /// Files done with whose removal failed, still counted in `bytes` until
+    /// [`retry_removals`](Self::retry_removals) removes them.
+    stranded: Arc<parking_lot::Mutex<Vec<Stranded>>>,
+}
+
+/// A staged file done with that could not be removed.
+#[derive(Debug)]
+struct Stranded {
+    local: PathBuf,
+    size: u64,
 }
 
 impl Staging {
@@ -137,6 +147,7 @@ impl Staging {
         Ok(Self {
             dir,
             bytes: Arc::new(AtomicU64::new(0)),
+            stranded: Arc::new(parking_lot::Mutex::new(Vec::new())),
         })
     }
 
@@ -287,6 +298,50 @@ impl Staging {
         &self.dir
     }
 
+    /// Remove a staged file done with, and its manifest, counting its `size`
+    /// off the total once the file is gone. One that cannot be removed stays
+    /// counted, because it still holds the disk, and is retried by
+    /// [`retry_removals`](Self::retry_removals).
+    async fn remove(&self, local: &Path, size: u64) {
+        match remove_staged(local).await {
+            Ok(()) => {
+                self.bytes.fetch_sub(size, Ordering::Relaxed);
+            }
+            Err(e) => {
+                warn!(
+                    local = %local.display(),
+                    error = %e,
+                    "Could not remove a staged file; its bytes stay counted against the staging cap and the removal is retried"
+                );
+                self.stranded.lock().push(Stranded {
+                    local: local.to_path_buf(),
+                    size,
+                });
+            }
+        }
+    }
+
+    /// Remove again the files whose removal failed, and return how many are
+    /// still there.
+    pub async fn retry_removals(&self) -> usize {
+        let pending = std::mem::take(&mut *self.stranded.lock());
+        let mut left = Vec::new();
+        for file in pending {
+            match remove_staged(&file.local).await {
+                Ok(()) => {
+                    self.bytes.fetch_sub(file.size, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    debug!(local = %file.local.display(), error = %e, "A staged file still cannot be removed");
+                    left.push(file);
+                }
+            }
+        }
+        let count = left.len();
+        self.stranded.lock().extend(left);
+        count
+    }
+
     /// A local file name no other staged file shares, this process's or a
     /// previous one's whose files are still here.
     fn next_file(&self) -> PathBuf {
@@ -300,6 +355,22 @@ impl Staging {
         self.dir
             .join(format!("{process:016x}-{n}.{STAGED_EXTENSION}"))
     }
+}
+
+/// Remove a staged file, which may already be gone, then its manifest.
+async fn remove_staged(local: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(local).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let manifest = with_suffix(local, MANIFEST_SUFFIX);
+    if let Err(e) = tokio::fs::remove_file(&manifest).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(manifest = %manifest.display(), error = %e, "Could not remove a staged file's manifest");
+    }
+    Ok(())
 }
 
 /// Remove `path`, which may already be gone.
@@ -385,6 +456,25 @@ async fn sync_dir(dir: &Path) -> std::io::Result<()> {
     tokio::fs::File::open(dir).await?.sync_all().await
 }
 
+/// The directories that hold the entries `create_dir_all(dir)` would add:
+/// every ancestor above `dir` up to and including the nearest that exists.
+async fn new_entry_parents(dir: &Path) -> Vec<PathBuf> {
+    let mut missing = 0;
+    for ancestor in dir.ancestors() {
+        let exists = ancestor.as_os_str().is_empty()
+            || tokio::fs::try_exists(ancestor).await.unwrap_or(false);
+        if exists {
+            break;
+        }
+        missing += 1;
+    }
+    dir.ancestors()
+        .skip(1)
+        .take(missing)
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 #[async_trait]
 impl StorageBackend for FileBackend {
     async fn create(&self, path: &str) -> Result<()> {
@@ -399,9 +489,13 @@ impl StorageBackend for FileBackend {
         };
 
         if let Some(parent) = full_path.parent() {
+            let entries = new_entry_parents(parent).await;
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(refuse_name)?;
+            for dir in &entries {
+                sync_dir(dir).await?;
+            }
         }
 
         OpenOptions::new()
@@ -445,8 +539,9 @@ impl StorageBackend for FileBackend {
     }
 
     /// Syncs the file, then every directory from its parent up to the base
-    /// path, because `create` may have made any of them and a directory entry
-    /// is durable only once its parent is synced.
+    /// path, because a directory entry is durable only once its parent is
+    /// synced. `create` synced the entries of any directory it made at or
+    /// above the base path.
     async fn close(&self, path: &str) -> Result<Closed> {
         let full_path = self.full_path(path)?;
         tokio::fs::File::open(&full_path).await?.sync_all().await?;
@@ -768,6 +863,17 @@ impl ObjectStoreBackend {
         ))
     }
 
+    /// A backend on the same store client, staging its own files.
+    fn sibling(&self) -> Self {
+        Self::with_store(
+            Arc::clone(&self.store),
+            self.prefix.clone(),
+            self.backend_name,
+            self.chunk_size,
+            &self.staging,
+        )
+    }
+
     fn object_path(&self, path: &str) -> ObjectPath {
         if self.prefix.is_empty() {
             ObjectPath::from(path)
@@ -839,31 +945,17 @@ struct StagedUpload {
 }
 
 impl StagedUpload {
-    /// Count the local copy off the staging total, once. `false` when it was
-    /// already given up.
-    fn release_bytes(&self) -> bool {
-        if self.removed.swap(true, Ordering::AcqRel) {
-            return false;
-        }
-        self.staging.bytes.fetch_sub(self.size, Ordering::Relaxed);
-        true
+    /// Take the local copy to give up, once. `false` when it was already
+    /// given up.
+    fn give_up(&self) -> bool {
+        !self.removed.swap(true, Ordering::AcqRel)
     }
 
     /// Remove the local copy and its manifest, and count its bytes off the
-    /// staging total.
+    /// staging total once it is gone.
     async fn remove_local(&self) {
-        if !self.release_bytes() {
-            return;
-        }
-        for path in [
-            self.local.clone(),
-            with_suffix(&self.local, MANIFEST_SUFFIX),
-        ] {
-            if let Err(e) = tokio::fs::remove_file(&path).await
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(local = %path.display(), error = %e, "Could not remove a staged file");
-            }
+        if self.give_up() {
+            self.staging.remove(&self.local, self.size).await;
         }
     }
 
@@ -1030,9 +1122,10 @@ impl PendingUpload for StagedUpload {
     }
 
     async fn quarantine(&self) -> bool {
-        if !self.release_bytes() {
+        if !self.give_up() {
             return false;
         }
+        self.staging.bytes.fetch_sub(self.size, Ordering::Relaxed);
         let staging = self.staging.clone();
         let local = self.local.clone();
         // Blocking filesystem calls, so off the runtime's worker threads.
@@ -1202,13 +1295,8 @@ impl StorageBackend for ObjectStoreBackend {
         let Some(staged) = self.open.lock().await.remove(path) else {
             return;
         };
-        self.staging.bytes.fetch_sub(staged.size, Ordering::Relaxed);
         drop(staged.file);
-        if let Err(e) = tokio::fs::remove_file(&staged.local).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(local = %staged.local.display(), error = %e, "Could not remove an abandoned staged file");
-        }
+        self.staging.remove(&staged.local, staged.size).await;
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
@@ -1277,92 +1365,121 @@ pub fn create_backend(
     config: &ArchiveConfig,
     staging: &Staging,
 ) -> Result<Box<dyn StorageBackend + Send + Sync>> {
-    let dest = &config.destination;
-    let chunk_size = if config.multipart_chunk_size > 0 {
-        config.multipart_chunk_size
-    } else {
-        DEFAULT_MULTIPART_CHUNK_SIZE
-    };
+    BackendFactory::new(config, staging).map(|backends| backends.backend())
+}
 
-    if dest.starts_with("file://") {
-        let path = dest.strip_prefix("file://").unwrap_or(dest);
-        Ok(Box::new(FileBackend::new(path)))
-    } else if dest.starts_with("s3://") {
-        let rest = dest.strip_prefix("s3://").unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
+/// The backends of one destination: an object store's client is built once
+/// and shared by every backend, and each backend stages its own files.
+pub enum BackendFactory {
+    /// A local directory.
+    File(PathBuf),
+    /// An object store, through the client every backend shares.
+    Store(ObjectStoreBackend),
+}
 
-        let mut s3_config = config.s3.clone().unwrap_or_default();
-        fill_bucket(&mut s3_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_s3(
-            &s3_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("minio://") {
-        let rest = dest.strip_prefix("minio://").unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
-
-        let mut minio_config = config.minio.clone().ok_or_else(|| {
-            Error::Config("minio:// destination requires minio config section".to_string())
-        })?;
-
-        fill_bucket(&mut minio_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_minio(
-            &minio_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
-        // Both spellings, because `ArchiveConfig::backend_name()` labels either
-        // as "gcs" and a destination must mean the same thing to both.
-        let rest = dest
-            .strip_prefix("gs://")
-            .or_else(|| dest.strip_prefix("gcs://"))
-            .unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
-
-        let mut gcs_config = config.gcs.clone().unwrap_or_default();
-        fill_bucket(&mut gcs_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_gcs(
-            &gcs_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("az://") || dest.starts_with("azure://") {
-        let rest = if let Some(r) = dest.strip_prefix("az://") {
-            r
+impl BackendFactory {
+    /// The backends `config.destination` names, building its store client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the destination scheme is unsupported or its client cannot be built.
+    pub fn new(config: &ArchiveConfig, staging: &Staging) -> Result<Self> {
+        let dest = &config.destination;
+        let chunk_size = if config.multipart_chunk_size > 0 {
+            config.multipart_chunk_size
         } else {
-            dest.strip_prefix("azure://").unwrap_or("")
+            DEFAULT_MULTIPART_CHUNK_SIZE
         };
-        let (container, prefix) = parse_bucket_prefix(rest);
 
-        let mut azure_config = config.azure.clone().unwrap_or_default();
-        fill_bucket(&mut azure_config.container, container);
+        if dest.starts_with("file://") {
+            let path = dest.strip_prefix("file://").unwrap_or(dest);
+            Ok(Self::File(PathBuf::from(path)))
+        } else if dest.starts_with("s3://") {
+            let rest = dest.strip_prefix("s3://").unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
 
-        Ok(Box::new(ObjectStoreBackend::new_azure(
-            &azure_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.contains("://") {
-        // URL-shaped but not a scheme this implements. The local-path branch
-        // below would create a directory named after the URL and archive into
-        // it, so a typo in `archive.destination` writes to ephemeral pod disk
-        // instead of the bucket with nothing downstream able to tell.
-        Err(Error::Config(format!(
-            "unsupported archive.destination scheme in '{dest}' \
-             (supported: file://, s3://, minio://, gs://, gcs://, az://, azure://, \
-             or a bare local path)"
-        )))
-    } else {
-        Ok(Box::new(FileBackend::new(dest)))
+            let mut s3_config = config.s3.clone().unwrap_or_default();
+            fill_bucket(&mut s3_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_s3(
+                &s3_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("minio://") {
+            let rest = dest.strip_prefix("minio://").unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
+
+            let mut minio_config = config.minio.clone().ok_or_else(|| {
+                Error::Config("minio:// destination requires minio config section".to_string())
+            })?;
+
+            fill_bucket(&mut minio_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_minio(
+                &minio_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
+            // Both spellings, because `ArchiveConfig::backend_name()` labels either
+            // as "gcs" and a destination must mean the same thing to both.
+            let rest = dest
+                .strip_prefix("gs://")
+                .or_else(|| dest.strip_prefix("gcs://"))
+                .unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
+
+            let mut gcs_config = config.gcs.clone().unwrap_or_default();
+            fill_bucket(&mut gcs_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_gcs(
+                &gcs_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("az://") || dest.starts_with("azure://") {
+            let rest = if let Some(r) = dest.strip_prefix("az://") {
+                r
+            } else {
+                dest.strip_prefix("azure://").unwrap_or("")
+            };
+            let (container, prefix) = parse_bucket_prefix(rest);
+
+            let mut azure_config = config.azure.clone().unwrap_or_default();
+            fill_bucket(&mut azure_config.container, container);
+
+            Ok(Self::Store(ObjectStoreBackend::new_azure(
+                &azure_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.contains("://") {
+            // URL-shaped but not a scheme this implements. The local-path branch
+            // below would create a directory named after the URL and archive into
+            // it, so a typo in `archive.destination` writes to ephemeral pod disk
+            // instead of the bucket with nothing downstream able to tell.
+            Err(Error::Config(format!(
+                "unsupported archive.destination scheme in '{dest}' \
+                 (supported: file://, s3://, minio://, gs://, gcs://, az://, azure://, \
+                 or a bare local path)"
+            )))
+        } else {
+            Ok(Self::File(PathBuf::from(dest)))
+        }
+    }
+
+    /// A backend of its own for one writer.
+    #[must_use]
+    pub fn backend(&self) -> Box<dyn StorageBackend + Send + Sync> {
+        match self {
+            Self::File(base) => Box::new(FileBackend::new(base.clone())),
+            Self::Store(store) => Box::new(store.sibling()),
+        }
     }
 }
 
@@ -1450,6 +1567,36 @@ mod tests {
             .close(&path)
             .await
             .expect("close syncs up to the working directory");
+    }
+
+    /// Every directory `create` makes, the destination itself included, has
+    /// its entry in a parent that is synced, up to the nearest one that was
+    /// already there.
+    #[tokio::test]
+    async fn test_new_directories_are_synced_into_the_parent_that_existed() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let root = temp_dir.path();
+        let dir = root.join("dest/hour");
+        let cases: [(&[&str], Vec<PathBuf>); 3] = [
+            (&[], vec![root.join("dest"), root.to_path_buf()]),
+            (&["dest"], vec![root.join("dest")]),
+            (&["dest", "dest/hour"], Vec::new()),
+        ];
+        for (existing, want) in cases {
+            for made in existing {
+                std::fs::create_dir_all(root.join(made)).expect("make dir");
+            }
+            assert_eq!(
+                new_entry_parents(&dir).await,
+                want,
+                "with {existing:?} already there"
+            );
+        }
+
+        let backend = FileBackend::new(root.join("fresh"));
+        backend.create("hour/file.jsonl").await.expect("create");
+        backend.close("hour/file.jsonl").await.expect("close");
+        assert!(root.join("fresh/hour/file.jsonl").is_file());
     }
 
     #[tokio::test]
@@ -1999,6 +2146,62 @@ mod tests {
 
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// Every writer of one destination shares the one store client, and each
+    /// stages its own files, so a churning destination never rebuilds the
+    /// client and its connection pool.
+    #[tokio::test]
+    async fn every_writer_of_a_destination_shares_one_store_client() {
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+        let backends = BackendFactory::Store(backend);
+        let clients = Arc::strong_count(&store);
+
+        let writers: Vec<_> = (0..3).map(|_| backends.backend()).collect();
+        assert_eq!(Arc::strong_count(&store), clients + 3);
+        for writer in &writers {
+            writer.create("events/a.jsonl").await.expect("create");
+        }
+        let staged = std::fs::read_dir(staging.dir()).expect("dir").count();
+        assert_eq!(staged, 3, "each writer stages a file of its own");
+    }
+
+    /// A staged copy that cannot be removed stays in the staging total, so
+    /// the intake cap still sees the disk it holds, and its removal is
+    /// retried until it goes.
+    #[tokio::test]
+    async fn a_staged_copy_that_cannot_be_removed_stays_counted_until_it_goes() {
+        let (_dir, staging) = staging();
+        let (_store, backend) = in_memory(&staging);
+        backend.create("events/a.jsonl").await.expect("create");
+        backend
+            .append("events/a.jsonl", b"held\n")
+            .await
+            .expect("append");
+        let Closed::Pending(upload) = backend.close("events/a.jsonl").await.expect("close") else {
+            unreachable!("an object-store file is staged");
+        };
+        let local = std::fs::read_dir(staging.dir())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == STAGED_EXTENSION))
+            .expect("the staged copy");
+        // No user, root included, can remove_file a directory.
+        std::fs::remove_file(&local).expect("remove the copy");
+        std::fs::create_dir(&local).expect("a directory in its place");
+        std::fs::write(local.join("pin"), b"").expect("pin the directory");
+
+        upload.discard().await;
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 5);
+        assert_eq!(staging.retry_removals().await, 1, "still a directory");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 5);
+
+        std::fs::remove_dir_all(&local).expect("clear the directory");
+        std::fs::write(&local, b"held\n").expect("the copy back");
+        assert_eq!(staging.retry_removals().await, 0);
+        assert!(!local.exists(), "the retry removed the copy");
+        assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
     }
 
     /// Leave in staging, as a process that stopped would, one complete file

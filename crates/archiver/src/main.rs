@@ -15,7 +15,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use clap::{Parser, Subcommand};
 use dfe_archiver::config::{
-    ConfigReloader, ReloaderConfig, SharedConfig, load_config, validate_config,
+    ConfigReloader, ReloaderConfig, SharedConfig, config_file, load_config, validate_config,
 };
 use dfe_archiver::contract::deployment_contract;
 use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
@@ -148,8 +148,8 @@ impl ServiceApp for App {
         // Wrap config in SharedConfig for hot-reload
         let shared_config = SharedConfig::new(config);
 
-        // Start config reloader (SIGHUP + file polling)
-        let config_path = self.common.config.clone();
+        // Start config reloader (SIGHUP + file polling) on the file the config came from.
+        let config_path = config_file(self.common.config.as_deref());
         let reloader = ConfigReloader::new(
             ReloaderConfig {
                 config_path: config_path.as_ref().map(std::path::PathBuf::from),

@@ -206,8 +206,7 @@ archive:
 archive:
   destination: gs://bucket-name/prefix
   gcs:
-    project_id: my-project
-    service_account_key: /path/to/key.json
+    credentials_path: /path/to/key.json
 ```
 
 ### Azure Blob Storage

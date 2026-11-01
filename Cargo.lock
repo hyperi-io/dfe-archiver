@@ -1478,6 +1478,7 @@ dependencies = [
  "futures",
  "lz4_flex",
  "object_store",
+ "parking_lot 0.13.0",
  "percent-encoding",
  "rdkafka",
  "scalo",
@@ -3788,7 +3789,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3809,7 +3810,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4549,9 +4550,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.23"
+version = "2.14.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ada59513f47dc3bc41ee4f86d91c6a62977a8703a9536fcf9dee8f06dd3351"
+checksum = "20a4403ba4e4d6ac2ea494be7e0922fe24069d96cd64bfbd37b23f2e122f3fac"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4594,6 +4595,7 @@ dependencies = [
  "snap",
  "sonic-rs",
  "sysinfo 0.39.6",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",

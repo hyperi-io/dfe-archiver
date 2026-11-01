@@ -107,7 +107,9 @@ properties:
       level: 3
       enabled: true
   dlq:
-    description: Dead letter queue configuration
+    description: |-
+      Dead letter queue configuration. A field a `dlq:` block leaves out
+      keeps the archiver's default.
     $ref: "#/$defs/DlqConfig"
     default:
       enabled: true
@@ -115,7 +117,7 @@ properties:
       queue_capacity: 10000
       batch_size: 256
       flush_interval_ms: 100
-      max_payload_bytes: 524288
+      max_payload_bytes: null
       file:
         enabled: true
         path: /var/spool/dfe/dlq
@@ -386,11 +388,12 @@ $defs:
         default: 8388608
       max_writers:
         description: |-
-          Maximum number of concurrent archive writers (one per unique routing
-          destination). When the cap is reached, the least-recently-used writer
-          is evicted and closed asynchronously. Caps file-handle use and bounds
-          the `dfe_archiver_unique_destinations` metric for expression-routed
-          pods on high-cardinality keys (e.g. per-org-id routing).
+          Maximum number of archive writers open at once, one per routing
+          destination, evicted ones still closing included. At the cap the
+          least recently used writer is evicted and closed in the background,
+          and a write for a new destination waits for that close. Caps file
+          handles and bounds `dfe_archiver_unique_destinations` on
+          high-cardinality keys such as per-org routing.
         type: integer
         format: uint
         minimum: 0
@@ -420,89 +423,98 @@ $defs:
         - type: "null"
         default: null
   S3Config:
-    description: S3 configuration
+    description: S3 configuration. A section with no `bucket` takes the destination URL's.
     type: object
     properties:
       region:
         type:
         - string
         - "null"
+        default: null
       endpoint:
         type:
         - string
         - "null"
+        default: null
       access_key_id:
         type:
         - string
         - "null"
+        default: null
       secret_access_key:
         type:
         - string
         - "null"
         x-scalo-secret: true
         writeOnly: true
+        default: null
       bucket:
         type: string
+        default: ""
       allow_http:
         description: >-
           Allow plaintext HTTP (for local/dev endpoints only). Defaults to false (HTTPS
           required).
         type: boolean
         default: false
-    required:
-    - bucket
   GcsConfig:
-    description: GCS configuration
+    description: GCS configuration. A section with no `bucket` takes the destination URL's.
     type: object
     properties:
       project_id:
         type:
         - string
         - "null"
+        default: null
       service_account_key:
         type:
         - string
         - "null"
         x-scalo-secret: true
         writeOnly: true
+        default: null
       credentials_path:
         type:
         - string
         - "null"
+        default: null
       bucket:
         type: string
-    required:
-    - bucket
+        default: ""
   AzureConfig:
-    description: Azure Blob configuration
+    description: |-
+      Azure Blob configuration. A section with no `container` takes the
+      destination URL's.
     type: object
     properties:
       account_name:
         type: string
+        default: ""
       account_key:
         type:
         - string
         - "null"
         x-scalo-secret: true
         writeOnly: true
+        default: null
       sas_token:
         type:
         - string
         - "null"
         x-scalo-secret: true
         writeOnly: true
+        default: null
       container:
         type: string
+        default: ""
       use_emulator:
         type: boolean
+        default: false
       endpoint:
         type:
         - string
         - "null"
-    required:
-    - account_name
-    - container
-    - use_emulator
+        default: null
   MinioConfig:
     description: "`MinIO` configuration (S3-compatible)"
     type: object

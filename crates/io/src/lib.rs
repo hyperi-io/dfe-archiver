@@ -14,7 +14,7 @@ pub mod transport;
 pub use grpc::PushTransportAdapter;
 pub use kafka::TransportAdapter;
 pub use storage::{
-    FileBackend, ObjectStoreBackend, Quarantined, Recovery, Staging, create_backend,
+    BackendFactory, FileBackend, ObjectStoreBackend, Quarantined, Recovery, Staging, create_backend,
 };
 pub use transport::{ReceivedBatch, SourceTransport};
 
