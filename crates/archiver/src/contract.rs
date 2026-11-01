@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 use dfe_archiver_core::buffer::DEFAULT_SPOOL_DIR;
 use dfe_archiver_core::config::TRANSPORT_GRPC;

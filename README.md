@@ -5,7 +5,7 @@
   Language:     Markdown
 
   License:      BUSL-1.1
-  Copyright:    (c) 2026 HyperI Pty Ltd
+  Copyright:    (c) 2026 HYPERI PTY LIMITED
 -->
 
 # dfe-archiver
@@ -326,7 +326,7 @@ Open bugs: [this repo](https://github.com/hyperi-io/dfe-archiver/issues?q=is%3Ao
 
 This software is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE) for details.
 
-Copyright (c) 2026 HyperI Pty Ltd
+Copyright (c) 2026 HYPERI PTY LIMITED
 
 ## Context
 

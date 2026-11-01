@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 // Runs against LocalStack, so the S3 write path is exercised with no AWS
 // account and no manual setup -- just Docker. `common::acquire_s3` prefers a

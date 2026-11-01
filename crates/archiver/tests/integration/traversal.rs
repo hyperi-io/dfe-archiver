@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! Expression routing names a directory after each routing field's value, and
 //! those values arrive from dfe-receiver, which takes untrusted input. So a

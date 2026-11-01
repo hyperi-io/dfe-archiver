@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 // Covers the `minio://` destination and `ObjectStoreBackend::new_minio` -- the
 // S3-compatible variant with path-style addressing, static keys and plain HTTP.

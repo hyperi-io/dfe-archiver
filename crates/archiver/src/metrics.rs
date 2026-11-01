@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 use metrics::{counter, gauge, histogram};
 use scalo::metrics::groups::{AppMetrics, BufferMetrics, ConsumerMetrics, SinkMetrics};

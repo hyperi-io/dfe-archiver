@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 // Allocator selection: jemalloc (only allocator at all hyperi-ci channels per
 // 2026-04-17 DFE policy). hyperi-ci enables `--features jemalloc` per channel;

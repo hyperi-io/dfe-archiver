@@ -4,7 +4,7 @@
 // Language:  Rust
 //
 // License:      BUSL-1.1
-// Copyright:    (c) 2026 HyperI Pty Ltd
+// Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! A sender controls the payload `org_id`, so the receiver and fetcher stamp
 //! `_org_id` and the archive path follows that. A record with no usable
