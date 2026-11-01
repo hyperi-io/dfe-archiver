@@ -3546,6 +3546,38 @@ mod tests {
         dlq.shutdown().await.expect("dlq shutdown");
     }
 
+    /// A dead letter past scalo's 512 KiB payload cap keeps every byte under
+    /// the default config, because its offset is committed once the DLQ
+    /// confirms it and no copy of the tail is left anywhere else.
+    #[tokio::test]
+    async fn a_dead_letter_keeps_its_whole_payload_under_the_default_config() {
+        let dir = tempfile::TempDir::new().expect("dlq dir");
+        let mut config = Config::default();
+        config.dlq.file.path = dir.path().to_path_buf();
+        let dlq = spawn_dlq(&config).expect("dlq");
+        let payload = vec![b'x'; 600 * 1024];
+
+        let Screened { writable, refused } = screen_dead_letters(
+            &dlq,
+            vec![(
+                DlqEntry::new("dfe-archiver", "storage_write_failed", payload.clone()),
+                (),
+            )],
+        );
+
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(writable.len(), 1, "one entry to write");
+        let (entry, ()) = &writable[0];
+        assert!(
+            !entry.truncated && entry.payload == payload,
+            "the DLQ copy is {} of {} bytes, truncated: {}",
+            entry.payload.len(),
+            payload.len(),
+            entry.truncated
+        );
+        dlq.shutdown().await.expect("dlq shutdown");
+    }
+
     /// Position lag reaches the `kafka_lag` term the composite registers, the
     /// one KEDA scales on, and the direct transport's `None` leaves it alone.
     #[test]

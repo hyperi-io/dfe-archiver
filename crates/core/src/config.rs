@@ -90,6 +90,8 @@ impl Default for Config {
                 dlq.file.path = std::path::PathBuf::from(DEFAULT_DLQ_DIR);
                 dlq.kafka.routing = scalo::dlq::DlqRouting::Common;
                 dlq.kafka.common_topic = Some("dfe_archiver_dlq".to_string());
+                // A committed dead letter's cut tail is lost, so keep it whole.
+                dlq.max_payload_bytes = None;
                 dlq
             },
         }

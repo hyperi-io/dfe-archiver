@@ -108,7 +108,7 @@
         "queue_capacity": 10000,
         "batch_size": 256,
         "flush_interval_ms": 100,
-        "max_payload_bytes": 524288,
+        "max_payload_bytes": null,
         "file": {
           "enabled": true,
           "path": "/var/spool/dfe/dlq",
