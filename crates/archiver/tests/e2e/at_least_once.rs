@@ -1264,32 +1264,98 @@ async fn the_push_listener_refuses_pushes_while_the_governor_holds_intake() {
     );
 }
 
-/// Staging that refuses new files and keeps the ones in it readable, as a
-/// full disk does. Dropping it accepts new files again.
-struct StagingRefusal(std::path::PathBuf);
+/// The signal a write past `RLIMIT_FSIZE` raises on Linux, which kills the
+/// process unless it is caught.
+const SIGXFSZ: i32 = 25;
 
-impl StagingRefusal {
-    /// Refuse new files under `spool`'s staging, or `None` for a user the
-    /// directory's mode does not bind.
-    fn start(spool: &Path) -> Option<Self> {
-        use std::os::unix::fs::PermissionsExt;
-        let staging = spool.join("uploads");
-        let refusal = Self(staging.clone());
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o555))
-            .expect("make staging read-only");
-        let probe = staging.join("probe");
-        if std::fs::write(&probe, b"").is_ok() {
-            std::fs::remove_file(&probe).expect("remove probe");
-            return None;
-        }
-        Some(refusal)
+/// The error a write past `RLIMIT_FSIZE` fails with once `SIGXFSZ` is caught.
+const EFBIG: i32 = 27;
+
+/// Set on the child process [`in_child_process`] runs a test in.
+const CHILD_ENV: &str = "DFE_ARCHIVER_TEST_IN_CHILD";
+
+/// Run the test `name` of this module again in a child process of its own,
+/// so a process-wide file-size cap reaches no other test, under nextest or
+/// `cargo test` alike. `true` in the parent, once the child passed.
+async fn in_child_process(name: &str) -> bool {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return false;
+    }
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let test = format!("{module}::{name}");
+    let output = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .output()
+        .await
+        .expect("run the test in a child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    print!("{stdout}");
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{test} did not pass in its child process"
+    );
+    true
+}
+
+/// `prlimit` on this process with `args`, its output on success.
+fn prlimit(args: &[&str]) -> String {
+    let output = std::process::Command::new("prlimit")
+        .arg(format!("--pid={}", std::process::id()))
+        .args(args)
+        .output()
+        .expect("run prlimit, from util-linux");
+    assert!(
+        output.status.success(),
+        "prlimit {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A file-size cap on this process: an append past it fails, as an append to
+/// a full disk does, and root is held to it like any other user. Dropping it
+/// restores the cap it replaced.
+struct FileSizeCap {
+    restore: String,
+    _caught: tokio::signal::unix::Signal,
+}
+
+impl FileSizeCap {
+    /// Cap files at `bytes`, failing unless a write into `dir` past it is refused.
+    fn set(bytes: usize, dir: &Path) -> Self {
+        let caught =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(SIGXFSZ))
+                .expect("catch SIGXFSZ");
+        let restore = prlimit(&["--fsize", "--noheadings", "--raw", "--output=SOFT"])
+            .trim()
+            .to_string();
+        prlimit(&[&format!("--fsize={bytes}:")]);
+        let cap = Self {
+            restore,
+            _caught: caught,
+        };
+        let probe = dir.join("cap-probe");
+        let written = std::fs::write(&probe, vec![0u8; 2 * bytes]);
+        let _ = std::fs::remove_file(&probe);
+        assert_eq!(
+            written.err().and_then(|e| e.raw_os_error()),
+            Some(EFBIG),
+            "a write past the {bytes}-byte cap was not refused"
+        );
+        cap
     }
 }
 
-impl Drop for StagingRefusal {
+impl Drop for FileSizeCap {
     fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        let _ = std::process::Command::new("prlimit")
+            .arg(format!("--pid={}", std::process::id()))
+            .arg(format!("--fsize={}:", self.restore))
+            .status();
     }
 }
 
@@ -1316,9 +1382,9 @@ fn direct_to_store(store: &S3StoreFixture, spool: &Path) -> Config {
 }
 
 /// A write held for a staging disk that frees only once the store takes a
-/// file: `start` leaves a file open, staging then refuses new files, `stall`
-/// starts the held write, and the refusal lifts once an object lands. Every
-/// record is archived once.
+/// file: the first five records leave a file open, a file-size cap then
+/// refuses every append, `stall` starts the held write, and the cap lifts once
+/// an object lands. Every record is archived once.
 async fn a_held_write_frees_its_own_disk(
     test: &str,
     configure: impl FnOnce(&mut Config),
@@ -1344,11 +1410,8 @@ async fn a_held_write_frees_its_own_disk(
         staged_bytes(spool.path()) > 0
     })
     .await;
-    let Some(refusal) = StagingRefusal::start(spool.path()) else {
-        eprintln!("skipped: this user writes through a read-only directory");
-        stop(&archiver, running).await;
-        return;
-    };
+    // Above a staged manifest, below one flush of five records.
+    let cap = FileSizeCap::set(4096, &spool.path().join("uploads"));
     let (key, stalled) = stall;
     push_to(&config, key, stalled.clone()).await;
     wait_until("the held write failed", || async {
@@ -1360,7 +1423,7 @@ async fn a_held_write_frees_its_own_disk(
         || async { !store.keys(BUCKET).await.is_empty() },
     )
     .await;
-    drop(refusal);
+    drop(cap);
     stop(&archiver, running).await;
 
     assert_eq!(
@@ -1374,6 +1437,9 @@ async fn a_held_write_frees_its_own_disk(
 /// rolled file while it waits, because that upload is what frees the disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_waiting_for_disk_uploads_the_file_it_rolled() {
+    if in_child_process("a_write_waiting_for_disk_uploads_the_file_it_rolled").await {
+        return;
+    }
     a_held_write_frees_its_own_disk(
         "held_write_rolled",
         |config| config.archive.roll_size_bytes = 1,
@@ -1386,6 +1452,9 @@ async fn a_write_waiting_for_disk_uploads_the_file_it_rolled() {
 /// still closes at its roll interval and uploads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_waiting_for_disk_lets_an_aged_file_close_and_upload() {
+    if in_child_process("a_write_waiting_for_disk_lets_an_aged_file_close_and_upload").await {
+        return;
+    }
     a_held_write_frees_its_own_disk(
         "held_write_aged",
         |config| config.archive.roll_interval_secs = Some(2),
