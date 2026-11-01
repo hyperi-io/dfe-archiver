@@ -863,6 +863,17 @@ impl ObjectStoreBackend {
         ))
     }
 
+    /// A backend on the same store client, staging its own files.
+    fn sibling(&self) -> Self {
+        Self::with_store(
+            Arc::clone(&self.store),
+            self.prefix.clone(),
+            self.backend_name,
+            self.chunk_size,
+            &self.staging,
+        )
+    }
+
     fn object_path(&self, path: &str) -> ObjectPath {
         if self.prefix.is_empty() {
             ObjectPath::from(path)
@@ -1354,92 +1365,121 @@ pub fn create_backend(
     config: &ArchiveConfig,
     staging: &Staging,
 ) -> Result<Box<dyn StorageBackend + Send + Sync>> {
-    let dest = &config.destination;
-    let chunk_size = if config.multipart_chunk_size > 0 {
-        config.multipart_chunk_size
-    } else {
-        DEFAULT_MULTIPART_CHUNK_SIZE
-    };
+    BackendFactory::new(config, staging).map(|backends| backends.backend())
+}
 
-    if dest.starts_with("file://") {
-        let path = dest.strip_prefix("file://").unwrap_or(dest);
-        Ok(Box::new(FileBackend::new(path)))
-    } else if dest.starts_with("s3://") {
-        let rest = dest.strip_prefix("s3://").unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
+/// The backends of one destination: an object store's client is built once
+/// and shared by every backend, and each backend stages its own files.
+pub enum BackendFactory {
+    /// A local directory.
+    File(PathBuf),
+    /// An object store, through the client every backend shares.
+    Store(ObjectStoreBackend),
+}
 
-        let mut s3_config = config.s3.clone().unwrap_or_default();
-        fill_bucket(&mut s3_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_s3(
-            &s3_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("minio://") {
-        let rest = dest.strip_prefix("minio://").unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
-
-        let mut minio_config = config.minio.clone().ok_or_else(|| {
-            Error::Config("minio:// destination requires minio config section".to_string())
-        })?;
-
-        fill_bucket(&mut minio_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_minio(
-            &minio_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
-        // Both spellings, because `ArchiveConfig::backend_name()` labels either
-        // as "gcs" and a destination must mean the same thing to both.
-        let rest = dest
-            .strip_prefix("gs://")
-            .or_else(|| dest.strip_prefix("gcs://"))
-            .unwrap_or("");
-        let (bucket, prefix) = parse_bucket_prefix(rest);
-
-        let mut gcs_config = config.gcs.clone().unwrap_or_default();
-        fill_bucket(&mut gcs_config.bucket, bucket);
-
-        Ok(Box::new(ObjectStoreBackend::new_gcs(
-            &gcs_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.starts_with("az://") || dest.starts_with("azure://") {
-        let rest = if let Some(r) = dest.strip_prefix("az://") {
-            r
+impl BackendFactory {
+    /// The backends `config.destination` names, building its store client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the destination scheme is unsupported or its client cannot be built.
+    pub fn new(config: &ArchiveConfig, staging: &Staging) -> Result<Self> {
+        let dest = &config.destination;
+        let chunk_size = if config.multipart_chunk_size > 0 {
+            config.multipart_chunk_size
         } else {
-            dest.strip_prefix("azure://").unwrap_or("")
+            DEFAULT_MULTIPART_CHUNK_SIZE
         };
-        let (container, prefix) = parse_bucket_prefix(rest);
 
-        let mut azure_config = config.azure.clone().unwrap_or_default();
-        fill_bucket(&mut azure_config.container, container);
+        if dest.starts_with("file://") {
+            let path = dest.strip_prefix("file://").unwrap_or(dest);
+            Ok(Self::File(PathBuf::from(path)))
+        } else if dest.starts_with("s3://") {
+            let rest = dest.strip_prefix("s3://").unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
 
-        Ok(Box::new(ObjectStoreBackend::new_azure(
-            &azure_config,
-            prefix.to_string(),
-            chunk_size,
-            staging,
-        )?))
-    } else if dest.contains("://") {
-        // URL-shaped but not a scheme this implements. The local-path branch
-        // below would create a directory named after the URL and archive into
-        // it, so a typo in `archive.destination` writes to ephemeral pod disk
-        // instead of the bucket with nothing downstream able to tell.
-        Err(Error::Config(format!(
-            "unsupported archive.destination scheme in '{dest}' \
-             (supported: file://, s3://, minio://, gs://, gcs://, az://, azure://, \
-             or a bare local path)"
-        )))
-    } else {
-        Ok(Box::new(FileBackend::new(dest)))
+            let mut s3_config = config.s3.clone().unwrap_or_default();
+            fill_bucket(&mut s3_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_s3(
+                &s3_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("minio://") {
+            let rest = dest.strip_prefix("minio://").unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
+
+            let mut minio_config = config.minio.clone().ok_or_else(|| {
+                Error::Config("minio:// destination requires minio config section".to_string())
+            })?;
+
+            fill_bucket(&mut minio_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_minio(
+                &minio_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("gs://") || dest.starts_with("gcs://") {
+            // Both spellings, because `ArchiveConfig::backend_name()` labels either
+            // as "gcs" and a destination must mean the same thing to both.
+            let rest = dest
+                .strip_prefix("gs://")
+                .or_else(|| dest.strip_prefix("gcs://"))
+                .unwrap_or("");
+            let (bucket, prefix) = parse_bucket_prefix(rest);
+
+            let mut gcs_config = config.gcs.clone().unwrap_or_default();
+            fill_bucket(&mut gcs_config.bucket, bucket);
+
+            Ok(Self::Store(ObjectStoreBackend::new_gcs(
+                &gcs_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.starts_with("az://") || dest.starts_with("azure://") {
+            let rest = if let Some(r) = dest.strip_prefix("az://") {
+                r
+            } else {
+                dest.strip_prefix("azure://").unwrap_or("")
+            };
+            let (container, prefix) = parse_bucket_prefix(rest);
+
+            let mut azure_config = config.azure.clone().unwrap_or_default();
+            fill_bucket(&mut azure_config.container, container);
+
+            Ok(Self::Store(ObjectStoreBackend::new_azure(
+                &azure_config,
+                prefix.to_string(),
+                chunk_size,
+                staging,
+            )?))
+        } else if dest.contains("://") {
+            // URL-shaped but not a scheme this implements. The local-path branch
+            // below would create a directory named after the URL and archive into
+            // it, so a typo in `archive.destination` writes to ephemeral pod disk
+            // instead of the bucket with nothing downstream able to tell.
+            Err(Error::Config(format!(
+                "unsupported archive.destination scheme in '{dest}' \
+                 (supported: file://, s3://, minio://, gs://, gcs://, az://, azure://, \
+                 or a bare local path)"
+            )))
+        } else {
+            Ok(Self::File(PathBuf::from(dest)))
+        }
+    }
+
+    /// A backend of its own for one writer.
+    #[must_use]
+    pub fn backend(&self) -> Box<dyn StorageBackend + Send + Sync> {
+        match self {
+            Self::File(base) => Box::new(FileBackend::new(base.clone())),
+            Self::Store(store) => Box::new(store.sibling()),
+        }
     }
 }
 
@@ -2106,6 +2146,25 @@ mod tests {
 
         assert_eq!(staging.bytes().load(Ordering::Relaxed), 0);
         assert_eq!(std::fs::read_dir(staging.dir()).expect("dir").count(), 0);
+    }
+
+    /// Every writer of one destination shares the one store client, and each
+    /// stages its own files, so a churning destination never rebuilds the
+    /// client and its connection pool.
+    #[tokio::test]
+    async fn every_writer_of_a_destination_shares_one_store_client() {
+        let (_dir, staging) = staging();
+        let (store, backend) = in_memory(&staging);
+        let backends = BackendFactory::Store(backend);
+        let clients = Arc::strong_count(&store);
+
+        let writers: Vec<_> = (0..3).map(|_| backends.backend()).collect();
+        assert_eq!(Arc::strong_count(&store), clients + 3);
+        for writer in &writers {
+            writer.create("events/a.jsonl").await.expect("create");
+        }
+        let staged = std::fs::read_dir(staging.dir()).expect("dir").count();
+        assert_eq!(staged, 3, "each writer stages a file of its own");
     }
 
     /// A staged copy that cannot be removed stays in the staging total, so

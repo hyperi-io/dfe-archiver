@@ -35,8 +35,7 @@ use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
-use dfe_archiver_io::storage::create_backend;
-use dfe_archiver_io::{ReceivedBatch, SourceTransport, Staging};
+use dfe_archiver_io::{BackendFactory, ReceivedBatch, SourceTransport, Staging};
 use lru::LruCache;
 use rayon::prelude::*;
 use scalo::dlq::{Dlq, DlqEntry, DlqSource};
@@ -550,6 +549,8 @@ pub struct Archiver {
     evictions: parking_lot::Mutex<JoinSet<Settled>>,
     /// Local disk where object-store files wait for their upload.
     staging: Staging,
+    /// The destination's backends, every writer's on the one store client.
+    backends: BackendFactory,
     /// Uploads of staged files, each returning what its file settled.
     /// Collected every cycle and waited on, with a limit, at drain.
     uploads: parking_lot::Mutex<JoinSet<Settled>>,
@@ -804,7 +805,7 @@ fn record_dead_letters(
 /// What a completed archive file proves: a completion the object store
 /// answered, or a file written on this node.
 ///
-/// Decided by the destination scheme, as `create_backend` decides the backend.
+/// Decided by the destination scheme, as `BackendFactory::new` decides the backend.
 fn sink_confirmation(archive: &ArchiveConfig) -> SinkConfirmation {
     let destination = archive.destination.as_str();
     if destination.starts_with("file://") || !destination.contains("://") {
@@ -912,7 +913,7 @@ fn recover_staging(
 /// backend of this destination. A file no backend of it can take is
 /// quarantined.
 fn adopt_recovered(
-    archive: &ArchiveConfig,
+    backends: &BackendFactory,
     staging: &Staging,
     files: Vec<RecoveredFile>,
     metrics: &ArchiverMetrics,
@@ -920,14 +921,10 @@ fn adopt_recovered(
     if files.is_empty() {
         return Vec::new();
     }
-    let backend = create_backend(archive, staging);
+    let backend = backends.backend();
     let mut uploads = Vec::with_capacity(files.len());
     for file in files {
-        let adopted = match &backend {
-            Ok(backend) => backend.adopt(file),
-            Err(_) => Err(file),
-        };
-        match adopted {
+        match backend.adopt(file) {
             Ok(upload) => {
                 // The routed destination is not recorded, so the path stands in for a dead letter.
                 let destination = upload.path().to_string();
@@ -1005,7 +1002,7 @@ impl Archiver {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transport, the hot buffers, the dead-letter queue or the staging directory cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
+    /// Returns an error when the transport, the hot buffers, the dead-letter queue, the staging directory or the destination's store client cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -1063,6 +1060,7 @@ impl Archiver {
             .collect();
 
         let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
+        let backends = BackendFactory::new(&config.archive, &staging)?;
         let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
         staging.ensure_room(MIN_FREE_SPOOL_BYTES)?;
         let held_records = Arc::new(AtomicU64::new(0));
@@ -1092,6 +1090,7 @@ impl Archiver {
             writers: parking_lot::Mutex::new(LruCache::new(writer_cap)),
             evictions: parking_lot::Mutex::new(JoinSet::new()),
             staging,
+            backends,
             uploads: parking_lot::Mutex::new(JoinSet::new()),
             uploader,
             held_records,
@@ -1106,7 +1105,7 @@ impl Archiver {
             routing_fallback_guards,
         };
         let uploads = adopt_recovered(
-            &archiver.startup_config.archive,
+            &archiver.backends,
             &archiver.staging,
             recovered,
             &archiver.metrics,
@@ -1140,11 +1139,7 @@ impl Archiver {
     async fn verify_sink(&self) {
         let destination = &self.startup_config.archive.destination;
         let backend = self.startup_config.archive.backend_name();
-        let probe = match create_backend(&self.startup_config.archive, &self.staging) {
-            Ok(client) => probe_sink(client.as_ref()).await,
-            Err(e) => Err(e),
-        };
-        match probe {
+        match probe_sink(self.backends.backend().as_ref()).await {
             Ok(()) => {
                 info!(backend, destination = %destination, "Archive sink verified");
                 self.sink.set(false);
@@ -2103,10 +2098,8 @@ impl Archiver {
             destination, self.startup_config.archive.path_template
         );
 
-        let storage = create_backend(&archive_config, &self.staging)?;
-
         Ok(
-            ArchiveWriter::new(archive_config, policy, compressor, storage)
+            ArchiveWriter::new(archive_config, policy, compressor, self.backends.backend())
                 .with_destination(destination),
         )
     }
