@@ -91,6 +91,8 @@ pub fn deployment_contract() -> DeploymentContract {
         },
         ..DeploymentContract::default()
     }
+    // The default file DLQ sits outside the spool, so it gets a writable mount of its own.
+    .with_dlq(&dfe_archiver_core::config::Config::default().dlq)
 }
 
 /// The Secrets the chart mounts as env vars.
@@ -358,23 +360,20 @@ mod tests {
         assert_eq!(parsed.metrics_port, 9090);
     }
 
+    /// The default file DLQ writes outside the spool, so it gets a writable
+    /// mount of its own on the read-only root filesystem.
     #[test]
-    fn test_contract_native_deps() {
+    fn the_default_file_dlq_gets_a_writable_mount() {
         let contract = deployment_contract();
-        // librdkafka1 is required for the kafka transport. On debian trixie it
-        // comes from debian's own repos (a plain apt package); on ubuntu it came
-        // via the confluent apt repo (no trixie suite). Assert it is required
-        // either way -- distro-agnostic, since the base is cascade-resolved.
-        let in_packages = contract
-            .native_deps
-            .apt_packages
-            .contains(&"librdkafka1".into());
-        let in_repos = contract
-            .native_deps
-            .apt_repos
-            .iter()
-            .any(|r| r.packages.contains(&"librdkafka1".into()));
-        assert!(in_packages || in_repos, "should require librdkafka1");
+        let dlq = dfe_archiver_core::config::DEFAULT_DLQ_DIR;
+        assert!(
+            contract
+                .writable_paths
+                .iter()
+                .any(|path| path.name == "dlq" && path.path == dlq),
+            "{:?}",
+            contract.writable_paths
+        );
     }
 
     #[test]
@@ -407,7 +406,14 @@ mod tests {
         );
         assert!(dockerfile.contains("dfe-archiver"));
         assert!(dockerfile.contains("9090"));
-        assert!(dockerfile.contains("librdkafka1"));
+        // A release links librdkafka, OpenSSL and zlib statically, so the image installs none of them.
+        for package in ["librdkafka", "libssl", "zlib1g", "confluent"] {
+            assert!(
+                !dockerfile.contains(package),
+                "the image installs {package}"
+            );
+        }
+        assert!(dockerfile.contains("ca-certificates"));
         // BUSL-1.1 from oci_labels.licenses drives the Dockerfile header.
         assert!(
             dockerfile.contains("# License:   BUSL-1.1"),

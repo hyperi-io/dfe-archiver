@@ -1028,9 +1028,10 @@ impl Archiver {
         // `scaling` cascade section (`ARCHIVER_SCALING__*`), not from this
         // file's config. `None` only when the `scaling` feature is compiled
         // out, where a standalone engine keeps the components registered.
+        // `run_app` has already refused a `scaling` section that does not parse.
         let scaling = scaling.unwrap_or_else(|| {
             Arc::new(ScalingPressure::new(
-                scalo::scaling::ScalingPressureConfig::from_cascade(),
+                scalo::scaling::ScalingPressureConfig::from_cascade().unwrap_or_default(),
                 crate::scaling_components(),
             ))
         });
