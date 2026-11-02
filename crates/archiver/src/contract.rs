@@ -53,10 +53,15 @@ pub fn deployment_contract() -> DeploymentContract {
         depends_on: vec!["kafka".into()],
         // No raw-lag trigger: DFE scales on the pressure composite, which this generator cannot express.
         keda: Some(KedaContract::default().with_kafka_trigger(KafkaLagTrigger::disabled())),
-        native_deps: NativeDepsContract::for_scalo_features(
-            &["transport-kafka", "spool", "tiered-sink"],
-            &base_image,
-        ),
+        native_deps: {
+            let mut deps = NativeDepsContract::for_scalo_features(
+                &["transport-kafka", "spool", "tiered-sink"],
+                &base_image,
+            );
+            // The wait-for-engine init container probes /readyz with curl from this image.
+            deps.apt_packages.push("curl".into());
+            deps
+        },
         base_image,
         image_profile: ImageProfile::Production,
         // scalo writes no vendor, licence or copyright of its own, so the
