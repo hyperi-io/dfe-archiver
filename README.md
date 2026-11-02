@@ -61,9 +61,9 @@ Nothing spools to disk ahead of the writers: the only local files are the archiv
 cargo build --release
 
 # Run with environment variables
-KAFKA_BROKERS=localhost:9092 \
-KAFKA_TOPICS=events \
-ARCHIVER_DESTINATION=file://./data/archive \
+DFE_ARCHIVER_KAFKA_BROKERS=localhost:9092 \
+DFE_ARCHIVER_KAFKA_TOPICS=events \
+DFE_ARCHIVER_DESTINATION=file://./data/archive \
 ./target/release/dfe-archiver
 
 # Or with config file
@@ -84,26 +84,28 @@ Configuration follows a cascade (highest to lowest priority):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
-| `ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | `0.0.0.0:6000` |
-| `KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
-| `KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
-| `KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
-| `KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none: every topic) |
-| `KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
-| `KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
-| `KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
-| `KAFKA_SASL_USER` | SASL username | (none) |
-| `KAFKA_SASL_PASSWORD` | SASL password | (none) |
-| `ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
-| `ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
-| `ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
-| `ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
-| `ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
+| `DFE_ARCHIVER_TRANSPORT` | `kafka` (a broker) or `grpc` (the Push listener) | `kafka` |
+| `DFE_ARCHIVER_GRPC_LISTEN` | Push listener bind address, on `grpc` | `0.0.0.0:6000` |
+| `DFE_ARCHIVER_KAFKA_BROKERS` | Kafka broker addresses | `localhost:9092` |
+| `DFE_ARCHIVER_KAFKA_GROUP_ID` | Consumer group ID | `dfe-archiver` |
+| `DFE_ARCHIVER_KAFKA_TOPICS` | Topics to consume (comma-separated); empty discovers | (discover) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_INCLUDE` | Regex patterns a discovered topic must match | (none: every topic) |
+| `DFE_ARCHIVER_KAFKA_TOPIC_EXCLUDE` | Regex patterns that drop a discovered topic | DLQ + internal |
+| `DFE_ARCHIVER_KAFKA_TOPIC_REFRESH_SECS` | How often discovery re-reads the broker | `60` |
+| `DFE_ARCHIVER_KAFKA_SASL_MECHANISM` | SASL mechanism | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_USER` | SASL username | (none) |
+| `DFE_ARCHIVER_KAFKA_SASL_PASSWORD` | SASL password | (none) |
+| `DFE_ARCHIVER_DESTINATION` | Output URL | (none -- idles) |
+| `DFE_ARCHIVER_COMPRESSION_CODEC` | Compression codec | `zstd` |
+| `DFE_ARCHIVER_MEMORY_LIMIT_BYTES` | Memory guard cap; `0` auto-detects from the cgroup | `0` |
+| `DFE_ARCHIVER_MEMORY_PRESSURE_THRESHOLD` | Backpressure trigger, 0.0-1.0 | `0.8` |
+| `DFE_ARCHIVER_VERSION_CHECK__ENABLED` | `false` disables the startup version check | `true` |
 | `METRICS_ADDR` | Metrics server address | `0.0.0.0:9090` |
 | `LOG_LEVEL` | Log level | `info` |
 
-The memory guard belongs to the scalo runtime and reads only the `ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and an `ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
+The memory guard belongs to the scalo runtime and reads only the `DFE_ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and a `DFE_ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
+
+The names before the `DFE_ARCHIVER_` prefix still work and are deprecated: `ARCHIVER_X` is now `DFE_ARCHIVER_X`, and `KAFKA_X`, `DLQ_X` and `S3_X` are now `DFE_ARCHIVER_KAFKA_X`, `DFE_ARCHIVER_DLQ_X` and `DFE_ARCHIVER_S3_X`. At startup each old variable is copied to its new name when the new one is unset, so the new name wins when both are set, and one warning lists the old names found. Only the `KAFKA_`, `DLQ_` and `S3_` names the archiver reads are copied (the 21 in `LEGACY_FLAT_ENV`), so another tool's `KAFKA_*` variables in the same container are left alone.
 
 ### Which transport, and idling until configured
 
@@ -340,7 +342,7 @@ dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kaf
 | `crates/core/` | Config types, the rolling writer, the tiered buffer, routing, codecs, the storage trait. No I/O, no metrics. |
 | `crates/io/` | Kafka and gRPC transports, and the object-store backends behind `create_backend`. The cold-build bottleneck, none of it ours. |
 | `crates/archiver/` | The binary. `archiver.rs` the pipeline loop, `main.rs` the scalo `ServiceApp` wiring, `metrics.rs` the Prometheus surface, `contract.rs` the deployment contract. |
-| `crates/archiver/src/config/loader.rs` | `init_cascade` -- the call that makes `ARCHIVER_*__*` reach anything. |
+| `crates/archiver/src/config/loader.rs` | `init_cascade` -- the call that makes `DFE_ARCHIVER_*__*` reach anything. |
 | `crates/archiver/src/bin/pgo_driver.rs` | The second `[[bin]]`, gated on `required-features = ["pgo-driver"]`. The gate keeps it out of the release payload: hyperi-ci skips feature-gated binaries when packaging, and verifies BOLT on the first packaged binary only. |
 | `Dockerfile` | Generated from `contract.rs`. Its header names the generator and schema version. |
 | `docs/architecture.md` | Crate map and the one-way rules. `docs/internals.md` is the pipeline design. |
@@ -367,7 +369,7 @@ Green says less than it looks, two ways:
 | Commit the Kafka offsets of a batch once it is written into a file. | Hold them on the file and release them when it completes. The armed consumer commits each partition up to its lowest offset not yet released. | A file is an upload in progress until it rolls, and a kill abandons it. Default routing is expression on `_org_id`, so one partition fans out to several files that complete at different times (#82). |
 | Build a second `MetricsManager` in a test and assert on `render()`. | Share one manager, assert on the delta. | `set_global_recorder` succeeds once per process. Later managers keep the existing recorder and render an empty string. nextest forks per test and hides it, `cargo-llvm-cov` runs one process and does not (#84). |
 | Trust `cargo update -p rustls` to clear the advisory. | `cargo update -p rustls --precise 0.23.45`, then build both arches. | Plain `-p` stops at 0.23.43, still vulnerable, because 0.23.45 needs aws-lc-rs to move too. `--precise` drags `aws-lc-sys` 0.41 to 0.45, which compiles C (#85). |
-| Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |
+| Put `memory:`, `metrics:` or `scaling:` in the config file. | Set them as `DFE_ARCHIVER_<SECTION>__<KEY>` env vars. | scalo builds the memory guard, metrics listener and scaling engine before the config file is read. Those blocks once parsed and validated while reaching nothing. |
 | Point `scalo` at a local path to try an unreleased change. | Keep the crates.io range. Read the local clone instead. | A path override builds against uncommitted work, so the release does not reproduce. |
 | Hand-edit `Dockerfile`. | `dfe-archiver emit-dockerfile > Dockerfile`. | It is generated from the deployment contract, and a scalo release can move the generator or its schema version. |
 | Give PGO a port check or a startup probe as its workload. | Drive consume, route, compress and write for 60s or more. | Shallow workloads bias the profile toward startup paths and give NEGATIVE gains. Measured on dfe-loader and dfe-receiver. |
