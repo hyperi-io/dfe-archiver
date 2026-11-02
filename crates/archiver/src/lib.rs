@@ -31,7 +31,6 @@
 mod archiver;
 pub mod config;
 pub mod contract;
-pub mod legacy_env;
 pub mod metrics;
 mod writers;
 

@@ -105,7 +105,7 @@ Configuration follows a cascade (highest to lowest priority):
 
 The memory guard belongs to the scalo runtime and reads only the `DFE_ARCHIVER_MEMORY_*` variables above, never a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the cascade, where the config file is the settings layer and a `DFE_ARCHIVER_SECTION__KEY` variable outranks it. The archiver's own sections take a single underscore; the double-underscore names belong to those scalo sections.
 
-The names before the `DFE_ARCHIVER_` prefix still work and are deprecated: `ARCHIVER_X` is now `DFE_ARCHIVER_X`, and `KAFKA_X`, `DLQ_X` and `S3_X` are now `DFE_ARCHIVER_KAFKA_X`, `DFE_ARCHIVER_DLQ_X` and `DFE_ARCHIVER_S3_X`. At startup each old variable is copied to its new name when the new one is unset, so the new name wins when both are set, and one warning lists the old names found. Only the `KAFKA_`, `DLQ_` and `S3_` names the archiver reads are copied (the 21 in `LEGACY_FLAT_ENV`), so another tool's `KAFKA_*` variables in the same container are left alone.
+Only the `DFE_ARCHIVER_` names are read. An older `ARCHIVER_X`, `KAFKA_X`, `DLQ_X` or `S3_X` variable reaches nothing and the archiver does not warn about it.
 
 ### Which transport, and idling until configured
 

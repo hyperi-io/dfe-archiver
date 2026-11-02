@@ -687,9 +687,9 @@ Configuration follows a cascade (highest to lowest priority):
 
 The memory guard is built by the scalo runtime from the `DFE_ARCHIVER_MEMORY_*` variables above and never reads a `memory:` block in the config file. The other scalo sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) resolve from the config cascade, where the config file is the settings layer and env outranks it. The single-underscore names are read directly. The double-underscore ones nest into the cascade (`DFE_ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`).
 
-#### Legacy names
+#### Old names
 
-The pre-prefix names still work and are deprecated: `ARCHIVER_X` is now `DFE_ARCHIVER_X`, and `KAFKA_X`, `DLQ_X` and `S3_X` are now `DFE_ARCHIVER_KAFKA_X`, `DFE_ARCHIVER_DLQ_X` and `DFE_ARCHIVER_S3_X`. `legacy_env::adopt_legacy_names` runs in `main` after `.env` loads and before any thread starts. It copies each old variable to its new name when the new one is unset, so the new name wins when both are set, and `warn_on_legacy_names` logs one warning listing the old names found. The whole `ARCHIVER_` prefix is copied because the scalo cascade reads any `ARCHIVER_SECTION__KEY`. The `KAFKA_`, `DLQ_` and `S3_` names are an explicit list (`LEGACY_FLAT_ENV`), so another tool's `KAFKA_*` variables are left alone. An empty new variable counts as set, so it blocks the copy.
+Only the `DFE_ARCHIVER_` names are read. `ARCHIVER_X`, `KAFKA_X`, `DLQ_X` and `S3_X` reach nothing and the archiver does not warn about them.
 
 ### Full Config Example
 
