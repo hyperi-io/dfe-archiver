@@ -627,32 +627,6 @@ impl Default for CompressionConfig {
 /// charts build their `<PREFIX>_SECTION__KEY` variables from.
 pub const ENV_PREFIX: &str = "DFE_ARCHIVER";
 
-/// The old spellings of the flat variables read below that did not start with
-/// `ARCHIVER_`, which the binary copies to their `DFE_ARCHIVER_` names at startup.
-pub const LEGACY_FLAT_ENV: [&str; 21] = [
-    "KAFKA_BROKERS",
-    "KAFKA_GROUP_ID",
-    "KAFKA_TOPICS",
-    "KAFKA_TOPIC_INCLUDE",
-    "KAFKA_TOPIC_EXCLUDE",
-    "KAFKA_TOPIC_REFRESH_SECS",
-    "KAFKA_SASL_MECHANISM",
-    "KAFKA_SECURITY_PROTOCOL",
-    "KAFKA_SASL_USER",
-    "KAFKA_SASL_PASSWORD",
-    "KAFKA_SSL_CA_LOCATION",
-    "KAFKA_ALLOW_INSECURE_TRANSPORT",
-    "DLQ_ENABLED",
-    "DLQ_TOPIC",
-    "DLQ_MODE",
-    "S3_BUCKET",
-    "S3_REGION",
-    "S3_ACCESS_KEY_ID",
-    "S3_SECRET_ACCESS_KEY",
-    "S3_ENDPOINT",
-    "S3_ALLOW_HTTP",
-];
-
 /// Apply flat environment variable overrides.
 ///
 /// Every name is `<prefix>_<KEY>` with a single underscore, because these are
@@ -662,8 +636,8 @@ pub const LEGACY_FLAT_ENV: [&str; 21] = [
 /// (`DFE_ARCHIVER_VERSION_CHECK__ENABLED` and the rest) belong to the scalo
 /// runtime sections and reach them through the cascade, never through here.
 ///
-/// The old names (`KAFKA_BROKERS`, `ARCHIVER_DESTINATION`) are not read here:
-/// the binary copies them to these names at startup.
+/// Only the `DFE_ARCHIVER_` names are read. `KAFKA_BROKERS` and
+/// `ARCHIVER_DESTINATION` reach nothing.
 ///
 /// `DFE_ARCHIVER_MEMORY_*` is absent by design: those names belong to scalo's
 /// `MemoryGuard`, which reads them itself. Mapping them here would shadow the

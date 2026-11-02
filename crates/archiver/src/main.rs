@@ -18,7 +18,6 @@ use dfe_archiver::config::{
     ConfigReloader, ReloaderConfig, SharedConfig, config_file, load_config, validate_config,
 };
 use dfe_archiver::contract::deployment_contract;
-use dfe_archiver::legacy_env::{adopt_legacy_names, warn_on_legacy_names};
 use dfe_archiver::metrics::{ArchiverMetrics, init_metrics};
 use dfe_archiver::{Archiver, restart_required_changes};
 use dfe_archiver_core::config::{ENV_PREFIX, HELD_OFFSET_BYTES};
@@ -94,8 +93,6 @@ impl ServiceApp for App {
     /// read. `Config::idle_reason` is the whole predicate, so the charts, the
     /// tests and this hook cannot disagree about what "no work" means.
     fn work_state(&self, config: &Self::Config) -> scalo::lifecycle::WorkState {
-        // The first hook that runs with the logger up, and one an idle archiver still reaches.
-        warn_on_legacy_names();
         config
             .idle_reason()
             .map_or(scalo::lifecycle::WorkState::Active, |reason| {
@@ -363,13 +360,6 @@ fn main() {
     // the one the builder reads. The working directory's .env only:
     // dotenvy::dotenv() would load the first .env in any parent directory.
     dotenvy::from_path(".env").ok();
-
-    // After .env so a legacy name set there is copied, and before any thread
-    // starts so the scalo cascade and memory guard see the new names.
-    if let Err(e) = adopt_legacy_names() {
-        eprintln!("fatal: could not map the legacy ARCHIVER_/KAFKA_/DLQ_/S3_ variables: {e}");
-        std::process::exit(1);
-    }
 
     let app = App::parse();
 

@@ -219,44 +219,6 @@ fn a_dotenv_in_a_parent_directory_is_not_loaded() {
     );
 }
 
-/// A deployment still on the old names keeps working, and a new name outranks
-/// its old spelling wherever both are set, in the environment or in `.env`.
-#[test]
-fn a_legacy_env_name_reaches_the_config_and_the_new_name_wins() {
-    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-    let cases: [Case; 3] = [
-        (
-            "",
-            &[("ARCHIVER_DESTINATION", "file:///tmp/legacy_env")],
-            "legacy_env",
-        ),
-        (
-            "ARCHIVER_DESTINATION=file:///tmp/legacy_dotenv\n",
-            &[],
-            "legacy_dotenv",
-        ),
-        (
-            "ARCHIVER_DESTINATION=file:///tmp/legacy_dotenv\n",
-            &[("DFE_ARCHIVER_DESTINATION", "file:///tmp/new_env")],
-            "new_env",
-        ),
-    ];
-    for (dotenv, envs, expected) in cases {
-        let project = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(project.path().join(".env"), dotenv).expect("project .env");
-
-        let printed = config_check_with(project.path(), envs);
-
-        assert!(printed.contains(expected), "{envs:?}: {printed}");
-        for other in ["legacy_env", "legacy_dotenv", "new_env"] {
-            assert!(
-                other == expected || !printed.contains(other),
-                "{other} outranked {expected}: {printed}"
-            );
-        }
-    }
-}
-
 /// Every flat suffix `Config::apply_flat_env` reads, with a value that moves
 /// the setting off its default.
 const FLAT_ENV_CASES: [(&str, &str); 30] = [
@@ -292,12 +254,10 @@ const FLAT_ENV_CASES: [(&str, &str); 30] = [
     ("S3_ALLOW_HTTP", "true"),
 ];
 
-/// Each flat name moves its setting under the contract's prefix, and
-/// `LEGACY_FLAT_ENV` lists exactly the old spellings with no `ARCHIVER_` prefix,
-/// so a reader added without its old name or a stale list entry fails here.
+/// Each flat name moves its setting under the contract's prefix.
 #[test]
 fn every_flat_env_name_is_read_under_the_contract_prefix() {
-    use dfe_archiver_core::config::{ENV_PREFIX, LEGACY_FLAT_ENV};
+    use dfe_archiver_core::config::ENV_PREFIX;
     use scalo::config::flat_env::ApplyFlatEnv;
 
     let effective = |config: &Config| {
@@ -312,18 +272,4 @@ fn every_flat_env_name_is_read_under_the_contract_prefix() {
         temp_env::with_var(&name, Some(value), || config.apply_flat_env(ENV_PREFIX));
         assert_ne!(effective(&config), baseline, "{name} reaches no setting");
     }
-
-    let mut prefixed: Vec<&str> = FLAT_ENV_CASES
-        .iter()
-        .map(|(suffix, _)| *suffix)
-        .filter(|suffix| {
-            ["KAFKA_", "DLQ_", "S3_"]
-                .iter()
-                .any(|p| suffix.starts_with(p))
-        })
-        .collect();
-    let mut listed: Vec<&str> = LEGACY_FLAT_ENV.to_vec();
-    prefixed.sort_unstable();
-    listed.sort_unstable();
-    assert_eq!(listed, prefixed);
 }
