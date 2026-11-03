@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.46](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.45...v1.7.46) (2026-11-03)
+
+### Bug Fixes
+
+* **archiver:** drop the legacy env-name shim ([651d999](https://github.com/hyperi-io/dfe-archiver/commit/651d9998a52708cddf5355922219c8fa20a97ee6)), closes [#950](https://github.com/hyperi-io/dfe-archiver/issues/950) [#1056](https://github.com/hyperi-io/dfe-archiver/issues/1056) [#342](https://github.com/hyperi-io/dfe-archiver/issues/342)
+* **deps:** update pulldown-cmark to 0.13.6 ([2f1e75a](https://github.com/hyperi-io/dfe-archiver/commit/2f1e75a56f49b92cd87ae542753eec95de85331c))
+* rebuild on scalo 2.14.26 ([5098327](https://github.com/hyperi-io/dfe-archiver/commit/5098327d9668a4ea84b9cc4453e307245749941e))
+
 ## [1.7.45](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.44...v1.7.45) (2026-11-02)
 
 ### Bug Fixes
