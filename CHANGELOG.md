@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.47](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.46...v1.7.47) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** update Rust crate aws-sdk-s3 to >=1.157.0, <2 ([#165](https://github.com/hyperi-io/dfe-archiver/issues/165)) ([febd240](https://github.com/hyperi-io/dfe-archiver/commit/febd240eeb2ab246023d5b195f0090f37352305e))
+* **scalo:** rebuild on scalo 2.14.27 ([cb26f10](https://github.com/hyperi-io/dfe-archiver/commit/cb26f10ba653eb7706c9afdf090bb24d10b28292))
+
 ## [1.7.46](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.45...v1.7.46) (2026-11-03)
 
 ### Bug Fixes
