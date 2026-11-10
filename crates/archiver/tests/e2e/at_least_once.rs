@@ -688,7 +688,9 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
-    kafka.produce("events", &[undeliverable_dead_letter()]).await;
+    kafka
+        .produce("events", &[undeliverable_dead_letter()])
+        .await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
@@ -1154,7 +1156,9 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
-    kafka.produce("events", &[undeliverable_dead_letter()]).await;
+    kafka
+        .produce("events", &[undeliverable_dead_letter()])
+        .await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
