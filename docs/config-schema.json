@@ -21,6 +21,11 @@
         "topic_include": [],
         "topic_exclude": [
           "^__",
+          "^strimzi\\.",
+          "^_confluent",
+          "^_redpanda",
+          "^_schemas$",
+          "^connect-(configs|offsets|status)$",
           "_dlq$"
         ],
         "topic_refresh_secs": 60,
@@ -170,6 +175,11 @@
           },
           "default": [
             "^__",
+            "^strimzi\\.",
+            "^_confluent",
+            "^_redpanda",
+            "^_schemas$",
+            "^connect-(configs|offsets|status)$",
             "_dlq$"
           ]
         },
