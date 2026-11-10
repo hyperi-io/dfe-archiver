@@ -457,7 +457,12 @@ async fn a_deleted_topic_is_not_counted_as_archive_errors() {
     kafka.create_topic("events", &[]).await;
 
     let spool = tempfile::TempDir::new().expect("spool");
-    let config = kafka_to(&kafka, &store, spool.path(), "events");
+    let mut config = kafka_to(&kafka, &store, spool.path(), "events");
+    // librdkafka finds a deleted topic only at its next metadata refresh, 5 min by default.
+    config.kafka.librdkafka_overrides.insert(
+        "topic.metadata.refresh.interval.ms".to_string(),
+        "1000".to_string(),
+    );
     let (manager, metrics) = metrics();
     kafka.produce("events", &records(0..1)).await;
     let archiver = archiver(&config, &metrics).await;
