@@ -1246,7 +1246,7 @@ impl Archiver {
                             if log_debounced(&self.log_guards.recv_error_last, 5000) {
                                 error!(error = %e, "Failed to receive from the inbound transport (debounced, max 1/5s)");
                             }
-                            self.metrics.record_error();
+                            // No record was read, so scalo's transport_recv_errors_total counts this, not archive_errors_total.
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }

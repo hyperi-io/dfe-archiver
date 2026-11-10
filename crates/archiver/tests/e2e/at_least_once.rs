@@ -443,6 +443,46 @@ async fn a_graceful_stop_under_traffic_writes_every_record_it_answered() {
     );
 }
 
+/// A topic deleted under the loop fails receives, not records: nothing was
+/// read from it, so the archive error total stays at zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_topic_is_not_counted_as_archive_errors() {
+    init_logs();
+    let Some(kafka) = common::acquire_kafka("topic_deleted").await else {
+        return;
+    };
+    let Some(store) = common::acquire_s3_store("topic_deleted").await else {
+        return;
+    };
+    kafka.create_topic("events", &[]).await;
+
+    let spool = tempfile::TempDir::new().expect("spool");
+    let config = kafka_to(&kafka, &store, spool.path(), "events");
+    let (manager, metrics) = metrics();
+    kafka.produce("events", &records(0..1)).await;
+    let archiver = archiver(&config, &metrics).await;
+    let running = tokio::spawn({
+        let archiver = Arc::clone(&archiver);
+        async move { archiver.run().await }
+    });
+    wait_until("the record is received", || async {
+        counter(&manager, "messages_received_total") >= 1
+    })
+    .await;
+
+    kafka.delete_topic("events").await;
+    wait_until("a receive fails on the deleted topic", || async {
+        counter(&manager, "transport_recv_errors_total") >= 1
+    })
+    .await;
+    assert_eq!(
+        counter(&manager, "archive_errors_total"),
+        0,
+        "receive failures on a deleted topic were counted as archive errors"
+    );
+    stop(&archiver, running).await;
+}
+
 /// A store that fails every upload until it comes back costs time, never
 /// records: the staged file and its offsets are kept, the loop keeps running,
 /// and once the store answers every record lands once and the commit follows.
