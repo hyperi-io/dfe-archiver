@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.48](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.47...v1.7.48) (2026-11-10)
+
+### Bug Fixes
+
+* **archiver:** rebuild on scalo 2.14.28 ([#168](https://github.com/hyperi-io/dfe-archiver/issues/168)) ([3104741](https://github.com/hyperi-io/dfe-archiver/commit/3104741bbf7f01cf64454d40ef49841b23bd345f))
+* **ci:** drop Namespace runners, add test-tier ([3423911](https://github.com/hyperi-io/dfe-archiver/commit/3423911971432399669ca5f486ec67ca86b3adea))
+
 ## [1.7.47](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.46...v1.7.47) (2026-11-09)
 
 ### Bug Fixes
