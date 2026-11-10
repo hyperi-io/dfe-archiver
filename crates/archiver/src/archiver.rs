@@ -3220,9 +3220,10 @@ mod tests {
             .iter()
             .map(|entry| entry.payload.as_slice())
             .collect();
+        // The DLQ trims a block that is one whole JSON object.
         assert_eq!(
             payloads,
-            vec![first, second.as_slice()],
+            vec![first.trim_ascii_end(), second.as_slice()],
             "one entry a block, each block whole"
         );
         assert!(

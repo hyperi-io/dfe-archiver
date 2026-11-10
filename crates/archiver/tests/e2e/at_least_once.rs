@@ -645,10 +645,16 @@ async fn a_batch_the_dlq_refuses_ends_the_loop_and_the_restart_dead_letters_it()
     );
 }
 
-/// Under the 16 MiB record ceiling as a record, over every DLQ backend's
-/// ceiling as a dead letter once base64 grows the payload by a third.
+/// A 13 MB record carrying `id`, under the 16 MiB record ceiling.
 fn oversize_record(id: u64) -> Vec<u8> {
     padded(id, 13_000_000)
+}
+
+/// Under the 16 MiB record ceiling as a record, over every DLQ backend's
+/// ceiling as a dead letter: bytes that are not UTF-8 go to the DLQ as base64,
+/// a third larger.
+fn undeliverable_dead_letter() -> Vec<u8> {
+    vec![0xff; 13_000_000]
 }
 
 /// A batch the store refused for good, over every DLQ backend's ceiling as a
@@ -682,7 +688,9 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
-    kafka.produce("events", &[oversize_record(20)]).await;
+    kafka
+        .produce("events", &[undeliverable_dead_letter()])
+        .await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
@@ -718,7 +726,7 @@ async fn a_refused_batch_drops_only_the_record_no_dlq_can_hold() {
 /// A local write that fails in a way that can clear holds its batch and
 /// retries it: nothing is dead-lettered, dropped or committed, the loop keeps
 /// running, and once the disk recovers every record lands once and the commit
-/// follows -- a record too large for any DLQ backend included.
+/// follows -- a 13 MB record included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_local_write_failure_holds_the_batch_until_the_disk_recovers() {
     init_logs();
@@ -1148,7 +1156,9 @@ async fn a_file_refused_at_upload_drops_only_the_record_no_dlq_can_hold() {
     let (manager, metrics) = metrics();
 
     kafka.produce("events", &records(0..20)).await;
-    kafka.produce("events", &[oversize_record(20)]).await;
+    kafka
+        .produce("events", &[undeliverable_dead_letter()])
+        .await;
     let archiver = archiver(&config, &metrics).await;
     let running = tokio::spawn({
         let archiver = Arc::clone(&archiver);
