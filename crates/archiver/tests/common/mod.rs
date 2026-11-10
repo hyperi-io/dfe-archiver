@@ -1728,6 +1728,22 @@ impl KafkaFixture {
         }
     }
 
+    /// Delete `topic` from the broker.
+    pub async fn delete_topic(&self, topic: &str) {
+        use rdkafka::admin::{AdminClient, AdminOptions};
+        use rdkafka::client::DefaultClientContext;
+
+        let admin: AdminClient<DefaultClientContext> =
+            self.client().create().expect("kafka admin client");
+        for result in admin
+            .delete_topics(&[topic], &AdminOptions::new())
+            .await
+            .expect("delete topics")
+        {
+            result.unwrap_or_else(|(name, code)| panic!("delete topic {name}: {code}"));
+        }
+    }
+
     /// Produce `payloads` to `topic` and wait for every delivery report.
     pub async fn produce(&self, topic: &str, payloads: &[Vec<u8>]) {
         use rdkafka::producer::{FutureProducer, FutureRecord};
