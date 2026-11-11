@@ -130,7 +130,7 @@ async fn a_hostile_value_writes_under_the_archive_base() {
     // base is caught and still cleaned up with the directory.
     let base = tmp.path().join("deep").join("er").join("archive");
     std::fs::create_dir_all(&base).expect("base");
-    let staging = Staging::open(tmp.path().join("uploads")).expect("staging");
+    let staging = Staging::open(tmp.path().join("uploads"), u64::MAX).expect("staging");
 
     let mut failed = Vec::new();
     for value in HOSTILE {

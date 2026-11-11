@@ -1538,8 +1538,8 @@ async fn a_stopped_process_s_complete_file_is_uploaded_on_the_direct_transport()
     // A process that stops after closing one file and before uploading it,
     // with a second file still open.
     {
-        let staging =
-            dfe_archiver::io::Staging::open(spool.path().join("uploads")).expect("staging");
+        let staging = dfe_archiver::io::Staging::open(spool.path().join("uploads"), u64::MAX)
+            .expect("staging");
         let backend = create_backend(&config.archive, &staging).expect("backend");
         backend
             .create("events/2026/left-0001.jsonl")

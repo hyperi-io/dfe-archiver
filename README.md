@@ -23,7 +23,7 @@ Writes a DFE deployment's Kafka or gRPC streams to compressed files in a local p
 - Rolls a file at 1 GiB compressed or at the roll interval: 300 s while Kafka offsets are held or on `grpc`, otherwise 3600 s.
 - On Kafka an offset is committed once the archive file holding its record is complete, so delivery is at-least-once.
 - Every destination's buffer together holds at most a quarter of the memory limit, the largest flushing first.
-- Intake pauses as staged uploads near 8 GiB, and a full disk holds intake rather than dropping records.
+- Intake pauses as staged uploads near `buffer.staged_bytes_cap` (8 GiB on the default 10Gi spool volume), and a full disk holds intake rather than dropping records.
 
 ## Architecture
 
@@ -151,6 +151,7 @@ buffer:
   flush_records: 100000        # ... or at this many records, whichever comes first
   flush_age_secs: 60
   writer_parallelism: 2        # object-store uploads at once, each holding 4 x multipart_chunk_size
+  # staged_bytes_cap / min_free_spool_bytes / quarantine_bytes_cap: unset, a share of the spool volume's size limit
 
 compression:
   codec: zstd
@@ -225,7 +226,7 @@ archive:
 
 On `kafka`, a record's offset is committed only once the archive file holding it is durable: the store confirmed the upload, or the local file and its directories synced to disk. An object-store file is written to `<buffer.spool_dir>/uploads` and uploaded whole when it rolls -- `roll_size_bytes` or `roll_interval_secs`, whichever comes first -- so the store is never on the write path. scalo's Kafka transport tracks every offset it hands out and commits each partition only up to its lowest offset not yet released, so one destination's roll never commits past a record another destination still holds.
 
-A failed upload keeps the staged file and its held offsets, and retries in the background with exponential backoff and jitter, from 0.5 s up to 60 s between attempts, until the store takes it. Each attempt is a fresh upload, and a failed one is aborted so it leaves no parts in the store. An outage of any length costs disk and consumer lag, never records. A staged copy that cannot be read back is moved to `<buffer.spool_dir>/uploads/quarantine` and its records are read again after a restart. Intake pauses (the Kafka partitions, through the self-regulation gate) as held records near a quarter of the memory limit at 32 bytes each, or staged files near 8 GiB. A store outage becomes consumer lag, not memory or disk growth. A refusal the store gives for the object itself -- a key past the 1024-byte limit, an entity too large -- is permanent. The file's records then go to the DLQ, each as its own entry, and only with the DLQ off, or for a record too large for any DLQ backend, are they dropped, counted in `messages_dropped_total` with the reason logged. `messages_archived_total` counts records when the store confirms their file, `messages_written_total` when they go into an open file.
+A failed upload keeps the staged file and its held offsets, and retries in the background with exponential backoff and jitter, from 0.5 s up to 60 s between attempts, until the store takes it. Each attempt is a fresh upload, and a failed one is aborted so it leaves no parts in the store. An outage of any length costs disk and consumer lag, never records. A staged copy that cannot be read back is moved to `<buffer.spool_dir>/uploads/quarantine` and its records are read again after a restart. Intake pauses (the Kafka partitions, through the self-regulation gate) as held records near a quarter of the memory limit at 32 bytes each, or staged files near `buffer.staged_bytes_cap`. A store outage becomes consumer lag, not memory or disk growth. A refusal the store gives for the object itself -- a key past the 1024-byte limit, an entity too large -- is permanent. The file's records then go to the DLQ, each as its own entry, and only with the DLQ off, or for a record too large for any DLQ backend, are they dropped, counted in `messages_dropped_total` with the reason logged. `messages_archived_total` counts records when the store confirms their file, `messages_written_total` when they go into an open file.
 
 Each held record costs about 32 bytes of memory until its file is durable. So while offsets are held an unset `roll_interval_secs` is 300 rather than 3600: at 10k records/s that is 96 MB instead of 1.15 GB. A configured value always wins, and one above 900 logs a startup warning.
 
@@ -249,10 +250,12 @@ Every file name carries a component unique to the writer, so two replicas writin
 
 The only files on local disk are archive files: a local destination's open files, and under `<buffer.spool_dir>/uploads` each object-store file until the store takes it.
 
-- The archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume. When files a previous process staged are waiting to upload it starts anyway, so a backlog left by a store outage never stops the restart that uploads it.
-- Intake pauses as staged bytes near 8 GiB, under the spool volume's 10 GiB `emptyDir` limit, so a store outage becomes consumer lag.
-- The quarantine directory holds at most 1 GiB. A file past it is removed and counted in `staged_files_removed_total{reason="quarantine_full"}`.
+- The archiver refuses to start with less than `buffer.min_free_spool_bytes` free on the `buffer.spool_dir` volume (1 GiB on the default 10Gi volume). When files a previous process staged are waiting to upload it starts anyway, so a backlog left by a store outage never stops the restart that uploads it.
+- Intake pauses as staged bytes near `buffer.staged_bytes_cap`, kept under the spool volume's `emptyDir` limit, so a store outage becomes consumer lag.
+- The quarantine directory holds at most `buffer.quarantine_bytes_cap` (1 GiB on the default volume). A file past it is removed and counted in `staged_files_removed_total{reason="quarantine_full"}`.
 - A local write that fails on a full disk is held and retried, never dropped.
+
+The three caps are `buffer.staged_bytes_cap`, `buffer.min_free_spool_bytes` and `buffer.quarantine_bytes_cap`, in bytes. Unset, they are 8/9, 1/9 and 1/9 of the spool budget, which is 90% of the volume's size limit as the chart declares it in `SCALO_WRITABLE_PATH_LIMITS`: 8, 1 and 1 GiB on the 10Gi volume, and all three grow with a bigger one. Where no limit is declared (docker, a bare host) they are 8, 1 and 1 GiB. A key that is set wins, so a volume sized outside the chart needs all three set. `staged_bytes_cap` must be above 0.
 
 Neither limit is configured. `staged_bytes` and `uploads_pending` show the disk in use.
 

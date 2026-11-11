@@ -184,6 +184,14 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     require_counts(config)?;
 
+    // A zero cap would pause intake before the first staged byte, for good.
+    if config.buffer.staged_bytes_cap == Some(0) {
+        return Err(Error::Config(
+            "buffer.staged_bytes_cap must be greater than 0: intake pauses once staged bytes reach it"
+                .to_string(),
+        ));
+    }
+
     // The tiered buffer creates this directory at construction, so an empty
     // value fails the boot with an errno the operator cannot place.
     if config.buffer.spool_dir.trim().is_empty() {
@@ -677,6 +685,19 @@ mod tests {
                 assert!(err.to_string().contains(key), "{transport}: {err}");
             }
         }
+    }
+
+    #[test]
+    fn a_zero_staged_bytes_cap_fails() {
+        let config = Config {
+            buffer: dfe_archiver_core::config::BufferConfig {
+                staged_bytes_cap: Some(0),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let err = validate_config(&config).expect_err("a zero staged cap pauses intake for good");
+        assert!(err.to_string().contains("buffer.staged_bytes_cap"), "{err}");
     }
 
     #[test]

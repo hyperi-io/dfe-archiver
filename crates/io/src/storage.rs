@@ -38,11 +38,6 @@ const MAX_OBJECT_KEY_BYTES: usize = 1024;
 /// The directory under staging where files that are not uploaded are moved.
 const QUARANTINE_DIR: &str = "quarantine";
 
-/// Bytes the quarantine directory may hold. With the 8 GiB staging cap it
-/// stays under the spool volume's 10 GiB limit, past which kubelet evicts the
-/// pod and the volume with it.
-const QUARANTINE_BYTES_CAP: u64 = 1024 * 1024 * 1024;
-
 /// The extension of a staged file.
 const STAGED_EXTENSION: &str = "part";
 
@@ -122,6 +117,10 @@ pub enum Quarantined {
 #[derive(Clone, Debug)]
 pub struct Staging {
     dir: PathBuf,
+    /// Bytes the quarantine directory may hold. With the staged-bytes cap it
+    /// has to stay under the spool volume's size limit, past which kubelet
+    /// evicts the pod and the volume with it.
+    quarantine_bytes_cap: u64,
     bytes: Arc<AtomicU64>,
     /// Files done with whose removal failed, still counted in `bytes` until
     /// [`retry_removals`](Self::retry_removals) removes them.
@@ -136,16 +135,18 @@ struct Stranded {
 }
 
 impl Staging {
-    /// Stage under `dir`. What a previous process left there stays until
+    /// Stage under `dir`, with at most `quarantine_bytes_cap` bytes in its
+    /// quarantine directory. What a previous process left there stays until
     /// [`recover`](Self::recover) decides its fate.
     ///
     /// # Errors
     /// Returns an error when the directory cannot be created.
-    pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+    pub fn open(dir: impl Into<PathBuf>, quarantine_bytes_cap: u64) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
+            quarantine_bytes_cap,
             bytes: Arc::new(AtomicU64::new(0)),
             stranded: Arc::new(parking_lot::Mutex::new(Vec::new())),
         })
@@ -213,7 +214,7 @@ impl Staging {
     }
 
     /// Move a staged file and its manifest into the quarantine directory for
-    /// an operator, or remove them when it is at its 1 GiB cap.
+    /// an operator, or remove them when it is at its byte cap.
     #[must_use]
     pub fn quarantine(&self, local: &Path) -> Quarantined {
         let manifest = with_suffix(local, MANIFEST_SUFFIX);
@@ -223,7 +224,7 @@ impl Staging {
         };
         let dir = self.dir.join(QUARANTINE_DIR);
         let held = dir_bytes(&dir);
-        let moved = held.saturating_add(size) <= QUARANTINE_BYTES_CAP
+        let moved = held.saturating_add(size) <= self.quarantine_bytes_cap
             && std::fs::create_dir_all(&dir).is_ok()
             && local
                 .file_name()
@@ -234,7 +235,7 @@ impl Staging {
             warn!(
                 local = %local.display(),
                 quarantine_bytes = held,
-                cap = QUARANTINE_BYTES_CAP,
+                cap = self.quarantine_bytes_cap,
                 "The quarantine directory is full or cannot take a staged file, so it is removed"
             );
             return Quarantined::Full;
@@ -1704,7 +1705,7 @@ mod tests {
     /// A staging area in its own temporary directory.
     fn staging() -> (TempDir, Staging) {
         let dir = TempDir::new().expect("create temp dir");
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         (dir, staging)
     }
 
@@ -2237,10 +2238,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_removes_what_the_source_delivers_again() {
         let dir = TempDir::new().expect("create temp dir");
-        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        let first = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         leave_staged(&first, &[b"one\n"], b"two\n").await;
 
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let recovery = staging.recover(true).expect("recover");
         assert_eq!(recovery.replayed, 2);
         assert_eq!(recovery.complete, Vec::<RecoveredFile>::new());
@@ -2264,10 +2265,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_uploads_a_complete_file_and_quarantines_an_incomplete_one() {
         let dir = TempDir::new().expect("create temp dir");
-        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        let first = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         leave_staged(&first, &[b"one\n", b"two\n"], b"half").await;
 
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let mut recovery = staging.recover(false).expect("recover");
         assert_eq!(recovery.incomplete, 1, "{recovery:?}");
         assert_eq!(recovery.replayed, 0);
@@ -2313,12 +2314,37 @@ mod tests {
         );
     }
 
+    /// The quarantine cap is the one passed to `open`: a file that fits moves
+    /// in, and the next that would pass it is removed with its manifest.
+    #[tokio::test]
+    async fn quarantine_holds_up_to_the_cap_it_was_opened_with() {
+        let dir = TempDir::new().expect("create temp dir");
+        let staging = Staging::open(dir.path().join("uploads"), 10).expect("staging");
+        let files: Vec<PathBuf> = ["a", "b"]
+            .iter()
+            .map(|name| {
+                let local = staging.dir().join(format!("{name}.{STAGED_EXTENSION}"));
+                std::fs::write(&local, [0u8; 8]).expect("stage a file");
+                std::fs::write(with_suffix(&local, MANIFEST_SUFFIX), b"{}").expect("manifest");
+                local
+            })
+            .collect();
+
+        assert_eq!(staging.quarantine(&files[0]), Quarantined::Moved);
+        assert_eq!(staging.quarantine(&files[1]), Quarantined::Full);
+        assert!(!files[1].exists(), "the file past the cap is removed");
+        assert!(
+            !with_suffix(&files[1], MANIFEST_SUFFIX).exists(),
+            "and so is its manifest"
+        );
+    }
+
     /// A manifest that cannot be read, or that disagrees with its file, says
     /// nothing reliable about where the file belongs, so it is quarantined.
     #[tokio::test]
     async fn a_file_with_an_unreadable_manifest_is_quarantined() {
         let dir = TempDir::new().expect("create temp dir");
-        let first = Staging::open(dir.path().join("uploads")).expect("staging");
+        let first = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         leave_staged(&first, &[b"one\n"], b"").await;
         let manifest = std::fs::read_dir(first.dir())
             .expect("dir")
@@ -2327,7 +2353,7 @@ mod tests {
             .expect("a manifest");
         std::fs::write(&manifest, b"{not json").expect("corrupt the manifest");
 
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let recovery = staging.recover(false).expect("recover");
         assert_eq!(recovery.corrupt, 1, "{recovery:?}");
         assert_eq!(recovery.complete, Vec::<RecoveredFile>::new());

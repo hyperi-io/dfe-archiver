@@ -20,7 +20,7 @@ use std::time::Duration;
 /// A staging area removed with the returned directory.
 pub fn staging() -> (tempfile::TempDir, Staging) {
     let dir = tempfile::TempDir::new().expect("staging dir");
-    let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+    let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
     (dir, staging)
 }
 

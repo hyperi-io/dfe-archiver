@@ -46,7 +46,7 @@ async fn archive(config: &Config, topic: &str, payload: &str) -> String {
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let base = tmp.path().join("archive");
     std::fs::create_dir_all(&base).expect("base");
-    let staging = Staging::open(tmp.path().join("uploads")).expect("staging");
+    let staging = Staging::open(tmp.path().join("uploads"), u64::MAX).expect("staging");
     let archive = ArchiveConfig {
         destination: format!("file://{}", base.display()),
         path_template: format!("{destination}/{{year}}"),

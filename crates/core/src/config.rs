@@ -546,6 +546,23 @@ pub struct BufferConfig {
     /// the store takes them, created at startup. Absolute because a relative
     /// path resolves under the container WORKDIR, which appuser cannot write.
     pub spool_dir: String,
+
+    /// Staged bytes past which intake pauses, and it must be above 0. Unset,
+    /// it is eight ninths of the spool budget, which is 90% of the size limit
+    /// the deployment declares for the volume under `spool_dir` (8 GiB on the
+    /// 10Gi default). With no limit declared it is 8 GiB. Past the volume's
+    /// limit kubelet evicts the pod.
+    pub staged_bytes_cap: Option<u64>,
+
+    /// Free bytes the spool volume needs at startup when staging holds
+    /// nothing to upload. Unset, it is one ninth of the spool budget (1 GiB on
+    /// the 10Gi default), or 1 GiB with no declared limit.
+    pub min_free_spool_bytes: Option<u64>,
+
+    /// Bytes the quarantine directory under `uploads/` may hold before a file
+    /// sent there is removed instead. Unset, it is one ninth of the spool
+    /// budget (1 GiB on the 10Gi default), or 1 GiB with no declared limit.
+    pub quarantine_bytes_cap: Option<u64>,
 }
 
 impl Default for BufferConfig {
@@ -556,6 +573,9 @@ impl Default for BufferConfig {
             flush_records: 100_000,
             writer_parallelism: 2,
             spool_dir: DEFAULT_SPOOL_DIR.to_string(),
+            staged_bytes_cap: None,
+            min_free_spool_bytes: None,
+            quarantine_bytes_cap: None,
         }
     }
 }

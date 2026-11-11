@@ -83,7 +83,10 @@
         "flush_age_secs": 60,
         "flush_records": 100000,
         "writer_parallelism": 2,
-        "spool_dir": "/var/spool/dfe/archiver"
+        "spool_dir": "/var/spool/dfe/archiver",
+        "staged_bytes_cap": null,
+        "min_free_spool_bytes": null,
+        "quarantine_bytes_cap": null
       }
     },
     "routing": {
@@ -617,6 +620,36 @@
           "description": "Directory holding `uploads/`, where object-store files are staged until\nthe store takes them, created at startup. Absolute because a relative\npath resolves under the container WORKDIR, which appuser cannot write.",
           "type": "string",
           "default": "/var/spool/dfe/archiver"
+        },
+        "staged_bytes_cap": {
+          "description": "Staged bytes past which intake pauses, and it must be above 0. Unset,\nit is eight ninths of the spool budget, which is 90% of the size limit\nthe deployment declares for the volume under `spool_dir` (8 GiB on the\n10Gi default). With no limit declared it is 8 GiB. Past the volume's\nlimit kubelet evicts the pod.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "min_free_spool_bytes": {
+          "description": "Free bytes the spool volume needs at startup when staging holds\nnothing to upload. Unset, it is one ninth of the spool budget (1 GiB on\nthe 10Gi default), or 1 GiB with no declared limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "quarantine_bytes_cap": {
+          "description": "Bytes the quarantine directory under `uploads/` may hold before a file\nsent there is removed instead. Unset, it is one ninth of the spool\nbudget (1 GiB on the 10Gi default), or 1 GiB with no declared limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
         }
       }
     },
