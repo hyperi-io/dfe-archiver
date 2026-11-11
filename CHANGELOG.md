@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.50](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.49...v1.7.50) (2026-11-11)
+
+### Bug Fixes
+
+* **buffer:** take the spool caps from config or the volume limit ([10bcb8f](https://github.com/hyperi-io/dfe-archiver/commit/10bcb8fdfde863954e787ac180bf9bebdc280d7c))
+
 ## [1.7.49](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.48...v1.7.49) (2026-11-10)
 
 ### Bug Fixes
