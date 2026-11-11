@@ -263,9 +263,14 @@ One writer per destination, up to `archive.max_writers` (1024). Past it the leas
 | `buffer.flush_age_secs` / `DFE_ARCHIVER_FLUSH_INTERVAL_SECS` | 60 | Age at which a buffer flushes whatever its size |
 | `buffer.writer_parallelism` | 2 | Object-store uploads at once, each holding four parts of `archive.multipart_chunk_size` |
 | `buffer.spool_dir` / `DFE_ARCHIVER_SPOOL_DIR` | `/var/spool/dfe/archiver` | Parent of the staging directory, `uploads/` |
+| `buffer.staged_bytes_cap` | 8/9 of the spool budget | Staged bytes past which intake pauses. Must be above 0 |
+| `buffer.min_free_spool_bytes` | 1/9 of the spool budget | Free bytes the spool volume needs at startup when staging holds nothing to upload |
+| `buffer.quarantine_bytes_cap` | 1/9 of the spool budget | Bytes the quarantine directory may hold |
 | `archive.max_writers` | 1024 | Open archive writers, one per destination |
 
 The 64-buffer count and the quarter share are fixed, not configured.
+
+The spool budget is 90% of the spool volume's size limit, read from `SCALO_WRITABLE_PATH_LIMITS`, the variable the chart sets for each `emptyDir` with a `sizeLimit`. On the contract's 10Gi volume the three defaults are 8, 1 and 1 GiB, and a larger volume raises all three. With no limit declared (docker, a bare host) the defaults are 8, 1 and 1 GiB. A key that is set wins.
 
 ---
 
@@ -295,7 +300,7 @@ An object-store file is written to local staging, `<buffer.spool_dir>/uploads`, 
 
 Holding costs memory for as long as a file is not durable: about 32 bytes a record, scalo's offset tracking plus the writer's own eight. At 10k records/s that is 96 MB over a 300 s roll and 1.15 GB over an hour. So while offsets are held an unset `roll_interval_secs` defaults to 300 rather than 3600. A configured value always wins, and one above 900 logs a startup warning with the cost.
 
-While uploads fail, held records and staged files grow, so both are pressure sources on the self-regulation latch that pauses the Kafka partitions. Held records read against a quarter of the memory limit at 32 bytes each, staged bytes against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit. Both pause at the latch's `pause_above` (0.8 by default), so a store outage turns into consumer lag rather than memory or disk growth. With self-regulation off nothing pauses, and the archiver logs that at startup.
+While uploads fail, held records and staged files grow, so both are pressure sources on the self-regulation latch that pauses the Kafka partitions. Held records read against a quarter of the memory limit at 32 bytes each, staged bytes against `buffer.staged_bytes_cap`, under the spool volume's `emptyDir` limit. Both pause at the latch's `pause_above` (0.8 by default), so a store outage turns into consumer lag rather than memory or disk growth. With self-regulation off nothing pauses, and the archiver logs that at startup.
 
 Only a refusal the store gives for the object itself is permanent: an invalid path, a key past the 1024-byte limit, which is checked before any record is staged, or an `EntityTooLarge`/`KeyTooLongError` answer. A file refused at upload is read back a block at a time, each block one flush decompressed on its own, and its records go to the DLQ one entry per line, with the routed destination a batch carries. A payload is written as it arrived with a newline after it, so a payload holding a newline of its own spans lines: when a file holds more lines than records, each block goes to the DLQ whole, as one entry saying so, and no record, text or binary, is split across entries. The file's offsets are released `Rejected` once the DLQ confirms them, and a record too large for any DLQ backend is counted dropped. A file that cannot be read back, or a DLQ write that fails, is released `Errored`, so a restart writes the records again. With the DLQ off the records are released `Dropped`, counted in `messages_dropped_total`, and the reason is logged. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag while dropping costs records.
 
@@ -341,7 +346,7 @@ A completed staged file carries a manifest beside it, `<name>.part.json`, with i
 - **`kafka` with acknowledgements on**: every staged file is removed, because its records are read again from the committed offset.
 - **`grpc`, or acknowledgements off**: nothing delivers those records again. A file whose manifest matches its size is uploaded. One never completed, or whose manifest cannot be read, is moved to `<buffer.spool_dir>/uploads/quarantine` for an operator.
 
-Quarantine holds at most 1 GiB, which with the 8 GiB staging cap stays under the spool volume's 10 GiB limit. A file past it is removed. Each outcome is counted: `staged_files_recovered_total`, `staged_files_quarantined_total{reason}` and `staged_files_removed_total{reason}`.
+Quarantine holds at most `buffer.quarantine_bytes_cap`, which with the staged-bytes cap stays under the spool volume's size limit. A file past it is removed. Each outcome is counted: `staged_files_recovered_total`, `staged_files_quarantined_total{reason}` and `staged_files_removed_total{reason}`.
 
 ### Object keys
 
@@ -406,9 +411,9 @@ Only archive files: the open file of a local destination, and under `<buffer.spo
 
 ### Protection Mechanisms
 
-1. **Free space at startup**: the archiver refuses to start with less than 1 GiB free on the `buffer.spool_dir` volume, read through the `fs2` crate once staging is recovered. When recovery kept complete files to upload it starts anyway and warns, because only a running archiver uploads them, and a write that finds the disk full waits for those uploads.
-2. **Staged bytes**: a pressure source on the self-regulation latch, read against 8 GiB, under the spool volume's 10 GiB `emptyDir` limit past which kubelet evicts the pod. Intake pauses at the latch's `pause_above`, so a store outage turns into consumer lag rather than disk growth.
-3. **Quarantine**: at most 1 GiB. A file past it is removed and counted.
+1. **Free space at startup**: the archiver refuses to start with less than `buffer.min_free_spool_bytes` free on the `buffer.spool_dir` volume, read through the `fs2` crate once staging is recovered. When recovery kept complete files to upload it starts anyway and warns, because only a running archiver uploads them, and a write that finds the disk full waits for those uploads.
+2. **Staged bytes**: a pressure source on the self-regulation latch, read against `buffer.staged_bytes_cap`, under the spool volume's `emptyDir` limit past which kubelet evicts the pod. Intake pauses at the latch's `pause_above`, so a store outage turns into consumer lag rather than disk growth.
+3. **Quarantine**: at most `buffer.quarantine_bytes_cap`. A file past it is removed and counted.
 4. **A full disk**: a local write that fails is held and retried, never dropped, and the loop receives nothing until it lands. See [At-Least-Once Delivery](#at-least-once-delivery).
 
 ### Metrics

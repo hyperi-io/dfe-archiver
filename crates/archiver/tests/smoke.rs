@@ -61,7 +61,7 @@ fn smoke_startup_boots_with_default_config() {
     };
 
     // File backend (default destination is file://)
-    let staging = Staging::open(spool.path().join("uploads")).expect("staging");
+    let staging = Staging::open(spool.path().join("uploads"), u64::MAX).expect("staging");
     let _backend = create_backend(&config.archive, &staging).expect("default file backend");
 }
 

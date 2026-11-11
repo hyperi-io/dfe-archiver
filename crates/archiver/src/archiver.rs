@@ -27,11 +27,12 @@
 
 use crate::config::{Config, SharedConfig};
 use crate::metrics::{ArchiverMetrics, DropReason, QuarantineReason, RemovalReason};
+use crate::spool_limits::SpoolLimits;
 use crate::writers::{Closing, Lookup, SharedWriter, WriterCache};
 use dfe_archiver_core::archive::{ArchiveWriter, FlushStats, PendingFile, RollingPolicy, Settled};
 use dfe_archiver_core::buffer::{StagedBatch, TieredBufferManager};
 use dfe_archiver_core::compression::{Compressor, compressor_for};
-use dfe_archiver_core::config::{ArchiveConfig, HELD_OFFSET_BYTES};
+use dfe_archiver_core::config::{ArchiveConfig, BufferConfig, HELD_OFFSET_BYTES};
 use dfe_archiver_core::routing::Router;
 use dfe_archiver_core::storage::{PendingUpload, RecoveredFile, probe_sink};
 use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
@@ -68,9 +69,6 @@ const DRAIN_UPLOAD_LIMIT: Duration = Duration::from_secs(20);
 /// The directory under `buffer.spool_dir` where object-store files are staged.
 const STAGING_DIR: &str = "uploads";
 
-/// Free space the spool volume needs at startup when staging holds nothing to upload.
-const MIN_FREE_SPOOL_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// The first retry of a failed upload, doubling to `UPLOAD_RETRY_MAX`.
 const UPLOAD_RETRY_FIRST: Duration = Duration::from_millis(500);
 
@@ -98,10 +96,6 @@ const HOT_BUFFER_MEMORY_SHARE: u64 = 4;
 /// How often the held-record count is taken for the inbound brake.
 const HELD_REFRESH: Duration = Duration::from_millis(250);
 
-/// Staged bytes past which intake pauses. Kept under the spool volume's 10 GiB
-/// size limit, because kubelet evicts a pod whose `emptyDir` passes it.
-const STAGED_BYTES_CAP: u64 = 8 * 1024 * 1024 * 1024;
-
 /// Held records past which intake pauses: a quarter of `memory_limit_bytes`
 /// at [`HELD_OFFSET_BYTES`] a record.
 fn held_record_cap(memory_limit_bytes: u64) -> u64 {
@@ -126,7 +120,24 @@ fn upload_retry_delay(attempt: u32) -> Duration {
     retry_delay(attempt, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX)
 }
 
-/// Pause intake as held records or staged bytes near their caps.
+/// Open staging under `buffer.spool_dir` with the spool limits that config and
+/// the volume's size limit give.
+fn open_staging(buffer: &BufferConfig) -> Result<(Staging, SpoolLimits)> {
+    let spool_dir = Path::new(&buffer.spool_dir);
+    let limits = SpoolLimits::from_env(buffer, spool_dir);
+    info!(
+        staged_bytes_cap = limits.staged_bytes_cap,
+        min_free_spool_bytes = limits.min_free_spool_bytes,
+        quarantine_bytes_cap = limits.quarantine_bytes_cap,
+        "Spool limits"
+    );
+    let staging = Staging::open(spool_dir.join(STAGING_DIR), limits.quarantine_bytes_cap)?;
+    Ok((staging, limits))
+}
+
+/// Pause intake as held records or staged bytes near their caps. The staged
+/// cap has to stay under the spool volume's size limit, because kubelet evicts
+/// a pod whose `emptyDir` passes it.
 ///
 /// Both are HARD sources on the latch that pauses the Kafka partitions, so a
 /// store outage turns into consumer lag, not memory or disk.
@@ -135,6 +146,7 @@ fn attach_intake_caps(
     memory_guard: &MemoryGuard,
     held_records: &Arc<AtomicU64>,
     staging: &Staging,
+    staged_bytes_cap: u64,
 ) {
     let Some(governor) = governor else {
         warn!(
@@ -150,11 +162,11 @@ fn attach_intake_caps(
     )));
     pressure.attach_source(Arc::new(AckHeldSource::new(
         staging.bytes(),
-        STAGED_BYTES_CAP,
+        staged_bytes_cap,
     )));
     info!(
         held_record_cap = record_cap,
-        staged_byte_cap = STAGED_BYTES_CAP,
+        staged_byte_cap = staged_bytes_cap,
         staging = %staging.dir().display(),
         "Intake pauses when held records or staged bytes near their caps"
     );
@@ -999,7 +1011,7 @@ impl Archiver {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transport, the hot buffers, the dead-letter queue, the staging directory or the destination's store client cannot be set up, or the spool volume has less than 1 GiB free and staging holds nothing to upload.
+    /// Returns an error when the transport, the hot buffers, the dead-letter queue, the staging directory or the destination's store client cannot be set up, or the spool volume has less than `buffer.min_free_spool_bytes` free and staging holds nothing to upload.
     pub async fn new(
         shared_config: SharedConfig<Config>,
         metrics: Arc<ArchiverMetrics>,
@@ -1055,12 +1067,18 @@ impl Archiver {
             .collect();
 
         let writers = Arc::new(WriterCache::new(config.archive.max_writers));
-        let staging = Staging::open(Path::new(&config.buffer.spool_dir).join(STAGING_DIR))?;
+        let (staging, spool_limits) = open_staging(&config.buffer)?;
         let backends = BackendFactory::new(&config.archive, &staging)?;
         let recovered = recover_staging(&staging, transport.holds_offsets(), &metrics)?;
-        staging.ensure_room(MIN_FREE_SPOOL_BYTES)?;
+        staging.ensure_room(spool_limits.min_free_spool_bytes)?;
         let held_records = Arc::new(AtomicU64::new(0));
-        attach_intake_caps(governor, &memory_guard, &held_records, &staging);
+        attach_intake_caps(
+            governor,
+            &memory_guard,
+            &held_records,
+            &staging,
+            spool_limits.staged_bytes_cap,
+        );
 
         let sink = Arc::new(SinkCircuit {
             open: AtomicBool::new(false),
@@ -3033,7 +3051,7 @@ mod tests {
             ..ArchiveConfig::default()
         };
         let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let storage = create_backend(&archive, &staging).expect("backend");
         let mut writer = ArchiveWriter::new(archive, RollingPolicy::default(), compressor, storage);
 
@@ -3248,7 +3266,7 @@ mod tests {
             ..ArchiveConfig::default()
         };
         let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let storage = create_backend(&archive, &staging).expect("backend");
         let mut writer = ArchiveWriter::new(archive, RollingPolicy::default(), compressor, storage);
 
@@ -3351,7 +3369,7 @@ mod tests {
             ..ArchiveConfig::default()
         };
         let compressor = compressor_for(&CompressionConfig::default()).expect("compressor");
-        let staging = Staging::open(dir.path().join("uploads")).expect("staging");
+        let staging = Staging::open(dir.path().join("uploads"), u64::MAX).expect("staging");
         let storage = create_backend(&archive, &staging).expect("backend");
         // A zero-second interval rolls on each half of a write_record.
         let policy = RollingPolicy {

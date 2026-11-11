@@ -97,6 +97,9 @@ properties:
       flush_records: 100000
       writer_parallelism: 2
       spool_dir: /var/spool/dfe/archiver
+      staged_bytes_cap: null
+      min_free_spool_bytes: null
+      quarantine_bytes_cap: null
   routing:
     description: Routing configuration
     $ref: "#/$defs/RoutingConfig"
@@ -592,6 +595,41 @@ $defs:
           path resolves under the container WORKDIR, which appuser cannot write.
         type: string
         default: /var/spool/dfe/archiver
+      staged_bytes_cap:
+        description: |-
+          Staged bytes past which intake pauses, and it must be above 0. Unset,
+          it is eight ninths of the spool budget, which is 90% of the size limit
+          the deployment declares for the volume under `spool_dir` (8 GiB on the
+          10Gi default). With no limit declared it is 8 GiB. Past the volume's
+          limit kubelet evicts the pod.
+        type:
+        - integer
+        - "null"
+        format: uint64
+        minimum: 0
+        default: null
+      min_free_spool_bytes:
+        description: |-
+          Free bytes the spool volume needs at startup when staging holds
+          nothing to upload. Unset, it is one ninth of the spool budget (1 GiB on
+          the 10Gi default), or 1 GiB with no declared limit.
+        type:
+        - integer
+        - "null"
+        format: uint64
+        minimum: 0
+        default: null
+      quarantine_bytes_cap:
+        description: |-
+          Bytes the quarantine directory under `uploads/` may hold before a file
+          sent there is removed instead. Unset, it is one ninth of the spool
+          budget (1 GiB on the 10Gi default), or 1 GiB with no declared limit.
+        type:
+        - integer
+        - "null"
+        format: uint64
+        minimum: 0
+        default: null
   RoutingConfig:
     description: Routing configuration
     type: object
