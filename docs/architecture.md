@@ -60,8 +60,8 @@ the checked-in `Dockerfile` and the Helm chart are generated from.
 ## Build graph
 
 `crates/io` is the cold-build bottleneck, and none of it is our code: it carries
-`object_store` with the aws/gcp/azure features and `rdkafka-sys`, which builds
-librdkafka through cmake. The three workspace crates re-check in seconds against a warm
+`object_store` with the aws/gcp/azure features and `rdkafka-sys`, which finds
+librdkafka through pkg-config (its `dynamic-linking` feature). The release build points that at a static-only prefix, so the shipped binary carries librdkafka statically. The three workspace crates re-check in seconds against a warm
 dependency graph.
 
 Change propagation follows the arrows: a `core` edit rebuilds all three, an `io`

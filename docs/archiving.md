@@ -22,6 +22,9 @@ One record per line, exactly as it arrived, then a newline. The archiver parses 
 | lz4 | `.jsonl.lz4` |
 | snappy | `.jsonl.sz` |
 | gzip | `.jsonl.gz` |
+| none | `.jsonl` |
+
+`compression.enabled: false` writes uncompressed files whatever `codec` says.
 
 Each flush appends one complete frame, so a file is a standard concatenated stream. `zstd -dc`, `lz4 -dc` or `gzip -dc` reads it whole.
 
@@ -41,6 +44,8 @@ The routed part is the Kafka topic then the routing fields (`events/acme`), or o
 
 An object-store file is staged under `buffer.spool_dir/uploads` and uploaded whole once it closes. Nothing is visible in the bucket until then.
 
+In a DFE deployment, dfe-infra's values set `DFE_ARCHIVER_DESTINATION` only from `archive.localPath`, as a `file://` path. With no local path the variable is empty, the archiver reads it as unset, and the `archive.destination` in its config file stands. An object store also takes `s3.endpoint` and `s3.bucket` from the values. Store credentials come from the optional `dfe-archiver-s3` Secret, or from the store SDK's own credential chain where the Secret does not exist.
+
 ## How long it stays
 
 The archiver never deletes an archived file, so retention belongs to the store. Set a lifecycle rule on the bucket or container, or clean the directory yourself on a `file://` path. Add a rule for incomplete multipart uploads as well. A failed attempt aborts its upload, and an abort that itself fails leaves parts behind until that rule removes them.
@@ -57,3 +62,5 @@ Check two things first:
 
 - On `kafka` with acknowledgements on, the archive is at-least-once. A record can appear in two files after a rebalance or a restart, so a replay can write it twice.
 - On `grpc` the archive is at-most-once. A kill loses what the queue and the open files held, and those records are not in any file.
+
+Which one applies depends on the deployment profile. In DFE, the slim and mesh profiles run the archiver on `grpc` with the DLQ off, so their archive is at-most-once. The single and scale profiles run it on `kafka`.

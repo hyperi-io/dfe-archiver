@@ -14,105 +14,20 @@ High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
 
 ## Table of Contents
 
-1. [Building & Artifacts](#building--artifacts)
-2. [Overview](#overview)
-3. [Architecture](#architecture)
-4. [Inbound transport](#inbound-transport)
-5. [Data Flow](#data-flow)
-6. [Tiered Buffer Design](#tiered-buffer-design)
-7. [At-Least-Once Delivery](#at-least-once-delivery)
-8. [Rolling Policy](#rolling-policy)
-9. [Disk Protection](#disk-protection)
-10. [Routing](#routing)
-11. [Compression](#compression)
-12. [Storage Backends](#storage-backends)
-13. [Configuration](#configuration)
-14. [Metrics](#metrics)
-15. [Deployment](#deployment)
-
----
-
-## Building & Artifacts
-
-### Local Build
-
-```bash
-# Debug build
-cargo build
-
-# Release build (production, with jemalloc)
-cargo build --features default,jemalloc --release
-```
-
-**Output location:**
-
-| Build Type | Path |
-|---|---|
-| Debug (native) | `target/debug/dfe-archiver` |
-| Release (native) | `target/release/dfe-archiver` |
-| Cross-compile (x86_64) | `target/x86_64-unknown-linux-gnu/release/dfe-archiver` |
-| Cross-compile (aarch64) | `target/aarch64-unknown-linux-gnu/release/dfe-archiver` |
-
-### CI/CD Pipeline
-
-`.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow. Configuration is in `.hyperi-ci.yaml`.
-
-**Pipeline stages:**
-
-```mermaid
-flowchart LR
-    E["push, pull request or dispatch"] --> P["Plan<br/>predicts the version and which jobs run"]
-    E --> CM["Commit messages"]
-    P --> Q["Quality<br/>fmt, clippy, audit, deny"]
-    P --> T["Test<br/>with coverage"]
-    Q --> B["Build<br/>x86_64 and aarch64"]
-    T --> B
-    B -->|"a release"| RT["Release tail<br/>tag, GitHub release, ghcr image"]
-    Q --> G["Gate"]
-    T --> G
-    B --> G
-```
-
-### Build Targets
-
-| Target | Architecture | Notes |
-|---|---|---|
-| `x86_64-unknown-linux-gnu` | AMD64 | Primary production target |
-| `aarch64-unknown-linux-gnu` | ARM64 | AWS Graviton, Apple Silicon Linux |
-
-Cross-compilation uses the CI cross-compilation toolchain (not vendored system
-libraries). `openssl` is vendored for portability; `rdkafka` uses `cmake-build`
-to compile `librdkafka` from source.
-
-### Artifact Destinations
-
-No crate is published: all three set `publish = false`.
-
-| Artefact | Destination |
-|---|---|
-| Container image | `ghcr.io/hyperi-io/dfe-archiver` |
-| Binaries | hyperi-ci's `release.destinations.binaries`, Cloudflare R2 (`downloads.hyperi.io`) by default |
-| Release notes | `https://github.com/hyperi-io/dfe-archiver/releases/`, with no binaries attached |
-
-**Binary naming convention:**
-
-```text
-dfe-archiver-{version}-linux-amd64     # x86_64
-dfe-archiver-{version}-linux-arm64     # aarch64
-```
-
-**Checksums:** `SHA256SUMS` file published alongside binaries.
-
-### Release Profile
-
-```toml
-[profile.release]
-lto = "thin"          # Link-time optimization
-codegen-units = 1     # Single codegen unit for better optimization
-strip = true          # Remove debug symbols
-panic = "abort"       # Smaller binary, no unwinding overhead
-opt-level = 3         # Maximum optimization
-```
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Inbound transport](#inbound-transport)
+4. [Data Flow](#data-flow)
+5. [Tiered Buffer Design](#tiered-buffer-design)
+6. [At-Least-Once Delivery](#at-least-once-delivery)
+7. [Rolling Policy](#rolling-policy)
+8. [Disk Protection](#disk-protection)
+9. [Routing](#routing)
+10. [Compression](#compression)
+11. [Storage Backends](#storage-backends)
+12. [Configuration](#configuration)
+13. [Metrics](#metrics)
+14. [Deployment](#deployment)
 
 ---
 
@@ -418,9 +333,9 @@ Only archive files: the open file of a local destination, and under `<buffer.spo
 
 ### Metrics
 
-- `dfe_archiver_staged_bytes` - Bytes staged and not yet uploaded
-- `dfe_archiver_uploads_pending` - Staged files the store has not yet confirmed
-- `dfe_archiver_staged_files_quarantined_total{reason}` and `dfe_archiver_staged_files_removed_total{reason}` - Staged files moved aside or removed
+- `staged_bytes` - Bytes staged and not yet uploaded
+- `uploads_pending` - Staged files the store has not yet confirmed
+- `staged_files_quarantined_total{reason}` and `staged_files_removed_total{reason}` - Staged files moved aside or removed
 
 ---
 
@@ -573,15 +488,16 @@ archive:
 
 #### External (Outside AWS)
 
-Requires explicit access keys:
+Requires explicit access keys. Keep them out of the file and set
+`DFE_ARCHIVER_S3_ACCESS_KEY_ID` and `DFE_ARCHIVER_S3_SECRET_ACCESS_KEY` from a
+Secret. The config file is read as written, so a `${VAR}` in it is a literal
+string, never an expansion.
 
 ```yaml
 archive:
   destination: s3://bucket-name/prefix
   s3:
     region: ap-southeast-2
-    access_key_id: ${DFE_ARCHIVER_S3_ACCESS_KEY_ID}
-    secret_access_key: ${DFE_ARCHIVER_S3_SECRET_ACCESS_KEY}
 ```
 
 ### MinIO (S3-Compatible)
@@ -626,12 +542,14 @@ Credentials are resolved via `MicrosoftAzureBuilder::from_env()`:
 3. `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` env vars
 4. Managed identity (when running on Azure)
 
+Leave `account_key` out of the file and set `AZURE_STORAGE_KEY`, which the
+builder reads from the environment, or use a managed identity.
+
 ```yaml
 archive:
   destination: az://container-name/prefix
   azure:
     account_name: myaccount
-    account_key: ${AZURE_STORAGE_KEY}
 ```
 
 ### Multipart Upload Configuration
@@ -653,10 +571,10 @@ reduce the number of HTTP requests but increase memory per upload, four chunks e
 
 Configuration follows a cascade (highest to lowest priority):
 
-1. CLI arguments (`--kafka-brokers`, etc.)
+1. CLI arguments: scalo's common flags (`--config`, `--log-level`, `--log-format`, `--metrics-addr`)
 2. Environment variables (`DFE_ARCHIVER_KAFKA_BROKERS`, etc.)
 3. `.env` file
-4. Config file (`config.yaml`)
+4. Config file: `--config`, else `DFE_ARCHIVER_CONFIG`, else the first of `config.yaml`, `config/settings.yaml` and `/etc/dfe-archiver/config.yaml` that exists
 5. Built-in defaults
 
 ### Environment Variables
@@ -708,7 +626,7 @@ kafka:
     - logs
   sasl_mechanism: SCRAM-SHA-256
   sasl_username: archiver
-  sasl_password: ${KAFKA_PASSWORD}
+  # sasl_password stays out of the file: set DFE_ARCHIVER_KAFKA_SASL_PASSWORD
 
 archive:
   destination: s3://my-bucket/archives
@@ -738,56 +656,56 @@ routing:
 
 ### Prometheus Endpoint
 
-Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
+Metrics exposed at `/metrics` (default `0.0.0.0:9090`). Names are bare, as listed below. A prefix appears only when `metrics.namespace` is set, and none is by default.
 
 ### Counters
 
 | Metric | Description |
 |--------|-------------|
-| `dfe_archiver_messages_received_total` | Messages received from the transport |
-| `dfe_archiver_messages_archived_total` | Records in archive files the store confirmed |
-| `dfe_archiver_messages_written_total` | Records written into an open archive file, before the store confirms it |
-| `dfe_archiver_messages_dropped_total{reason}` | Records dropped for good: `refused` (the store or the codec, with the DLQ off), `dlq_too_large`, `too_deep` (with the DLQ off), `unreplayable` (written nowhere, on `grpc` or with acknowledgements off) |
-| `dfe_archiver_messages_dlq_total` | Messages sent to DLQ |
-| `dfe_archiver_bytes_written_total` | Uncompressed bytes written |
-| `dfe_archiver_bytes_compressed_total` | Compressed bytes written |
-| `dfe_archiver_files_created_total` | Archive files created |
-| `dfe_archiver_files_closed_total` | Archive files closed (rolled) |
-| `dfe_archiver_archive_roll_total{trigger}` | Archive files rolled, by trigger |
-| `dfe_archiver_writer_evictions_total` | Writers closed because `archive.max_writers` was reached |
-| `dfe_archiver_hot_buffer_evictions_total` | Hot buffers flushed early because a record for another destination needed their slot |
-| `dfe_archiver_flush_operations_total` | Flush operations |
-| `dfe_archiver_archive_errors_total` | Archive errors, each failed attempt counted |
-| `dfe_archiver_kafka_commit_errors_total` | Offset releases the transport failed |
-| `dfe_archiver_routing_errors_total` | Records routing failed on, archived under their topic |
-| `dfe_archiver_routing_fallback_total{field}` | Expression-routing fields a record did not carry, by field path |
-| `dfe_archiver_staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
-| `dfe_archiver_staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt`, `no_store` |
-| `dfe_archiver_staged_files_removed_total{reason}` | Staged files removed at startup: `replayed`, `quarantine_full` |
+| `messages_received_total` | Messages received from the transport |
+| `messages_archived_total` | Records in archive files the store confirmed |
+| `messages_written_total` | Records written into an open archive file, before the store confirms it |
+| `messages_dropped_total{reason}` | Records dropped for good: `refused` (the store or the codec, with the DLQ off), `dlq_too_large`, `too_deep` (with the DLQ off), `unreplayable` (written nowhere, on `grpc` or with acknowledgements off) |
+| `messages_dlq_total` | Messages sent to DLQ |
+| `bytes_written_total` | Uncompressed bytes written |
+| `bytes_compressed_total` | Compressed bytes written |
+| `files_created_total` | Archive files created |
+| `files_closed_total` | Archive files closed (rolled) |
+| `archive_roll_total{trigger}` | Archive files rolled, by trigger |
+| `writer_evictions_total` | Writers closed because `archive.max_writers` was reached |
+| `hot_buffer_evictions_total` | Hot buffers flushed early because a record for another destination needed their slot |
+| `flush_operations_total` | Flush operations |
+| `archive_errors_total` | Archive errors, each failed attempt counted |
+| `kafka_commit_errors_total` | Offset releases the transport failed |
+| `routing_errors_total` | Records routing failed on, archived under their topic |
+| `routing_fallback_total{field}` | Expression-routing fields a record did not carry, by field path |
+| `staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
+| `staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt`, `no_store` |
+| `staged_files_removed_total{reason}` | Staged files removed at startup: `replayed`, `quarantine_full` |
 
 ### Gauges
 
 | Metric | Description |
 |--------|-------------|
-| `dfe_archiver_buffer_bytes` | Current buffer size |
-| `dfe_archiver_buffer_records` | Current buffer record count |
-| `dfe_archiver_kafka_lag` | Records past this pod's read position (sum across assigned partitions). The commit an open file holds does not inflate it |
+| `buffer_bytes` | Current buffer size |
+| `buffer_records` | Current buffer record count |
+| `kafka_lag` | Records past this pod's read position (sum across assigned partitions). The commit an open file holds does not inflate it |
 | `pipeline_delivery_guarantee{guarantee,reason}` | 1 for the delivery guarantee in force |
-| `dfe_archiver_hot_buffers_active` | Active hot buffers |
-| `dfe_archiver_hot_buffers_bytes` | Total bytes in hot buffers |
-| `dfe_archiver_uploads_pending` | Archive files staged locally and not yet confirmed by the store |
-| `dfe_archiver_staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
+| `hot_buffers_active` | Active hot buffers |
+| `hot_buffers_bytes` | Total bytes in hot buffers |
+| `uploads_pending` | Archive files staged locally and not yet confirmed by the store |
+| `staged_bytes` | Bytes of archive files staged locally and not yet uploaded |
 
 ### Histograms
 
 | Metric | Description |
 |--------|-------------|
-| `dfe_archiver_batch_size_bytes` | Archive batch size distribution |
-| `dfe_archiver_flush_duration_seconds` | Flush duration distribution |
+| `batch_size_bytes` | Archive batch size distribution |
+| `flush_duration_seconds` | Flush duration distribution |
 
 ### Health Endpoints
 
-- `/healthz` - Liveness probe
+- `/livez` - Liveness probe
 - `/readyz` - Readiness probe
 
 ---
@@ -796,7 +714,9 @@ Metrics exposed at `/metrics` (default `0.0.0.0:9090`).
 
 ### Kubernetes with KEDA
 
-KEDA scales on the `dfe_scaling_pressure` composite, not on a raw Kafka lag trigger: the deployment contract declares none. The composite's `kafka_lag` term is the consumer's position lag -- records past its read position -- because the committed-offset lag grows by up to a roll interval of intake while open files hold their commit, and would scale the archiver out on the hold rather than on backlog. `buffer_depth` and `memory` are the other terms, and an open sink circuit zeroes the composite.
+KEDA scales on CPU and the `scaling_pressure` composite (served at `/scaling/pressure`), not on a raw Kafka lag trigger: the deployment contract declares none. The composite's `kafka_lag` term is the consumer's position lag -- records past its read position -- because the committed-offset lag grows by up to a roll interval of intake while open files hold their commit, and would scale the archiver out on the hold rather than on backlog. `buffer_depth` and `memory` are the other terms, and an open sink circuit zeroes the composite.
+
+The contract's ScaledObject scales on CPU alone. In a DFE deployment, dfe-infra's values set the CPU target to 70% in every profile. The single, scale and mesh profiles add the scaling-pressure trigger (target 70, read through dfe-keda-shim), and slim runs on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.
 
 ### Resource Requirements
 
@@ -816,50 +736,6 @@ docker run -d \
   -v /data/spool:/var/spool/dfe/archiver \
   ghcr.io/hyperi-io/dfe-archiver:latest
 ```
-
----
-
-## Key Design Decisions
-
-### 1. Use scalo for Core Infrastructure
-
-**Decision**: Use scalo for config, logging, metrics, and Kafka transport.
-
-**Rationale**: Consistency with other HyperI projects, proven patterns, reduced boilerplate.
-
-**Alternatives**: Direct rdkafka usage, custom config system.
-
-### 2. Compression Codec Selection
-
-**Decision**: Default to zstd level 3, support lz4/snappy/gzip.
-
-**Rationale**: zstd offers best compression ratio with acceptable speed; lz4 for speed-critical; gzip for compatibility.
-
-**Alternatives**: brotli (too slow), lzma (too slow).
-
-### 3. Rolling by Final Compressed Size
-
-**Decision**: Roll based on actual compressed file size (1GB default), not inbound data.
-
-**Rationale**: 1GB files optimal for cloud storage. Inbound data size is unpredictable for final file size.
-
-**Alternatives**: Inbound data size, record count only.
-
-### 4. Tiered Buffering
-
-**Decision**: Two-tier (memory + disk) buffer architecture.
-
-**Rationale**: Handles 10K+ destinations without exhausting memory or file handles.
-
-**Alternatives**: Single large buffer (memory issues), per-destination files (handle exhaustion).
-
-### 5. At-Least-Once via Token Tracking
-
-**Decision**: Track a Kafka offset per message, hold it on the archive file its record is written into, and release it when that file completes.
-
-**Rationale**: A record is durable only in a completed file, so this guarantees no data loss. Duplicates, up to a roll interval of them after a kill, are acceptable for the archive use case.
-
-**Alternatives**: Exactly-once (complex, requires transactional writes).
 
 ---
 
