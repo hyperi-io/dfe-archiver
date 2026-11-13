@@ -87,7 +87,7 @@ archive:
 - [docs/design.md](docs/design.md): the decisions behind the shape.
 - [docs/testing.md](docs/testing.md): the test tiers and the object-store containers they start.
 
-The suite's published docs are at <https://dfe.docs.hyperi.io>.
+The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-archiver/>.
 
 ## Help and contributing
 
