@@ -9,7 +9,7 @@
 [package]
 name = "dfe-archiver"
 version.workspace = true
-description = "High-volume Kafka-to-storage archiver for PB/s scale data pipelines"
+description = "Writes a DFE deployment's streams to compressed files in a local path or object store."
 # The service ships as a container image, never as a registry crate.
 publish = false
 edition.workspace = true
