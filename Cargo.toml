@@ -18,7 +18,6 @@ members = [
 # hyperi-ci stamps the release version onto this key at build time and the
 # member crates inherit it, so the committed value is never a release number.
 version = "0.0.0"
-description = "Archives event streams to S3, GCS or Azure object storage, spooling to local disk when the sink is unreachable. Runs standalone or as part of the HyperI Data Fusion Engine."
 edition = "2024"
 rust-version = "1.94"
 license = "BUSL-1.1"
