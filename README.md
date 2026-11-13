@@ -45,6 +45,40 @@ Settings load through a cascade: CLI, then `DFE_ARCHIVER_*` environment variable
 
 Each store takes its own block (`archive.s3`, `archive.gcs`, `archive.azure`) for the endpoint and credentials. [docs/config-schema.yaml](docs/config-schema.yaml) lists every archiver key with its type and default (the scalo runtime sections are scalo's), and [docs/internals.md](docs/internals.md) explains the delivery guarantee, the rolling policy, routing, disk protection and the metrics.
 
+## Storage Backends
+
+Each destination is one URL plus its store's block. These four load and validate as written, and a test keeps them that way.
+
+```yaml
+archive:
+  destination: file:///var/data/archive
+```
+
+```yaml
+archive:
+  destination: s3://bucket-name/prefix
+  s3:
+    endpoint: http://minio:9000
+    region: us-east-1
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+```
+
+```yaml
+archive:
+  destination: gs://bucket-name/prefix
+  gcs:
+    credentials_path: /path/to/key.json
+```
+
+```yaml
+archive:
+  destination: az://container-name/prefix
+  azure:
+    account_name: myaccount
+    account_key: ${AZURE_STORAGE_KEY}
+```
+
 ## Documentation
 
 - [docs/archiving.md](docs/archiving.md): what a file holds, where it goes, how long it stays and how to restore.
