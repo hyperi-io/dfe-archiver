@@ -53,7 +53,7 @@ Each store takes its own block (`archive.s3`, `archive.gcs`, `archive.azure`) fo
 - [docs/design.md](docs/design.md): the decisions behind the shape.
 - [docs/testing.md](docs/testing.md): the test tiers and the object-store containers they start.
 
-The suite's published docs are at https://dfe.docs.hyperi.io.
+The suite's published docs are at <https://dfe.docs.hyperi.io>.
 
 ## Help and contributing
 
