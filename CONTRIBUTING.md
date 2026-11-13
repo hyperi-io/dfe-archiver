@@ -183,7 +183,7 @@ If you have questions about contributing, please open an issue or contact us.
 
 ### What this is
 
-dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kafka or the scalo Push gRPC listener, are buffered per destination, compressed, and written as rolling files to `file`, `s3`, `gs`, `az` or MinIO. It parses nothing, enriches nothing, routes between no topics and answers no queries. Not a library either -- all three crates set `publish = false` and the artefact is a container image on ghcr. With nothing configured it starts and idles rather than crash-looping -- see [idle until configured](docs/internals.md#idle-until-configured).
+dfe-archiver is the sink at the end of the DFE pipeline. Records arrive from Kafka or the scalo Push gRPC listener, are buffered per destination, compressed, and written as rolling files to `file`, `s3`, `gs`, `az` or MinIO. It parses a record only to read its routing field, enriches nothing, routes between no topics and answers no queries. Not a library either -- all three crates set `publish = false` and the artefact is a container image on ghcr. With nothing configured it starts and idles rather than crash-looping -- see [idle until configured](docs/internals.md#idle-until-configured).
 
 ### Where things live
 
