@@ -43,7 +43,7 @@ Settings load through a cascade: CLI, then `DFE_ARCHIVER_*` environment variable
 | `archive.roll_size_bytes`, `archive.roll_interval_secs` | When a file closes | 1 GiB, 300 s while Kafka offsets are held, else 3600 |
 | `buffer.spool_dir` and its three caps | Where staged uploads wait, and how much disk they may take | 8/9, 1/9 and 1/9 of the volume's declared limit |
 
-Each store takes its own block (`archive.s3`, `archive.gcs`, `archive.azure`) for the endpoint and credentials. [docs/config-schema.yaml](docs/config-schema.yaml) lists every key with its type and default, and [docs/internals.md](docs/internals.md) explains the delivery guarantee, the rolling policy, routing, disk protection and the metrics.
+Each store takes its own block (`archive.s3`, `archive.gcs`, `archive.azure`) for the endpoint and credentials. [docs/config-schema.yaml](docs/config-schema.yaml) lists every archiver key with its type and default (the scalo runtime sections are scalo's), and [docs/internals.md](docs/internals.md) explains the delivery guarantee, the rolling policy, routing, disk protection and the metrics.
 
 ## Documentation
 
