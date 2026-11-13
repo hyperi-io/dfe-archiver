@@ -35,10 +35,10 @@ There is no shared service container. Each e2e test starts the containers it nee
 
 | Service | Image |
 |---|---|
-| Kafka | `apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` |
-| S3 store | `localstack/localstack:4.14` |
-| Azure Blob | `mcr.microsoft.com/azure-storage/azurite:3.37.0` |
-| GCS | `fsouza/fake-gcs-server:1.56.1` |
-| Kafka over TLS | scalo's `TlsBroker` on the same Kafka image, with certificates made in `alpine/openssl:3.5.9@sha256:1c361a204e9791bec6202bccbd1065eafaa65cb5a1a9a06ae000238569fba6a2` |
+| Kafka | `apache/kafka` |
+| S3 store | `localstack/localstack` |
+| Azure Blob | `mcr.microsoft.com/azure-storage/azurite` |
+| GCS | `fsouza/fake-gcs-server` |
+| Kafka over TLS | scalo's `TlsBroker` on the same Kafka image, with certificates made in `alpine/openssl` |
 
-The pins live in `scripts/pull-test-images.sh`. nextest runs it as a setup script before the e2e binary, so no test spends its timeout on a pull, and in CI a fixture fails when its image was not pulled first. The same steps run locally and in CI, against whatever daemon `DOCKER_HOST` or the current docker context names.
+The tags and digests live in `scripts/pull-test-images.sh`. nextest runs it as a setup script before the e2e binary, so no test spends its timeout on a pull, and in CI a fixture fails when its image was not pulled first. The same steps run locally and in CI, against whatever daemon `DOCKER_HOST` or the current docker context names.
