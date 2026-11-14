@@ -1,25 +1,11 @@
-# Project-specific gitleaks allowlist
-# Extends the CI base configuration (ci/.gitleaks.toml)
-#
-# The CI runs gitleaks to detect secrets in your code. This file lets you
-# exclude false positives specific to your project.
-#
-# Documentation: https://github.com/gitleaks/gitleaks#configuration
+# Project gitleaks allowlist: https://github.com/gitleaks/gitleaks#configuration
 
 [extend]
 useDefault = true
 
-# Project-specific allowlist
-# The [allowlist] section requires at least one active check (paths, regexes,
-# commits, or stopwords) — do not add it with only commented-out entries.
-
 [allowlist]
 description = "Project-specific false-positive allowlist"
-# Historical AWS access key in TODO.md at commit 2639714 (2026-04-16). The
-# key was deleted at AWS and 347b821 redacted later mentions, but gitleaks
-# scans full history so the original commit still trips. Allowlist by
-# commit-hash so we don't need the literal in this config (which would
-# itself trip Semgrep's hardcoded-credential detector).
+# A deleted AWS key in history, allowed by commit so the literal stays out of this file.
 commits = [
     "2639714081b0f13da87a6be6700139880ff90505",
 ]

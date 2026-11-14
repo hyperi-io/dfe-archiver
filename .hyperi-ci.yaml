@@ -4,13 +4,9 @@
 #
 # License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
-#
-# Override defaults with HYPERCI_* env vars.
-# Reference: config/defaults.yaml in hyperi-ci.
+
 classification: product
 
-# Project language (auto-detected if not specified)
-# Values: python, typescript, golang, rust, none
 language: rust
 
 # Quality checks
@@ -25,11 +21,10 @@ quality:
       id: RUSTSEC-2026-0387
       reason: "crypto-bigint 0.5.5 via the aws-sdk-s3 dev-dependency only, in no shipped binary. No 0.5 fix exists and aws-sigv4 1.6.3 still requires ^0.5.4. Mirrors the deny.toml ignore."
   rust:
-    fmt: blocking           # Formatting check (cargo fmt --check)
-    clippy: blocking        # Linting (cargo clippy)
-    audit: blocking         # Security audit (cargo audit)
-    deny: blocking          # License/advisory check (cargo deny)
-    # Feature sets to test with clippy (jemalloc-only per 2026-04-17 DFE policy)
+    fmt: blocking
+    clippy: blocking
+    audit: blocking
+    deny: blocking
     features:
       - "default"
       - "jemalloc"
@@ -38,7 +33,6 @@ quality:
 test:
   enabled: true
   coverage: true
-  # min_coverage: 80       # Fail if coverage below this percentage
   # A release runs the full tier. docs/testing.md says which tests are core, which full, and why full skips these.
   full:
     required_for_release: true
@@ -55,8 +49,7 @@ test:
   rust:
     # Required, not auto: the metric tests read a process-global metrics recorder, and only nextest gives each test a process of its own.
     nextest: true
-    tier: all               # "unit", "integration", "e2e", or "all"
-    # Feature sets to test (match quality.rust.features for consistency)
+    tier: all
     features:
       - "default"
       - "jemalloc"

@@ -277,7 +277,7 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
             preferred_suffix: "_land".to_string(),
             suppressed_suffix: "_load".to_string(),
         }],
-        // Archiver is consume-only (Kafka -> storage). scalo 2.9 KafkaConfig is
+        // Archiver is consume-only (Kafka -> storage). scalo's KafkaConfig is
         // profile-based (no `role` field): a non-empty `group` + subscribed
         // `topics` make this a consumer; no produce calls means no idle producer
         // (#44).

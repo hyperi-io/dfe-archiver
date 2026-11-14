@@ -478,8 +478,7 @@ impl ArchiverMetrics {
     /// Emits the per-backend sink error counter + the platform transport-error
     /// counter. Does NOT touch `archive_errors_total` -- the write
     /// path pairs this with `record_error()`, which owns that total, so the two
-    /// never double-count. Fills the per-backend storage-error metrics gap
-    /// (previously this was never called on the production path).
+    /// never double-count.
     pub fn record_sink_error(&self, backend: &str) {
         if let Some(ref sink) = self.sink {
             sink.record_error(backend);
