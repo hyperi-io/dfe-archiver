@@ -15,8 +15,7 @@ services:
   # Redpanda (Kafka-compatible, lighter weight)
   # =========================================================================
   redpanda:
-    # Matches KAFKA_TAG in scripts/pgo-workload.sh. Two pins of the same image
-    # on different majors makes Renovate track two lines and open a PR for each.
+    # Matches KAFKA_TAG in scripts/pgo-workload.sh, so Renovate tracks one line.
     # renovate: datasource=docker depName=redpandadata/redpanda
     image: redpandadata/redpanda:v26.2.6@sha256:8b1076e0d61bfceb66594dc01536427ce0b529f8ead35fdab9763ab6085891ce
     container_name: archiver-redpanda

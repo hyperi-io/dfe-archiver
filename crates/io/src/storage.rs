@@ -819,7 +819,7 @@ impl ObjectStoreBackend {
         // `use_emulator` and `endpoint` cannot both apply. object_store's
         // emulator branch takes its URL from the `AZURITE_BLOB_STORAGE_URL` env
         // var (default `http://127.0.0.1:10000`) and never reads
-        // `with_endpoint`, so setting both used to drop the endpoint in silence
+        // `with_endpoint`, so setting both would drop the endpoint in silence
         // and address whatever answered on the local default port -- or, with
         // nothing there, `<account>.blob.core.windows.net` out on the internet,
         // which resolves for `devstoreaccount1` and returns 403.

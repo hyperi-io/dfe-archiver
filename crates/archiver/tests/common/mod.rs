@@ -534,9 +534,7 @@ impl AzureFixture {
 ///
 /// The account is probed rather than taken on trust because a stale
 /// `AZURE_STORAGE_ACCOUNT` in a developer's `.env` would otherwise silently
-/// steer every Azure test away from the emulator and into a DNS failure -- which
-/// is exactly what the checked-in `.env` does today: it names an account that
-/// does not resolve. Presence of a variable is not evidence of a service.
+/// steer every Azure test away from the emulator and into a DNS failure. Presence of a variable is not evidence of a service.
 ///
 /// Returns `None` when neither is available -- having failed the run in CI,
 /// where a skip would be a green job that tested nothing.

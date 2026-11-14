@@ -26,7 +26,7 @@ fn nextest_config() -> String {
 
 /// Extract a key from one `[profile.<name>]` section, ignoring comments.
 ///
-/// Hand-scanned rather than parsed: the file is 20 lines of flat key/value
+/// Hand-scanned rather than parsed: the file is a few flat key/value
 /// pairs, so a TOML dev-dependency for this one assertion would be a bigger
 /// maintenance surface than the scan.
 fn profile_key(toml: &str, profile: &str, key: &str) -> Option<String> {

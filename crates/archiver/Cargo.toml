@@ -40,15 +40,9 @@ dfe-archiver-core = { workspace = true }
 dfe-archiver-io = { workspace = true }
 scalo = { workspace = true, features = [
     "config", "config-reload", "logger", "metrics", "service-metrics",
-    # transport-kafka + transport-grpc are the WHOLE inbound menu: they are the
-    # two arms of `SourceTransport` and the only two names `validate_config`
-    # accepts, so scalo's file/pipe/http/memory backends stay out.
+    # kafka and grpc are the only transports `validate_config` accepts.
     "transport-kafka", "transport-grpc", "http-server", "tiered-sink", "spool",
-    # `scaling` exposes the unified ScalingPressure engine served at
-    # /scaling/pressure; `governor` exposes the self-regulation inbound brake.
-    # `expression` backs the CEL surface used by config/scaling tunables.
-    # dlq-kafka: the file backend is an EROFS no-op on the charts' read-only
-    # rootfs, so kafka is the only DLQ backend that works deployed.
+    # dlq-kafka: the file DLQ is a no-op on the charts' read-only rootfs.
     "scaling", "governor", "expression", "deployment", "config-schema", "cli-service", "memory", "health", "shutdown", "dlq", "dlq-kafka", "version-check",
 ] }
 
@@ -101,8 +95,7 @@ aws-sdk-s3 = { workspace = true }
 default = []
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 transport-memory = ["dfe-archiver-core/transport-memory"]
-# Build the `pgo-driver` binary used by `scripts/pgo-workload.sh` to drive a
-# representative workload during PGO instrumentation. Default builds skip it.
+# The PGO workload driver (scripts/pgo-workload.sh).
 pgo-driver = ["dep:rdkafka"]
 full = ["jemalloc"]
 
