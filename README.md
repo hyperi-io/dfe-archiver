@@ -84,7 +84,7 @@ archive:
 - [docs/archiving.md](docs/archiving.md): what a file holds, where it goes, how long it stays and how to restore.
 - [docs/internals.md](docs/internals.md): the pipeline, the tiered buffers, at-least-once delivery, disk protection, every metric.
 - [docs/architecture.md](docs/architecture.md): the three crates (`core`, `io`, `archiver`), the one-way rules between them and the build graph.
-- [docs/design.md](docs/design.md): the decisions behind the shape.
+- [docs/design.md](docs/design.md): how it is built and released, and the decisions behind it.
 - [docs/testing.md](docs/testing.md): the test tiers and the object-store containers they start.
 
 The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-archiver/>.
