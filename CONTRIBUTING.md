@@ -116,7 +116,7 @@ anniversary of its release.
 1. Fork the repository and create your branch from `main`
 2. Make your changes following the commit message format above
 3. Sign off your commits with the DCO
-4. Test your changes to ensure they work as expected
+4. Run the tests that cover your change
 5. Submit a pull request with a clear description of what you've done
 
 ### Pull Request Checklist
