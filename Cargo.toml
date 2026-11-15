@@ -23,6 +23,7 @@ rust-version = "1.94"
 license = "BUSL-1.1"
 repository = "https://github.com/hyperi-io/dfe-archiver"
 authors = ["HYPERI PTY LIMITED <engineering@hyperi.io>"]
+description = "Writes a DFE deployment's streams to compressed files in a local path or object store."
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
