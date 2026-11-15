@@ -12,132 +12,56 @@
 
 How the archiver is built and released, and the design decisions behind it. The operator-facing design is [internals.md](internals.md).
 
-## Building & Artifacts
+## Building and releasing
 
-### Local Build
+The build needs the tools in the README's [quick start](../README.md#quick-start). `cargo build` writes a debug binary to `target/debug/dfe-archiver`, and `cargo build --release --features jemalloc` a release one, with the allocator CI uses, to `target/release/dfe-archiver`. jemalloc is off by default, so a plain `cargo build` uses the system allocator.
 
-```bash
-# Debug build
-cargo build
+CI builds each target on a runner of its own architecture, never cross-compiling, with `--target`, so its binaries land under `target/x86_64-unknown-linux-gnu/release/` and `target/aarch64-unknown-linux-gnu/release/`. `rdkafka` takes its `dynamic-linking` feature, which finds librdkafka through pkg-config, and the release build points pkg-config at a static-only prefix (scalo-rs `docs/deployment/native-deps.md`), so the shipped binary carries librdkafka statically.
 
-# Release build (production, with jemalloc)
-cargo build --features default,jemalloc --release
+```toml
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3
 ```
 
-**Output location:**
+That is the committed profile. hyperi-ci switches LTO to `fat` on the beta and release channels, and a full release adds PGO, driven by `scripts/pgo-workload.sh`, and BOLT.
 
-| Build Type | Path |
-|---|---|
-| Debug (native) | `target/debug/dfe-archiver` |
-| Release (native) | `target/release/dfe-archiver` |
-| Cross-compile (x86_64) | `target/x86_64-unknown-linux-gnu/release/dfe-archiver` |
-| Cross-compile (aarch64) | `target/aarch64-unknown-linux-gnu/release/dfe-archiver` |
-
-### CI/CD Pipeline
-
-`.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow. Configuration is in `.hyperi-ci.yaml`.
-
-**Pipeline stages:**
+`.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow, configured by `.hyperi-ci.yaml`.
 
 ```mermaid
 flowchart LR
-    E["push, pull request or dispatch"] --> P["Plan<br/>predicts the version and which jobs run"]
+    E["push, pull request, schedule or dispatch"] --> P["Plan<br/>predicts the version and which jobs run"]
     E --> CM["Commit messages"]
     P --> Q["Quality<br/>fmt, clippy, audit, deny"]
     P --> T["Test<br/>with coverage"]
-    Q --> B["Build<br/>x86_64 and aarch64"]
+    Q --> B["Build<br/>x86_64 and aarch64, each on its own arch<br/>PGO then BOLT on a full release"]
     T --> B
-    B -->|"a release"| RT["Release tail<br/>tag, GitHub release, ghcr image"]
+    B -->|"a release"| RT["Release tail<br/>tag, GitHub release, ghcr image,<br/>binaries to R2, Helm chart"]
     Q --> G["Gate"]
     T --> G
     B --> G
 ```
 
-### Build Targets
+A schedule run tests and publishes nothing. A release needs a `Release: true` trailer on the commit pushed to `main`, or a dispatch, as [CONTRIBUTING.md](../CONTRIBUTING.md#cicd-workflow) says. No crate is published, because all three set `publish = false`.
 
-| Target | Architecture | Notes |
-|---|---|---|
-| `x86_64-unknown-linux-gnu` | AMD64 | Primary production target |
-| `aarch64-unknown-linux-gnu` | ARM64 | AWS Graviton, Apple Silicon Linux |
-
-Cross-compilation uses the CI cross-compilation toolchain (not vendored system
-libraries). `rdkafka` uses its `dynamic-linking` feature, which finds librdkafka
-through pkg-config. The release build points pkg-config at a static-only prefix
-(scalo-rs `docs/deployment/native-deps.md`), so the shipped binary carries
-librdkafka statically.
-
-### Artifact Destinations
-
-No crate is published: all three set `publish = false`.
-
-| Artefact | Destination |
+| Artefact | Where it goes |
 |---|---|
-| Container image | `ghcr.io/hyperi-io/dfe-archiver` |
-| Binaries | hyperi-ci's `release.destinations.binaries`, Cloudflare R2 (`downloads.hyperi.io`) by default |
+| Container image | `ghcr.io/hyperi-io/dfe-archiver`, for `linux/amd64` and `linux/arm64` |
+| Binaries | hyperi-ci's `release.destinations.binaries`, Cloudflare R2 (`downloads.hyperi.io`) by default, under `dfe-archiver/v<version>/` and `dfe-archiver/latest/` |
+| Helm chart | the thin chart hyperi-ci assembles from the deployment contract on the scalo-service library, pushed to `release.helm.registry`, `oci://ghcr.io/hyperi-io/charts` by default |
 | Release notes | `https://github.com/hyperi-io/dfe-archiver/releases/`, with no binaries attached |
 
-**Binary naming convention:**
+The binaries are `dfe-archiver-linux-amd64` and `dfe-archiver-linux-arm64`. Each has a `<binary>.sha256` beside it, in the format `sha256sum -c` reads.
 
-```text
-dfe-archiver-{version}-linux-amd64     # x86_64
-dfe-archiver-{version}-linux-arm64     # aarch64
-```
+## Key design decisions
 
-**Checksums:** `SHA256SUMS` file published alongside binaries.
-
-### Release Profile
-
-```toml
-[profile.release]
-lto = "thin"          # Link-time optimization
-codegen-units = 1     # Single codegen unit for better optimization
-strip = true          # Remove debug symbols
-panic = "abort"       # Smaller binary, no unwinding overhead
-opt-level = 3         # Maximum optimization
-```
-
----
-
-## Key Design Decisions
-
-### 1. Use scalo for Core Infrastructure
-
-**Decision**: Use scalo for config, logging, metrics, and Kafka transport.
-
-**Rationale**: Consistency with other HyperI projects, proven patterns, reduced boilerplate.
-
-**Alternatives**: Direct rdkafka usage, custom config system.
-
-### 2. Compression Codec Selection
-
-**Decision**: Default to zstd level 3, support lz4/snappy/gzip.
-
-**Rationale**: zstd offers the best compression ratio at acceptable speed. lz4 is for speed-critical work and gzip for compatibility.
-
-**Alternatives**: brotli (too slow), lzma (too slow).
-
-### 3. Rolling by Final Compressed Size
-
-**Decision**: Roll based on actual compressed file size (1GB default), not inbound data.
-
-**Rationale**: 1GB files optimal for cloud storage. Inbound data size is unpredictable for final file size.
-
-**Alternatives**: Inbound data size, record count only.
-
-### 4. Tiered Buffering
-
-**Decision**: Hot buffers in memory, under a ceiling per destination and a cap on all of them, then the archive writers. Nothing spills to disk ahead of the writers.
-
-**Rationale**: Handles 10K+ destinations without exhausting memory or file handles.
-
-**Alternatives**: Single large buffer (memory issues), per-destination files (handle exhaustion).
-
-### 5. At-Least-Once via Token Tracking
-
-**Decision**: Track a Kafka offset per message, hold it on the archive file its record is written into, and release it when that file completes.
-
-**Rationale**: A record is durable only in a completed file. On Kafka with acknowledgements on, a kill therefore loses nothing that reached a file, and duplicates after a restart are acceptable for the archive use case. They run to a roll interval of records, longer while a completed file's upload is still pending, because its offsets are held until the store confirms it.
-
-The guarantee has two drop cases. A record refused for good (by the store, the codec or the router) is released `Dropped` when the DLQ is off or no DLQ backend can hold it. On a source that cannot deliver again (`grpc`, or acknowledgements off), records written nowhere are released `Dropped` too.
-
-**Alternatives**: Exactly-once (complex, requires transactional writes).
+| Decision | Why | Rejected |
+|---|---|---|
+| scalo for config, logging, metrics, the transports, the DLQ and scaling | The same patterns as the other DFE apps, and less code here | Direct rdkafka, a config system of its own |
+| zstd at level 3 by default, with LZ4, Snappy and gzip | zstd gives the best ratio at an acceptable speed, LZ4 suits speed-critical work and gzip compatibility | brotli and lzma, both too slow |
+| Roll on compressed file size, 1 GiB by default | Inbound size does not predict the size a file reaches in the store | Inbound size, record count |
+| Hot buffers in memory under a ceiling per destination and a cap on all of them, then the writers, with nothing spilled to disk ahead of them | Memory and open files stay bounded however many destinations routing produces | One large shared buffer, an unbounded file per destination |
+| Hold each Kafka offset on the file its record is in, and release it when the file is durable | At-least-once with no transactional writes, at the cost of duplicates after a restart ([delivery.md](delivery.md)) | Exactly-once, which needs transactional writes |

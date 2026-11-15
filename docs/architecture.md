@@ -10,9 +10,7 @@
 
 # dfe-archiver architecture
 
-Where things live and which way the dependencies point. The design itself --
-the pipeline, the rolling model, the storage backends -- is
-[internals.md](internals.md).
+Where things live and which way the dependencies point. The design itself -- the pipeline, the rolling model, the storage backends -- is [internals.md](internals.md), and the delivery guarantee [delivery.md](delivery.md).
 
 ## Codemap
 
@@ -23,33 +21,17 @@ graph LR
     io --> core
 ```
 
-**`crates/core`** (`dfe-archiver-core`) -- the archive logic, with no I/O of its
-own. Config types and their validation (`config.rs`), the rolling archive writer
-(`archive/`), the tiered hot-and-spool buffer (`buffer/`), destination routing
-(`routing/`), the compression codecs (`compression/`), and the storage trait
-plus the sink probe every backend implements (`storage.rs`).
-
-**`crates/io`** (`dfe-archiver-io`) -- everything that talks to something else.
-The inbound transports, Kafka (`kafka.rs`) or the Push listener (`grpc.rs`),
-chosen by `transport.rs`, and the object-store backends behind `create_backend`
-(`storage.rs`): file, S3, GCS, Azure Blob and MinIO.
-
-**`crates/archiver`** (`dfe-archiver`) -- the binary and the pipeline that joins
-the other two. `archiver.rs` is the loop (receive, route, buffer, write, hand
-closed object-store files to background upload tasks, and release once a file
-is durable), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader,
-`metrics.rs` the Prometheus surface, and `contract.rs` the deployment contract
-the checked-in `Dockerfile` and the Helm chart are generated from.
+| Crate | Package | What it holds |
+|---|---|---|
+| `crates/core` | `dfe-archiver-core` | The archive logic: config types and the flat environment names (`config.rs`), the rolling archive writer (`archive/`), the hot buffers (`buffer/`), destination routing (`routing/`), the compression codecs (`compression/`), and the storage trait with the sink probe (`storage.rs`). Its only I/O is creating the spool directory |
+| `crates/io` | `dfe-archiver-io` | Everything that talks to something else: the inbound transports, Kafka (`kafka.rs`) or the Push listener (`grpc.rs`), chosen by `transport.rs`, and the staging directory and the backends behind `create_backend` (`storage.rs`): file, S3, GCS, Azure Blob and MinIO |
+| `crates/archiver` | `dfe-archiver` | The binary and the pipeline that joins the other two. `archiver.rs` is the loop (receive, route, buffer, write, hand closed object-store files to background upload tasks, and release once a file is durable), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader, `config/loader.rs` the file loading and `validate_config`, `metrics.rs` the Prometheus surface, and `contract.rs` the deployment contract the checked-in `Dockerfile` and the Helm chart are generated from |
 
 ## Negative invariants
 
 - `core` depends on no other workspace crate.
-- `core` has no metrics dependency: it counts what it did and the caller
-  records it, which is why `ArchiveWriter::take_files_opened` exists.
-- `core` never releases an offset or uploads a file: the writer settles the
-  offsets held on a file as it closes, or hands them to the file's pending
-  upload, and the caller drains both with `ArchiveWriter::take_settled`,
-  uploads, and releases through the transport.
+- Nothing in `core` records a metric: it counts what it did and the caller records it, which is why `ArchiveWriter::take_files_opened` exists.
+- Releasing an offset and uploading a file are never `core`'s. The writer settles the offsets held on a file as it closes, or hands them to the file's pending upload, and the caller drains both with `ArchiveWriter::take_settled`, uploads, and releases through the transport.
 - `io` depends on `core` only, never on `archiver`.
 - `archiver` is the only crate with a binary and the only reader of the
   deployment contract, so the Dockerfile and the chart have one source.
@@ -59,10 +41,7 @@ the checked-in `Dockerfile` and the Helm chart are generated from.
 
 ## Build graph
 
-`crates/io` is the cold-build bottleneck, and none of it is our code: it carries
-`object_store` with the aws/gcp/azure features and `rdkafka-sys`, which finds
-librdkafka through pkg-config (its `dynamic-linking` feature). The release build points that at a static-only prefix, so the shipped binary carries librdkafka statically. The three workspace crates re-check in seconds against a warm
-dependency graph.
+The cold build is spent on dependencies: `object_store` with its aws, gcp and azure features, `aws-lc-sys`, which compiles C, and `rdkafka-sys` through scalo, which on Linux finds librdkafka through pkg-config (its `dynamic-linking` feature). The release build points pkg-config at a static-only prefix, so the shipped binary carries librdkafka statically and needs only libc, libm, libgcc_s and the dynamic loader at run time.
 
 Change propagation follows the arrows: a `core` edit rebuilds all three, an `io`
 edit rebuilds `io` and `archiver`, and an `archiver` edit rebuilds only itself.

@@ -72,7 +72,7 @@ services:
     image: localstack/localstack:4.14@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
     container_name: archiver-s3
     ports:
-      - "9000:4566"   # S3 API, where config.dev.yaml and .env.example point
+      - "9000:4566"   # S3 API, where .env.example points
     environment:
       SERVICES: s3
     configs:
@@ -89,7 +89,7 @@ services:
   # =========================================================================
   # Local file storage (for file:// backend testing)
   # =========================================================================
-  # No container needed - uses ./data/archive volume mount
+  # No container needed: config.dev.yaml writes under ./data/archive on the host.
 
 volumes:
   redpanda-data:
