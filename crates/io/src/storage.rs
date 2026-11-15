@@ -12,10 +12,11 @@ use dfe_archiver_core::storage::{Closed, PendingUpload, RecoveredFile, StorageBa
 use dfe_archiver_core::{Error, Result};
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
-use object_store::azure::MicrosoftAzureBuilder;
+use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectPath;
 use object_store::{MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload};
+use scalo::config::sensitive::SensitiveString;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -676,24 +677,7 @@ impl ObjectStoreBackend {
         staging: &Staging,
     ) -> Result<Self> {
         // `allow_http` defaults to false (HTTPS required). Only enable for local/dev endpoints.
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&config.bucket)
-            .with_allow_http(config.allow_http);
-
-        if let Some(ref region) = config.region {
-            builder = builder.with_region(region);
-        }
-        if let Some(ref endpoint) = config.endpoint {
-            builder = builder.with_endpoint(endpoint);
-        }
-        if let Some(ref key_id) = config.access_key_id {
-            builder = builder.with_access_key_id(key_id);
-        }
-        if let Some(ref secret) = config.secret_access_key {
-            builder = builder.with_secret_access_key(secret.expose());
-        }
-
-        let store = builder
+        let store = s3_builder(config)
             .build()
             .map_err(|e| Error::storage_with("failed to create S3 client", e))?;
 
@@ -771,16 +755,7 @@ impl ObjectStoreBackend {
         chunk_size: usize,
         staging: &Staging,
     ) -> Result<Self> {
-        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&config.bucket);
-
-        if let Some(ref key) = config.service_account_key {
-            builder = builder.with_service_account_key(key.expose());
-        }
-        if let Some(ref path) = config.credentials_path {
-            builder = builder.with_service_account_path(path);
-        }
-
-        let store = builder
+        let store = gcs_builder(config)
             .build()
             .map_err(|e| Error::storage_with("failed to create GCS client", e))?;
 
@@ -806,43 +781,7 @@ impl ObjectStoreBackend {
         chunk_size: usize,
         staging: &Staging,
     ) -> Result<Self> {
-        let mut builder = MicrosoftAzureBuilder::from_env()
-            .with_account(&config.account_name)
-            .with_container_name(&config.container);
-
-        if let Some(ref key) = config.account_key {
-            builder = builder.with_access_key(key.expose());
-        }
-        if let Some(ref sas) = config.sas_token {
-            builder = builder.with_sas_authorization(parse_sas_pairs(sas.expose()));
-        }
-        // `use_emulator` and `endpoint` cannot both apply. object_store's
-        // emulator branch takes its URL from the `AZURITE_BLOB_STORAGE_URL` env
-        // var (default `http://127.0.0.1:10000`) and never reads
-        // `with_endpoint`, so setting both would drop the endpoint in silence
-        // and address whatever answered on the local default port -- or, with
-        // nothing there, `<account>.blob.core.windows.net` out on the internet,
-        // which resolves for `devstoreaccount1` and returns 403.
-        //
-        // So an explicit endpoint wins. An emulator behind one needs its own
-        // credential, because there is no managed identity to fall back on and
-        // the emulator's key is not ours to assume.
-        if let Some(ref endpoint) = config.endpoint {
-            if config.use_emulator && config.account_key.is_none() && config.sas_token.is_none() {
-                return Err(Error::Config(
-                    "azure.use_emulator together with azure.endpoint needs \
-                     azure.account_key or azure.sas_token (for Azurite, its published \
-                     devstoreaccount1 key); or drop azure.endpoint and let \
-                     AZURITE_BLOB_STORAGE_URL address the emulator"
-                        .to_string(),
-                ));
-            }
-            builder = builder
-                .with_endpoint(endpoint.clone())
-                .with_allow_http(true);
-        } else if config.use_emulator {
-            builder = builder.with_use_emulator(true);
-        }
+        let builder = azure_builder(config)?;
 
         let store = builder
             .build()
@@ -882,6 +821,116 @@ impl ObjectStoreBackend {
             ObjectPath::from(format!("{}/{}", self.prefix, path))
         }
     }
+}
+
+/// `value` when it names something, `None` when it is empty or blank.
+///
+/// The client builders start from the cloud's own environment variables and a
+/// config value replaces one, so a setting the config leaves empty must not
+/// reach the builder: `""` would overwrite the account, bucket or credential
+/// the environment supplies.
+fn named(value: &str) -> Option<&str> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+/// [`named`] over an optional string setting.
+fn named_opt(value: Option<&String>) -> Option<&str> {
+    value.map(String::as_str).and_then(named)
+}
+
+/// [`named`] over an optional secret setting.
+fn named_secret(value: Option<&SensitiveString>) -> Option<&str> {
+    value.map(SensitiveString::expose).and_then(named)
+}
+
+/// The S3 client builder for `config`, over the `AWS_*` environment.
+fn s3_builder(config: &S3Config) -> AmazonS3Builder {
+    let mut builder = AmazonS3Builder::from_env().with_allow_http(config.allow_http);
+
+    if let Some(bucket) = named(&config.bucket) {
+        builder = builder.with_bucket_name(bucket);
+    }
+    if let Some(region) = named_opt(config.region.as_ref()) {
+        builder = builder.with_region(region);
+    }
+    if let Some(endpoint) = named_opt(config.endpoint.as_ref()) {
+        builder = builder.with_endpoint(endpoint);
+    }
+    if let Some(key_id) = named_opt(config.access_key_id.as_ref()) {
+        builder = builder.with_access_key_id(key_id);
+    }
+    if let Some(secret) = named_secret(config.secret_access_key.as_ref()) {
+        builder = builder.with_secret_access_key(secret);
+    }
+    builder
+}
+
+/// The GCS client builder for `config`, over the `GOOGLE_*` environment.
+fn gcs_builder(config: &GcsConfig) -> GoogleCloudStorageBuilder {
+    let mut builder = GoogleCloudStorageBuilder::from_env();
+
+    if let Some(bucket) = named(&config.bucket) {
+        builder = builder.with_bucket_name(bucket);
+    }
+    if let Some(key) = named_secret(config.service_account_key.as_ref()) {
+        builder = builder.with_service_account_key(key);
+    }
+    if let Some(path) = named_opt(config.credentials_path.as_ref()) {
+        builder = builder.with_service_account_path(path);
+    }
+    builder
+}
+
+/// The Azure client builder for `config`, over the `AZURE_*` environment.
+fn azure_builder(config: &AzureConfig) -> Result<MicrosoftAzureBuilder> {
+    let mut builder = MicrosoftAzureBuilder::from_env();
+
+    if let Some(account) = named(&config.account_name) {
+        builder = builder.with_account(account);
+    }
+    if let Some(container) = named(&config.container) {
+        builder = builder.with_container_name(container);
+    }
+    if let Some(key) = named_secret(config.account_key.as_ref()) {
+        builder = builder.with_access_key(key);
+    }
+    if let Some(sas) = named_secret(config.sas_token.as_ref()) {
+        builder = builder.with_sas_authorization(parse_sas_pairs(sas));
+    }
+    // `use_emulator` and `endpoint` cannot both apply. object_store's
+    // emulator branch takes its URL from the `AZURITE_BLOB_STORAGE_URL` env
+    // var (default `http://127.0.0.1:10000`) and never reads
+    // `with_endpoint`, so setting both would drop the endpoint in silence
+    // and address whatever answered on the local default port -- or, with
+    // nothing there, `<account>.blob.core.windows.net` out on the internet,
+    // which resolves for `devstoreaccount1` and returns 403.
+    //
+    // So an explicit endpoint wins. An emulator behind one needs its own
+    // credential, because there is no managed identity to fall back on and
+    // the emulator's key is not ours to assume.
+    if let Some(endpoint) = named_opt(config.endpoint.as_ref()) {
+        let has_credential = [AzureConfigKey::AccessKey, AzureConfigKey::SasKey]
+            .iter()
+            .any(|key| builder.get_config_value(key).is_some())
+            || named_secret(config.sas_token.as_ref()).is_some();
+        if config.use_emulator && !has_credential {
+            return Err(Error::Config(
+                "azure.use_emulator together with azure.endpoint needs \
+                 azure.account_key or azure.sas_token, or AZURE_STORAGE_ACCOUNT_KEY or \
+                 AZURE_STORAGE_SAS_TOKEN in the environment (for Azurite, its published \
+                 devstoreaccount1 key); or drop azure.endpoint and let \
+                 AZURITE_BLOB_STORAGE_URL address the emulator"
+                    .to_string(),
+            ));
+        }
+        builder = builder
+            .with_endpoint(endpoint.to_string())
+            .with_allow_http(true);
+    } else if config.use_emulator {
+        builder = builder.with_use_emulator(true);
+    }
+
+    Ok(builder)
 }
 
 /// Parse SAS token query string into key-value pairs.
@@ -1507,6 +1556,7 @@ fn parse_bucket_prefix(path: &str) -> (&str, &str) {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use scalo::config::sensitive::SensitiveString;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -2724,9 +2774,12 @@ mod tests {
             endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
         };
         let (_dir, staging) = staging();
-        let err = ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging)
-            .err()
-            .expect("use_emulator with an endpoint and no credential must be rejected");
+        let err = temp_env::with_vars_unset(
+            ["AZURE_STORAGE_ACCOUNT_KEY", "AZURE_STORAGE_SAS_TOKEN"],
+            || ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging),
+        )
+        .err()
+        .expect("use_emulator with an endpoint and no credential must be rejected");
         let message = err.to_string();
         assert!(
             message.contains("azure.account_key"),
@@ -2752,6 +2805,151 @@ mod tests {
         let backend =
             ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging)
                 .expect("emulator behind an explicit endpoint with a key must build");
+        assert_eq!(backend.name(), "azure");
+    }
+
+    /// A setting the config leaves empty is not a setting: the client builder
+    /// keeps what the cloud's own environment variable names, and a value the
+    /// config does name still wins over it.
+    #[test]
+    fn an_empty_s3_setting_leaves_the_environment_value() {
+        use object_store::aws::AmazonS3ConfigKey as Key;
+        type Set = fn(&mut S3Config, &str);
+        let cases: [(&str, Key, Set); 5] = [
+            ("AWS_BUCKET", Key::Bucket, |c, v| c.bucket = v.to_string()),
+            ("AWS_REGION", Key::Region, |c, v| {
+                c.region = Some(v.to_string());
+            }),
+            ("AWS_ENDPOINT", Key::Endpoint, |c, v| {
+                c.endpoint = Some(v.to_string());
+            }),
+            ("AWS_ACCESS_KEY_ID", Key::AccessKeyId, |c, v| {
+                c.access_key_id = Some(v.to_string());
+            }),
+            ("AWS_SECRET_ACCESS_KEY", Key::SecretAccessKey, |c, v| {
+                c.secret_access_key = Some(SensitiveString::from(v));
+            }),
+        ];
+        for (var, key, set) in cases {
+            for (configured, want) in [
+                ("", "from-env"),
+                ("  ", "from-env"),
+                ("from-config", "from-config"),
+            ] {
+                let mut config = S3Config::default();
+                set(&mut config, configured);
+                let got = temp_env::with_var(var, Some("from-env"), || {
+                    s3_builder(&config).get_config_value(&key)
+                });
+                assert_eq!(
+                    got.as_deref(),
+                    Some(want),
+                    "{var} with config {configured:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_gcs_setting_leaves_the_environment_value() {
+        use object_store::gcp::GoogleConfigKey as Key;
+        type Set = fn(&mut GcsConfig, &str);
+        let cases: [(&str, Key, Set); 3] = [
+            ("GOOGLE_BUCKET", Key::Bucket, |c, v| {
+                c.bucket = v.to_string();
+            }),
+            (
+                "GOOGLE_SERVICE_ACCOUNT_KEY",
+                Key::ServiceAccountKey,
+                |c, v| {
+                    c.service_account_key = Some(SensitiveString::from(v));
+                },
+            ),
+            ("GOOGLE_SERVICE_ACCOUNT", Key::ServiceAccount, |c, v| {
+                c.credentials_path = Some(v.to_string());
+            }),
+        ];
+        for (var, key, set) in cases {
+            for (configured, want) in [
+                ("", "from-env"),
+                ("  ", "from-env"),
+                ("from-config", "from-config"),
+            ] {
+                let mut config = GcsConfig::default();
+                set(&mut config, configured);
+                let got = temp_env::with_var(var, Some("from-env"), || {
+                    gcs_builder(&config).get_config_value(&key)
+                });
+                assert_eq!(
+                    got.as_deref(),
+                    Some(want),
+                    "{var} with config {configured:?}"
+                );
+            }
+        }
+    }
+
+    /// An Azure account named only by `AZURE_STORAGE_ACCOUNT_NAME` is the
+    /// deployment that sets no `archive.azure.account_name`.
+    #[test]
+    fn an_empty_azure_setting_leaves_the_environment_value() {
+        use object_store::azure::AzureConfigKey as Key;
+        type Set = fn(&mut AzureConfig, &str);
+        let cases: [(&str, Key, Set); 4] = [
+            ("AZURE_STORAGE_ACCOUNT_NAME", Key::AccountName, |c, v| {
+                c.account_name = v.to_string();
+            }),
+            ("AZURE_CONTAINER_NAME", Key::ContainerName, |c, v| {
+                c.container = v.to_string();
+            }),
+            ("AZURE_STORAGE_ACCOUNT_KEY", Key::AccessKey, |c, v| {
+                c.account_key = Some(SensitiveString::from(v));
+            }),
+            ("AZURE_STORAGE_ENDPOINT", Key::Endpoint, |c, v| {
+                c.endpoint = Some(v.to_string());
+            }),
+        ];
+        for (var, key, set) in cases {
+            for (configured, want) in [
+                ("", "from-env"),
+                ("  ", "from-env"),
+                ("from-config", "from-config"),
+            ] {
+                let mut config = AzureConfig::default();
+                set(&mut config, configured);
+                let got = temp_env::with_var(var, Some("from-env"), || {
+                    azure_builder(&config)
+                        .expect("a config with no emulator builds")
+                        .get_config_value(&key)
+                });
+                assert_eq!(
+                    got.as_deref(),
+                    Some(want),
+                    "{var} with config {configured:?}"
+                );
+            }
+        }
+    }
+
+    /// The documented way to supply the Azure key is the environment, so an
+    /// emulator behind an explicit endpoint takes it from there when the config
+    /// names none.
+    #[test]
+    fn test_azure_emulator_with_endpoint_takes_a_credential_from_the_environment() {
+        let config = AzureConfig {
+            account_name: "devstoreaccount1".to_string(),
+            container: "archive-test".to_string(),
+            use_emulator: true,
+            endpoint: Some("http://127.0.0.1:32769/devstoreaccount1".to_string()),
+            ..AzureConfig::default()
+        };
+        // Any base64 value is a key to the builder: this one is "testkey".
+        let env_key = "dGVzdGtleQ==";
+        let (_dir, staging) = staging();
+        let backend = temp_env::with_var("AZURE_STORAGE_ACCOUNT_KEY", Some(env_key), || {
+            ObjectStoreBackend::new_azure(&config, String::new(), 8 * 1024 * 1024, &staging)
+        })
+        .expect("a key in the environment is a credential");
         assert_eq!(backend.name(), "azure");
     }
 

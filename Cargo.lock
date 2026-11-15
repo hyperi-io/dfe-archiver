@@ -1474,6 +1474,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snap",
+ "temp-env",
  "tempfile",
  "tokio",
  "tokio-test",

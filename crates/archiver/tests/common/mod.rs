@@ -222,65 +222,6 @@ macro_rules! skip_if_no_kafka {
     };
 }
 
-// -- Docker lifecycle -------------------------------------------------
-
-/// Start dfe-docker infra profile if `TEST_MODE=docker` and containers aren't running.
-///
-/// Looks for dfe-docker at:
-///   1. `DFE_DOCKER_PATH` env var
-///   2. `../dfe-docker` (sibling directory convention)
-///
-/// Returns `Ok(true)` if containers were started, `Ok(false)` if already running or not docker mode.
-pub fn ensure_docker_infra() -> Result<bool, String> {
-    if TestMode::detect() != TestMode::Docker {
-        return Ok(false);
-    }
-
-    // Check if already running (look for redpanda container from dfe-docker)
-    let output = std::process::Command::new("docker")
-        .args(["ps", "--filter", "name=dfe-kafka", "--format", "{{.Names}}"])
-        .output()
-        .map_err(|e| format!("docker not found: {e}"))?;
-
-    if String::from_utf8_lossy(&output.stdout).contains("dfe-kafka") {
-        return Ok(false);
-    }
-
-    let docker_path = env::var("DFE_DOCKER_PATH").unwrap_or_else(|_| "../dfe-docker".into());
-
-    if !std::path::Path::new(&docker_path)
-        .join("docker-compose.yml")
-        .exists()
-    {
-        return Err(format!(
-            "dfe-docker not found at {docker_path}. Set DFE_DOCKER_PATH or clone dfe-docker as a sibling."
-        ));
-    }
-
-    let status = std::process::Command::new("docker")
-        .args(["compose", "--profile", "infra", "up", "-d"])
-        .current_dir(&docker_path)
-        .status()
-        .map_err(|e| format!("docker compose failed: {e}"))?;
-
-    if !status.success() {
-        return Err("docker compose --profile infra up -d failed".into());
-    }
-
-    // Poll TCP reachability at 250ms cadence (4x faster feedback than 1s)
-    // up to a 30s ceiling. Avoids blind 1s sleeps between probes -- fast
-    // services no longer pay the worst-case wait.
-    let kf = kafka_test_config();
-    for _ in 0..120 {
-        if kf.is_reachable() {
-            return Ok(true);
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    Err("Kafka did not become healthy within 30s".into())
-}
-
 // -- The dev stack's S3 store: a precondition rather than a fixture -----
 
 /// Host:port the `minio://` tests talk to, from `MINIO_ENDPOINT` or the dev

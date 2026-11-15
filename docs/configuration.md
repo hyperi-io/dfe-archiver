@@ -34,7 +34,7 @@ The running pipeline reads its config once, at startup. The reloader watches the
 3. `settings.<env>.yaml`, then `settings.yaml` with the `--config` file over it, then `defaults.yaml`, each looked for in the working directory, `config/` and `/config/`. `<env>` is `APP_ENV`, `ENVIRONMENT` or `ENV`, and `development` when none is set.
 4. The defaults.
 
-scalo sets this cascade up from `--config` before the archiver reads its own file. So a file named only by `DFE_ARCHIVER_CONFIG`, or found at one of the archiver's default paths, feeds the archiver's sections and none of scalo's. The image passes `--config /etc/dfe/archiver.yaml`, so a deployment's file reaches both.
+The archiver resolves its config file (`--config`, else `DFE_ARCHIVER_CONFIG`, else a default path) before scalo sets this cascade up, so the one file feeds both the archiver's sections and scalo's, however it was named.
 
 ## Environment variables
 
