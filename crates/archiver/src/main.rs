@@ -245,8 +245,10 @@ impl ServiceApp for App {
             }
         });
 
-        // The archive sink, reported separately so an unreachable bucket shows
-        // on the health endpoint instead of only in the scaling gauge.
+        // The archive sink, reported apart from the transport. It reads Degraded
+        // while the bucket is out, which keeps `/readyz` at 200 so the pod goes
+        // on staging. scalo serves no per-component route, so only
+        // `HealthRegistry::to_json()` returns this check.
         let archiver_sink = Arc::clone(&archiver);
         scalo::health::HealthRegistry::register("archive_sink", move || {
             archiver_sink.sink_health()
@@ -318,6 +320,23 @@ impl ServiceApp for App {
     }
 }
 
+/// The app parsed from `args`, with `--config` holding the config file
+/// [`config_file`] resolves.
+///
+/// `run_app` sets scalo's config cascade up from `--config` alone, before
+/// `load_config` runs. A file named by `DFE_ARCHIVER_CONFIG` or found at a
+/// default location would otherwise reach the archiver's own sections and miss
+/// scalo's (`version_check`, `logger`, `metrics`, `self_regulation`, `scaling`).
+fn parse_app<I, T>(args: I) -> App
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut app = App::parse_from(args);
+    app.common.config = config_file(app.common.config.as_deref());
+    app
+}
+
 /// Live heap bytes from jemalloc, for scalo's memory guard.
 ///
 /// jemalloc caches its statistics, so the epoch advance is what refreshes them.
@@ -361,7 +380,7 @@ fn main() {
     // dotenvy::dotenv() would load the first .env in any parent directory.
     dotenvy::from_path(".env").ok();
 
-    let app = App::parse();
+    let app = parse_app(std::env::args_os());
 
     // Handle deployment contract commands before run_app
     // (these don't need logger/config init)
@@ -434,8 +453,10 @@ mod tests {
         format!("kafka:\n  brokers: [\"localhost:9092\"]\n{extra}")
     }
 
-    /// The version check `ServiceRuntime::build` resolves after `load_config`
-    /// reads `yaml` as the config file, with the env opt-out at `enabled`.
+    /// The version check `ServiceRuntime::build` resolves after `run_app` has
+    /// set the cascade up and `load_config` has read `yaml` as the config file,
+    /// with the env opt-out at `enabled`. The command is `config-check`, which
+    /// takes the same steps as `run` up to the service.
     ///
     /// `via_env` names the file by `DFE_ARCHIVER_CONFIG` instead of `--config`. The
     /// cascade is a process-global `OnceLock`, so each caller needs its own
@@ -450,6 +471,11 @@ mod tests {
         std::fs::write(&path, yaml).expect("write config");
         let path = path.to_str().expect("utf-8 path");
         let named_by = if via_env { Some(path) } else { None };
+        let args: &[&str] = if via_env {
+            &["dfe-archiver", "--quiet", "config-check"]
+        } else {
+            &["dfe-archiver", "--quiet", "--config", path, "config-check"]
+        };
 
         temp_env::with_vars(
             [(ENABLED_VAR, enabled), ("DFE_ARCHIVER_CONFIG", named_by)],
@@ -458,13 +484,13 @@ mod tests {
                     scalo::config::try_get().is_none(),
                     "the cascade is already set in this process; run under cargo nextest"
                 );
-                let app = if via_env {
-                    App::parse_from(["dfe-archiver"])
-                } else {
-                    App::parse_from(["dfe-archiver", "--config", path])
-                };
-                app.load_config(app.common_args().config.as_deref())
-                    .expect("config loads");
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime")
+                    .block_on(run_app(parse_app(args)))
+                    .expect("config-check passes");
+                let app = parse_app(["dfe-archiver"]);
                 VersionCheckConfig::from_cascade_or(
                     app.name(),
                     "0.0.0",

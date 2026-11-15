@@ -47,6 +47,8 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Sets one cloud environment variable for the length of a test.
+temp-env = { workspace = true }
 tokio-test = { workspace = true }
 # Builds the librdkafka statistics the position-lag unit test feeds to scalo.
 rdkafka = { workspace = true }
