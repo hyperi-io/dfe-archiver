@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.51](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.50...v1.7.51) (2026-11-15)
+
+### Bug Fixes
+
+* **deps:** take rustix 1.1.6 and drop the crypto-bigint ignore ([9fe0246](https://github.com/hyperi-io/dfe-archiver/commit/9fe0246ea357902518beaff2a67df7fa5b303120))
+* **scalo:** rebuild on 2.14.30 ([#178](https://github.com/hyperi-io/dfe-archiver/issues/178)) ([dd7ab78](https://github.com/hyperi-io/dfe-archiver/commit/dd7ab78fdd0b062fa3e092a50f9cad1ac8cee69d))
+
 ## [1.7.50](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.49...v1.7.50) (2026-11-11)
 
 ### Bug Fixes
