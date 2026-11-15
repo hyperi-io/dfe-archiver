@@ -27,6 +27,7 @@ out/
 test-results/
 coverage/
 .tmp/
+/data/
 
 # Rust build artefacts
 target

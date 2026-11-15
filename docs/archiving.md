@@ -10,11 +10,11 @@
 
 # Archiving
 
-The archiver keeps a compressed copy of every record it receives, in files you can read with standard tools. This page is for the person running it. The design behind it is [internals.md](internals.md).
+The archiver keeps a compressed copy of every record it receives, in files you can read with standard tools. This page is for the person running it. The design behind it is [internals.md](internals.md), and what can drop or repeat a record is [delivery.md](delivery.md).
 
 ## What it writes
 
-One record per line, exactly as it arrived, then a newline. The archiver parses a record only to route it and never changes it. Lines are compressed, `zstd` unless `compression.codec` says otherwise:
+One record per line, exactly as it arrived, then a newline. A payload holding a newline of its own spans two lines. The archiver parses a record only to route it and never changes it, and it keeps no Kafka key, offset or timestamp. Lines are compressed, `zstd` unless `compression.codec` says otherwise:
 
 | Codec | File ends in |
 |-------|--------------|
@@ -37,14 +37,14 @@ A file closes when it reaches `archive.roll_size_bytes` compressed (1 GiB) or `a
 Under it, a key is the routed destination, then the `archive.path_template` expansion, then `-<seq>-<writer id>` and the extension:
 
 ```text
-s3://acme-archive/archives/events/acme/2026/10/29/03-0001-3f9a.jsonl.zst
+s3://acme-archive/archives/events/acme/2026/10/29/03-0001-9c41d2e07b3a5f68.jsonl.zst
 ```
 
-The routed part is the Kafka topic then the routing fields (`events/acme`), or only the fields on `grpc`, which has no topic. By default the field is `_org_id`. A value is encoded before it becomes a path segment, so `a/b` is written `a=2Fb`. A record with no value for a field goes under `default`.
+The routed part is the Kafka topic then the routing fields (`events/acme`). By default the field is `_org_id`. On `grpc` the topic is the push's routing key, which dfe-receiver leaves unset, so the key starts at the fields, `_source` then `_org_id` by default. A value is encoded before it becomes a path segment, so `a/b` is written `a=2Fb`. A record with no value for a field goes under `default`.
 
 An object-store file is staged under `buffer.spool_dir/uploads` and uploaded whole once it closes. Nothing is visible in the bucket until then.
 
-In a DFE deployment, dfe-infra's values set `DFE_ARCHIVER_DESTINATION` only from `archive.localPath`, as a `file://` path. With no local path the variable is empty, the archiver reads it as unset, and the `archive.destination` in its config file stands. An object store also takes `s3.endpoint` and `s3.bucket` from the values. Store credentials come from the optional `dfe-archiver-s3` Secret, or from the store SDK's own credential chain where the Secret does not exist.
+In a DFE deployment, dfe-infra's values set `DFE_ARCHIVER_DESTINATION` only from `archive.localPath`, as a `file://` path, and mount an `emptyDir` there, so files on that path last only as long as the pod. With no local path the variable is empty, the archiver reads it as unset, and the `archive.destination` in its config file stands. An object store also takes `s3.endpoint` and `s3.bucket` from the values. Store credentials come from the optional `dfe-archiver-s3` Secret, or from the store SDK's own credential chain where the Secret does not exist.
 
 ## How long it stays
 
@@ -56,7 +56,7 @@ There is no restore command. A file is the records, so you decompress it and put
 
 1. List the keys for the destination and window you need, for example `aws s3 ls --recursive s3://acme-archive/archives/events/acme/2026/10/29/`.
 2. Fetch the files and decompress them: `zstd -dc 03-0001-3f9a.jsonl.zst > records.jsonl`.
-3. On `kafka` the first part of the key is the topic. Produce the lines back to it, for example `kcat -P -b kafka:9092 -t events -l records.jsonl`. They then take the normal path. On `grpc` the key holds no topic, so send the records to the receiver as new data.
+3. On `kafka` the first part of the key is the topic. Produce the lines back to it, for example `kcat -P -b kafka:9092 -t events -l records.jsonl`. They then take the normal path, and a payload that held a newline goes back as two messages. On `grpc` the key holds no topic, so send the records to the receiver as new data.
 
 Check two things first:
 
