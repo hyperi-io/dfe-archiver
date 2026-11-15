@@ -775,7 +775,7 @@
       "description": "How backends are used when multiple are enabled.",
       "oneOf": [
         {
-          "description": "Try backends in order; stop on first success.\nDefault order: Kafka first, file fallback.",
+          "description": "Try backends in order. Stop on first success.\nDefault order: Kafka first, file fallback.",
           "type": "string",
           "const": "cascade"
         },
