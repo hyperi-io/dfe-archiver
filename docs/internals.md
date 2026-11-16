@@ -14,7 +14,7 @@ A record arrives on Kafka or the scalo Push listener, is routed to a destination
 
 ## The pipeline
 
-This diagram shows the five steps inside the archiver and what it talks to.
+Records pass through five steps, receive to release, and land in a local path or a bucket.
 
 ```mermaid
 flowchart TB
