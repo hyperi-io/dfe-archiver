@@ -29,7 +29,7 @@ That is the committed profile. hyperi-ci switches LTO to `fat` on the beta and r
 
 `.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow, configured by `.hyperi-ci.yaml`.
 
-This diagram shows the jobs one CI run takes.
+Quality and test both gate the build, and the build feeds the release tail and the gate.
 
 ```mermaid
 flowchart LR

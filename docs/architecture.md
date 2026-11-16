@@ -12,7 +12,7 @@
 
 Where things live and which way the dependencies point. The design itself -- the pipeline, the rolling model, the storage backends -- is [internals.md](internals.md), and the delivery guarantee [delivery.md](delivery.md).
 
-This diagram shows which way the crate dependencies point.
+The archiver crate depends on both libraries, and io depends on core alone.
 
 ```mermaid
 flowchart LR

@@ -14,7 +14,7 @@ On `kafka` with `kafka.acknowledgements.enabled` (the default) no record is lost
 
 ## A record is released when its file is durable
 
-This diagram shows when a record's offset is released.
+A record's offset is released only after its file is synced or uploaded.
 
 ```mermaid
 flowchart LR
