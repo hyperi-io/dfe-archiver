@@ -12,11 +12,9 @@
 
 How the archiver is built and released, and the design decisions behind it. The operator-facing design is [internals.md](internals.md).
 
-## Building and releasing
-
 The build needs the tools in the README's [quick start](../README.md#quick-start). `cargo build` writes a debug binary to `target/debug/dfe-archiver`, and `cargo build --release --features jemalloc` a release one, with the allocator CI uses, to `target/release/dfe-archiver`. jemalloc is off by default, so a plain `cargo build` uses the system allocator.
 
-CI builds each target on a runner of its own architecture, never cross-compiling, with `--target`, so its binaries land under `target/x86_64-unknown-linux-gnu/release/` and `target/aarch64-unknown-linux-gnu/release/`. `rdkafka` takes its `dynamic-linking` feature, which finds librdkafka through pkg-config, and the release build points pkg-config at a static-only prefix (scalo-rs `docs/deployment/native-deps.md`), so the shipped binary carries librdkafka statically.
+CI builds each target on a runner of the same architecture, never cross-compiling, with `--target`, so its binaries land under `target/x86_64-unknown-linux-gnu/release/` and `target/aarch64-unknown-linux-gnu/release/`. `rdkafka` takes its `dynamic-linking` feature, which finds librdkafka through pkg-config, and the release build points pkg-config at a static-only prefix (scalo-rs `docs/deployment/native-deps.md`), so the shipped binary links librdkafka statically.
 
 ```toml
 [profile.release]
@@ -63,14 +61,14 @@ flowchart LR
     class checks group
 ```
 
-*Figure 1. L4 Detail -- CI pipeline. The gate checks plan, quality, test and build, and the commit check and release tail report on their own.* Up: [dfe-archiver documentation](README.md).
+*Figure 1. L4 Detail -- CI pipeline. The gate checks plan, quality, test and build, and the commit check and release tail report separately.* Up: [dfe-archiver documentation](README.md).
 
 | Job | What it does |
 |---|---|
 | Plan | Predicts the version and which jobs run |
 | Quality | fmt, clippy, audit and deny |
 | Test | The test tier, with coverage |
-| Build | x86_64 and aarch64, each on a runner of its own arch, with PGO then BOLT on a full release |
+| Build | x86_64 and aarch64, each on a runner of that arch, with PGO then BOLT on a full release |
 | Release tail | The tag, the GitHub release, the ghcr image, the binaries to R2 and the Helm chart |
 
 A schedule run tests and publishes nothing. A release needs a `Release: true` trailer on the commit pushed to `main`, or a dispatch, as [CONTRIBUTING.md](../CONTRIBUTING.md#cicd-workflow) says. No crate is published, because all three set `publish = false`.
@@ -84,11 +82,11 @@ A schedule run tests and publishes nothing. A release needs a `Release: true` tr
 
 The binaries are `dfe-archiver-linux-amd64` and `dfe-archiver-linux-arm64`. Each has a `<binary>.sha256` beside it, in the format `sha256sum -c` reads.
 
-## Key design decisions
+The design decisions behind it:
 
 | Decision | Why | Rejected |
 |---|---|---|
-| scalo for config, logging, metrics, the transports, the DLQ and scaling | The same patterns as the other DFE apps, and less code here | Direct rdkafka, a config system of its own |
+| scalo for config, logging, metrics, the transports, the DLQ and scaling | The same patterns as the other DFE apps, and less code here | Direct rdkafka, a bespoke config system |
 | zstd at level 3 by default, with LZ4, Snappy and gzip | zstd gives the best ratio at an acceptable speed, LZ4 suits speed-critical work and gzip compatibility | brotli and lzma, both too slow |
 | Roll on compressed file size, 1 GiB by default | Inbound size does not predict the size a file reaches in the store | Inbound size, record count |
 | Hot buffers in memory under a ceiling per destination and a cap on all of them, then the writers, with nothing spilled to disk ahead of them | Memory and open files stay bounded however many destinations routing produces | One large shared buffer, an unbounded file per destination |

@@ -6,8 +6,7 @@
 #
 # Reference: https://github.com/crate-ci/typos
 #
-# Prose is Australian English and code American, and typos cannot tell them
-# apart, so the American spellings code uses are allowlisted.
+# Prose is Australian English and code American, so the American spellings code uses are allowlisted.
 
 [default]
 locale = "en-au"

@@ -50,7 +50,7 @@ flowchart TB
     class archiver group
 ```
 
-*Figure 1. L3 Components -- dfe-archiver. The dashed box is external and the dotted arrow carries refused records when the DLQ is on.* Up: top of dfe-archiver. Down: [L4 Detail -- Release on a complete file](delivery.md#a-record-is-released-when-its-file-is-durable).
+*Figure 1. L3 Components -- dfe-archiver. The dashed box is external and the dotted arrow takes refused records to the DLQ when it is on.* Up: top of dfe-archiver. Down: [L4 Detail -- Release on a complete file](delivery.md#a-record-is-released-when-its-file-is-durable).
 
 | Step | Code | What it does |
 |---|---|---|
@@ -71,9 +71,9 @@ flowchart TB
 
 On `kafka` an empty `kafka.topics` turns on discovery, re-read every `kafka.topic_refresh_secs`, so a source added later is archived without a restart. It takes every topic `kafka.topic_exclude` keeps, by default all but Kafka's internal and `_dlq` topics, narrowed by `kafka.topic_include` when set. Where a source has both `<name>_land` and `<name>_load`, it keeps `_land`, the record as it arrived, where dfe-loader keeps `_load`.
 
-`grpc` lets a deployment with no broker still archive. The previous stage pushes each record to the listener on `grpc.listen`, by default `0.0.0.0:6000`, the contract's push port. The listener answers a push once its records are queued, because a record is released only when its file completes, long after any sender's deadline. So the archive copy on `grpc` is at-most-once, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`, or `acks_disabled` under `grpc.acknowledgements.enabled: false`. There is no broker to dead-letter to, so the DLQ is off.
+`grpc` lets a deployment with no broker still archive. The previous stage pushes each record to the listener on `grpc.listen`, by default `0.0.0.0:6000`, the contract's push port. The listener answers a push once its records are queued, because a record is released when its file completes, long after any sender's deadline. So the archive copy on `grpc` is at-most-once, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`, or `acks_disabled` under `grpc.acknowledgements.enabled: false`. There is no broker to dead-letter to, so the DLQ is off.
 
-The binary compiles in scalo's `transport-kafka` and `transport-grpc` alone, and `validate_config` refuses any other `transport`.
+The binary compiles in scalo's `transport-kafka` and `transport-grpc` alone, and `validate_config` rejects any other `transport`.
 
 ### Idle until configured
 
@@ -86,10 +86,10 @@ Structural faults still refuse at startup: an unknown transport, `grpc` with no 
 Each destination gets a hot buffer in memory and an archive writer with one open file. Nothing spills to disk ahead of the writers.
 
 - At most 64 destinations buffer at once. A record for another first flushes the buffer that has gone longest without one, counted in `hot_buffer_evictions_total`.
-- A buffer flushes at `buffer.flush_bytes` plus one record, at `buffer.flush_records`, or once `buffer.flush_age_secs` has passed since its last flush, checked on each record and on a timer.
+- A buffer flushes at `buffer.flush_bytes` plus one record, at `buffer.flush_records`, or once `buffer.flush_age_secs` has gone by since its last flush, checked on each record and on a timer.
 - All buffers together hold at most a quarter of the memory guard's limit. Past it the largest flush first, so `flush_bytes` is a ceiling per destination, never multiplied by the destination count.
 - A buffer allocates nothing until a record arrives and hands its memory to the batch it flushes. The cap counts bytes buffered, and a growing buffer's allocation can run to twice that.
-- Past `archive.max_writers` writers, the one that has gone longest without a write closes in the background and its file completes as on a roll (`writer_evictions_total`). It keeps its slot while it closes, so a write for a new destination waits.
+- Past `archive.max_writers` writers, the one that has gone longest without a write closes in the background and its file completes as on a roll (`writer_evictions_total`). It keeps its slot until it closes, so a write for another destination waits.
 - A writer hands its data to the compressor at each flush, so an idle writer holds no buffer.
 
 | Key | Default | What it sets |
@@ -112,7 +112,7 @@ The spool budget is 90% of the size limit declared for the spool volume, which t
 
 A file closes when its compressed size reaches `archive.roll_size_bytes` (1 GiB) or its age reaches the roll interval, and `archive_roll_total{trigger}` counts each by `size` or `age`. Size counts compressed bytes in the file, never inbound or buffered bytes. A timer closes an aged file even when nothing arrives, and opens no empty successor.
 
-The roll interval is `archive.roll_interval_secs`. Unset, it is 300 s while offsets are held (`kafka` with acknowledgements on) or on `grpc`, otherwise 3600 s, because held offsets cost memory ([delivery.md](delivery.md#holding-costs-memory)).
+The roll interval is `archive.roll_interval_secs`. Unset, it is 300 s when offsets are held (`kafka` with acknowledgements on) or on `grpc`, otherwise 3600 s, because held offsets cost memory ([delivery.md](delivery.md#holding-costs-memory)).
 
 A file's key is the routed destination, then `archive.path_template` expanded, then `-<seq>-<writer id>`, then `.jsonl` and the codec's extension:
 
@@ -125,13 +125,13 @@ archive:
   path_template: "{year}/{month}/{day}/{hour}"
 ```
 
-The template carries no topic placeholder, because the routed destination already starts with the topic. It takes `{year}`, `{month}`, `{day}`, `{hour}` and `{minute}` in UTC, `{timestamp}` as Unix seconds and `{seq}`, the file's four-digit sequence number in that window. Validation refuses any other `{...}` token rather than let it reach the key as literal braces.
+The template has no topic placeholder, because the routed destination starts with the topic. It takes `{year}`, `{month}`, `{day}`, `{hour}` and `{minute}` in UTC, `{timestamp}` as Unix seconds and `{seq}`, the file's four-digit sequence number in that window. Validation rejects any other `{...}` token rather than let it reach the key as literal braces.
 
 The writer id is 16 hex digits no other writer shares. A staged file is never checked against the store, so without it two replicas, or an evicted writer closing beside its replacement, could pick one key and the later upload would replace the earlier object.
 
 ## Routing
 
-`routing.mode: expression`, the default, files each record under its topic and then the value of each field in `routing.expression_fields`, in dot notation for a nested field. `routing.mode: topic` files it under the topic alone and parses nothing. Unset, the fields are `_org_id` on `kafka`, where each source has its own topic, and `_source` then `_org_id` on `grpc`.
+`routing.mode: expression`, the default, files each record under its topic and then the value of each field in `routing.expression_fields`, in dot notation for a nested field. `routing.mode: topic` files it under the topic alone and parses nothing. Unset, the fields are `_org_id` on `kafka`, where each source has a separate topic, and `_source` then `_org_id` on `grpc`.
 
 ```yaml
 routing:
@@ -145,15 +145,15 @@ With those fields, `{"_org_id": "acme", "event_type": "login", "data": {}}` on t
 
 On `grpc` the topic is the push's routing key, and dfe-receiver sends none, so there is no topic folder. With the default fields `{"_source": "cisco_ios.log", "_org_id": "acme"}` lands under `cisco_ios.log/acme`. Under `mode: topic` a record with no key lands under `routing.default_segment`.
 
-A field the record does not carry, or carries null or blank, takes `routing.default_segment`, which is `default`, the id dfe-receiver gives the default org. Each is counted in `routing_fallback_total{field}` and warned at most once a minute. A record that is not JSON goes under its topic, counted in `routing_errors_total`.
+A field the record lacks, or holds as null or blank, takes `routing.default_segment`, which is `default`, the id dfe-receiver gives the default org. Each is counted in `routing_fallback_total{field}` and warned at most once a minute. A record that is not JSON goes under its topic, counted in `routing_errors_total`.
 
-Every segment, the topic and each value, is encoded before it becomes part of a path, so a value never names another directory. Letters, digits, `-`, `_` and `.` pass through. Every other byte is written `=XX` in upper-case hex, `=` itself included, so `a/b` becomes `a=2Fb` and two values never share a name. The empty value is written `=`, and `.` and `..` become `=2E` and `=2E=2E`. Every backend refuses an absolute path, or one with a `.` or `..` segment, for good.
+Every segment, the topic and each value, is encoded before it becomes part of a path, so a value never names another directory. Letters, digits, `-`, `_` and `.` pass through. Every other byte is written `=XX` in upper-case hex, `=` itself included, so `a/b` becomes `a=2Fb` and two values never share a name. The empty value is written `=`, and `.` and `..` become `=2E` and `=2E=2E`. Every backend rejects an absolute path, or one with a `.` or `..` segment, for good.
 
 Expression routing checks a record's nesting before it parses it, because `sonic-rs` recurses once per level with no limit. A record nested past scalo's maximum parse depth of 64 is never parsed. It goes to the DLQ as it arrived, under its topic with the reason `payload nesting exceeds the maximum parse depth of 64`, and its offset is released `Rejected`. With the DLQ off, as on `grpc`, or when no DLQ backend can hold it, the record is dropped and counted in `messages_dropped_total{reason}`.
 
 ## Compression
 
-Each flush appends one complete frame, framed stream or gzip member, so a file of many flushes is one concatenated stream the codec's own tools read whole.
+Each flush appends one complete frame, framed stream or gzip member, so a file of many flushes is one concatenated stream the codec's standard tools read whole.
 
 | `compression.codec` | Extension | Format |
 |---|---|---|
@@ -167,25 +167,25 @@ Each flush appends one complete frame, framed stream or gzip member, so a file o
 
 ## Storage backends
 
-`file:///path`, or a bare path, writes under that directory, which should be a mounted volume, never the root filesystem. Closing a file syncs it, and every directory above it up to the destination, before its offsets are released, so a node crash after the commit cannot lose it. A directory the archiver creates has its entry synced into the nearest parent that already existed.
+`file:///path`, or a bare path, writes under that directory, which should be a mounted volume, never the root filesystem. Closing a file syncs it, and every directory above it up to the destination, before its offsets are released, so a node crash after the commit cannot lose it. A directory the archiver creates has its entry synced into the nearest parent that existed before.
 
 `s3://`, `minio://`, `gs://` (or `gcs://`) and `az://` (or `azure://`) go through the `object_store` crate. A file is staged under `buffer.spool_dir/uploads` and uploaded whole once it closes, as one multipart upload read from the staged copy. Parts are `archive.multipart_chunk_size`, 8 MiB by default and at least 5 MiB, S3's smallest part. Four are in flight per upload and `buffer.writer_parallelism` uploads run at once, so upload memory stays near 64 MiB by default whatever the file size. A failed attempt aborts its upload, and an abort that fails leaves its parts until the bucket's lifecycle rule for incomplete uploads removes them.
 
-A store's block (`archive.s3`, `archive.minio`, `archive.gcs`, `archive.azure`) that names no bucket or container takes the destination URL's. One that names its own wins over the URL. The S3, GCS and Azure clients start from their SDK's environment and the block's keys apply over it, an empty key leaving the environment's value alone, and MinIO reads its block only:
+A store's block (`archive.s3`, `archive.minio`, `archive.gcs`, `archive.azure`) that names no bucket or container takes the destination URL's. A bucket or container set in the block wins over the URL's. The S3, GCS and Azure clients start from their SDK's environment and the block's keys apply over it, an empty key leaving the environment's value alone, and MinIO reads nothing but its block:
 
 | Store | Credentials, first match wins |
 |---|---|
 | S3 | `archive.s3.access_key_id` and `secret_access_key`, or `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. Then web identity (`AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`, which EKS IRSA injects), ECS container credentials, EKS Pod Identity, and EC2 instance metadata |
-| MinIO | the `archive.minio` block only, which names `endpoint`, `access_key`, `secret_key`, `bucket` and `use_ssl`, all five |
-| GCS | `archive.gcs.service_account_key` (the key's JSON) or `archive.gcs.credentials_path`, never both, because the client refuses the pair. Then `GOOGLE_APPLICATION_CREDENTIALS`, gcloud's application-default credentials file, and GCE instance metadata |
+| MinIO | the `archive.minio` block alone, which names `endpoint`, `access_key`, `secret_key`, `bucket` and `use_ssl`, all five |
+| GCS | `archive.gcs.service_account_key` (the key's JSON) or `archive.gcs.credentials_path`, never both, because the client rejects the pair. Then `GOOGLE_APPLICATION_CREDENTIALS`, gcloud's application-default credentials file, and GCE instance metadata |
 | Azure | a bearer token (`AZURE_STORAGE_TOKEN`), then `archive.azure.account_key` or `AZURE_STORAGE_ACCOUNT_KEY`, workload identity, a client secret, `archive.azure.sas_token`, and managed identity. `archive.azure.account_name` names the account and, when set, replaces the account name in the environment |
 
 CI tests GCS listing and deletion on an emulator but no upload, which needs a live bucket ([testing.md](testing.md)).
 
-An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client refuses every request. Keys from a Secret go in as environment variables ([configuration.md](configuration.md#environment-variables)).
+An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client rejects every request. Keys from a Secret go in as environment variables ([configuration.md](configuration.md#environment-variables)).
 
 ## Scaling
 
 The deployment contract's ScaledObject scales on CPU alone and declares no raw Kafka lag trigger. dfe-infra adds the `scaling_pressure` trigger in the profiles that want it, and the engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) lists every app's triggers.
 
-`scaling_pressure` is scalo's weighted composite of the three terms `scaling_components()` registers in `crates/archiver/src/lib.rs`, served at `/scaling/pressure`. `kafka_lag` is the consumer's position lag, records past its read position, because the committed-offset lag grows by up to a roll interval of intake while open files hold their commit. On `grpc` nothing sets it, so it stays at zero. `buffer_depth` is the hot-buffer count and `memory` the guard's pressure ratio. An open sink circuit zeroes the composite. scalo's memory gate (`scaling.memory_gate_threshold`) never fires here, because nothing gives the engine a memory reading.
+`scaling_pressure` is scalo's weighted composite of the three terms `scaling_components()` registers in `crates/archiver/src/lib.rs`, served at `/scaling/pressure`. `kafka_lag` is the consumer's position lag, records past its read position, because the committed-offset lag grows by up to a roll interval of intake as long as open files hold their commit. On `grpc` nothing sets it, so it stays at zero. `buffer_depth` is the hot-buffer count and `memory` the guard's pressure ratio. An open sink circuit zeroes the composite. scalo's memory gate (`scaling.memory_gate_threshold`) never fires here, because nothing gives the engine a memory reading.
