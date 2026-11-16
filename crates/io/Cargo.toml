@@ -26,15 +26,12 @@ dfe-archiver-core = { workspace = true }
 # kafka and grpc are the only transports `validate_config` accepts.
 scalo = { workspace = true, features = ["transport-kafka", "transport-grpc", "metrics", "governor"] }
 
-# Cloud storage
 object_store = { workspace = true }
 
-# Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
-# Utilities
 compact_str = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }

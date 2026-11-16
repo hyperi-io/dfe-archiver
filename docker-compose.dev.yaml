@@ -11,9 +11,6 @@
 #   docker compose -f docker-compose.dev.yaml down -v
 
 services:
-  # =========================================================================
-  # Redpanda (Kafka-compatible, lighter weight)
-  # =========================================================================
   redpanda:
     # Matches KAFKA_TAG in scripts/pgo-workload.sh, so Renovate tracks one line.
     # renovate: datasource=docker depName=redpandadata/redpanda
@@ -35,9 +32,9 @@ services:
       - --reserve-memory 0M
       - --default-log-level=warn
     ports:
-      - "19092:19092"  # Kafka external
-      - "18082:18082"  # Pandaproxy
-      - "18081:18081"  # Schema registry
+      - "19092:19092"
+      - "18082:18082"
+      - "18081:18081"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     healthcheck:
@@ -46,7 +43,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redpanda Console (Kafka UI)
   redpanda-console:
     # renovate: datasource=docker depName=redpandadata/console
     image: redpandadata/console:v3.14.0@sha256:5deb20e3ec84781d137231a23ebc3520e012e8e83d59bee25355f7fba1010a12
@@ -61,10 +57,7 @@ services:
       KAFKA_SCHEMAREGISTRY_ENABLED: "true"
       KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
 
-  # =========================================================================
-  # S3-compatible object storage (LocalStack), for the minio:// and s3://
-  # destinations. It accepts any credentials, minioadmin included.
-  # =========================================================================
+  # Serves the minio:// and s3:// destinations, and accepts any credentials, minioadmin included.
   s3:
     # Same pin as LOCALSTACK_TAG in scripts/pull-test-images.sh. Stay on
     # the semver line: the CalVer tags need a licence token to start.
@@ -86,10 +79,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # =========================================================================
-  # Local file storage (for file:// backend testing)
-  # =========================================================================
-  # No container needed: config.dev.yaml writes under ./data/archive on the host.
+  # file:// needs no container: config.dev.yaml writes under ./data/archive on the host.
 
 volumes:
   redpanda-data:
@@ -101,9 +91,6 @@ configs:
       awslocal s3 mb s3://archive
       awslocal s3 mb s3://archive-test
 
-# =========================================================================
-# Network
-# =========================================================================
 networks:
   default:
     name: archiver-network

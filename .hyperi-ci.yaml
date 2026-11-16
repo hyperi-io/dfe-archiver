@@ -9,7 +9,6 @@ classification: product
 
 language: rust
 
-# Quality checks
 quality:
   enabled: true
   # cargo-audit and osv-scanner do not read deny.toml, so its accepted advisories repeat here.
@@ -29,7 +28,6 @@ quality:
       - "default"
       - "jemalloc"
 
-# Testing
 test:
   enabled: true
   coverage: true
@@ -54,7 +52,6 @@ test:
       - "default"
       - "jemalloc"
 
-# Building
 build:
   enabled: true
   strategies:
@@ -70,11 +67,9 @@ build:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
-    # Feature sets to build (production builds use jemalloc)
     features:
       - "jemalloc"
 
-# Releasing
 release:
   enabled: true
   # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.

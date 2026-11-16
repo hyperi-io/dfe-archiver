@@ -12,9 +12,7 @@
 
 The archiver keeps a compressed copy of every record it receives, in files you can read with standard tools. This page is for the person running it. The design behind it is [internals.md](internals.md), and what can drop or repeat a record is [delivery.md](delivery.md).
 
-## What it writes
-
-One record per line, exactly as it arrived, then a newline. A payload holding a newline of its own spans two lines. The archiver parses a record only to route it and never changes it, and it keeps no Kafka key, offset or timestamp. Lines are compressed, `zstd` unless `compression.codec` says otherwise:
+It writes one record per line, exactly as it arrived, then a newline. A payload that holds a newline spans two lines. The archiver parses a record to route it and never changes it, and it keeps no Kafka key, offset or timestamp. Lines are compressed, `zstd` unless `compression.codec` says otherwise:
 
 | Codec | File ends in |
 |-------|--------------|
@@ -28,7 +26,7 @@ One record per line, exactly as it arrived, then a newline. A payload holding a 
 
 Each flush appends one complete frame, so a file is a standard concatenated stream. `zstd -dc`, `lz4 -dc` or `gzip -dc` reads it whole.
 
-A file closes when it reaches `archive.roll_size_bytes` compressed (1 GiB) or `archive.roll_interval_secs` old. Unset, the interval is 300 seconds while offsets are held and on `grpc`, otherwise 3600. Expect many small files on a quiet destination and few large ones on a busy one.
+A file closes when it reaches `archive.roll_size_bytes` compressed (1 GiB) or `archive.roll_interval_secs` old. Unset, the interval is 300 seconds when offsets are held and on `grpc`, otherwise 3600. Expect many small files on a quiet destination and few large ones on a busy one.
 
 ## Where it goes
 
@@ -44,9 +42,7 @@ The routed part is the Kafka topic then the routing fields (`events/acme`). By d
 
 An object-store file is staged under `buffer.spool_dir/uploads` and uploaded whole once it closes. Nothing is visible in the bucket until then.
 
-In a DFE deployment, dfe-infra's values set `DFE_ARCHIVER_DESTINATION` only from `archive.localPath`, as a `file://` path, and mount an `emptyDir` there, so files on that path last only as long as the pod. With no local path the variable is empty, the archiver reads it as unset, and the `archive.destination` in its config file stands. An object store also takes `s3.endpoint` and `s3.bucket` from the values. Store credentials come from the optional `dfe-archiver-s3` Secret, or from the store SDK's own credential chain where the Secret does not exist.
-
-## How long it stays
+In a DFE deployment, dfe-infra's values set `DFE_ARCHIVER_DESTINATION` from `archive.localPath` alone, as a `file://` path, and mount an `emptyDir` there, so files on that path last as long as the pod and no longer. With no local path the variable is empty, the archiver reads it as unset, and the `archive.destination` in its config file stands. The values set an object store's `s3.endpoint` and `s3.bucket`. Store credentials come from the optional `dfe-archiver-s3` Secret, or from the store SDK's credential chain where the Secret does not exist.
 
 The archiver never deletes an archived file, so retention belongs to the store. Set a lifecycle rule on the bucket or container, or clean the directory yourself on a `file://` path. Add a rule for incomplete multipart uploads as well. A failed attempt aborts its upload, and an abort that itself fails leaves parts behind until that rule removes them.
 
@@ -55,8 +51,8 @@ The archiver never deletes an archived file, so retention belongs to the store. 
 There is no restore command. A file is the records, so you decompress it and put the records back where they came from.
 
 1. List the keys for the destination and window you need, for example `aws s3 ls --recursive s3://acme-archive/archives/events/acme/2026/10/29/`.
-2. Fetch the files and decompress them: `zstd -dc 03-0001-3f9a.jsonl.zst > records.jsonl`.
-3. On `kafka` the first part of the key is the topic. Produce the lines back to it, for example `kcat -P -b kafka:9092 -t events -l records.jsonl`. They then take the normal path, and a payload that held a newline goes back as two messages. On `grpc` the key holds no topic, so send the records to the receiver as new data.
+2. Fetch the files and decompress them: `zstd -dc 03-0001-9c41d2e07b3a5f68.jsonl.zst > records.jsonl`.
+3. On `kafka` the first part of the key is the topic. Produce the lines back to it, for example `kcat -P -b kafka:9092 -t events -l records.jsonl`. They then take the normal path, and a payload that held a newline goes back as two messages. On `grpc` the key holds no topic, so send the records through the receiver again.
 
 Check two things first:
 

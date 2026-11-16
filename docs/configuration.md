@@ -10,31 +10,31 @@
 
 # Configuration reference
 
-The archiver reads two sets of settings from two cascades: its own sections from its config file and the flat `DFE_ARCHIVER_*` variables, and scalo's runtime sections from scalo's cascade. Every key of the archiver's own sections, with its type and default, is in [config-schema.yaml](config-schema.yaml), generated from `Config`.
+The archiver reads two sets of settings from two cascades: the archiver's sections from its config file and the flat `DFE_ARCHIVER_*` variables, and scalo's runtime sections from scalo's cascade. Every key of the archiver's sections, with its type and default, is in [config-schema.yaml](config-schema.yaml), generated from `Config`.
 
-## The archiver's own sections
+## The archiver's sections
 
 `transport`, `kafka`, `grpc`, `archive`, `buffer`, `routing`, `compression` and `dlq` resolve in this order, highest first:
 
 1. The flat `DFE_ARCHIVER_*` variables below. An empty value reads as unset.
-2. `.env` in the working directory, loaded into the environment without replacing a variable already set.
+2. `.env` in the working directory, loaded into the environment without replacing a variable set before it.
 3. The config file: `--config`, else `DFE_ARCHIVER_CONFIG`, else the first of `config.yaml`, `config/settings.yaml` and `/etc/dfe-archiver/config.yaml` that exists.
 4. The defaults.
 
-These sections take the flat names only. `DFE_ARCHIVER_KAFKA__BROKERS` reaches nothing, and neither does an unprefixed `KAFKA_BROKERS` or `ARCHIVER_DESTINATION`, with no warning. The file is read as written, so `${VAR}` in it stays a literal string.
+These sections take the flat names and no others. `DFE_ARCHIVER_KAFKA__BROKERS` reaches nothing, and neither does an unprefixed `KAFKA_BROKERS` or `ARCHIVER_DESTINATION`, with no warning. The file is read as written, so `${VAR}` in it stays a literal string.
 
 The running pipeline reads its config once, at startup. The reloader watches the config file and SIGHUP, and a change to any section but `kafka.batch_size` logs that it needs a restart. An idle archiver is the exception: the change that gives it a destination starts the pipeline ([internals.md](internals.md#idle-until-configured)).
 
 ## scalo's sections
 
-`version_check`, `metrics`, `logger`, `self_regulation`, `scaling` and `memory` belong to scalo's runtime, which reads them from its own cascade, highest first:
+`version_check`, `metrics`, `logger`, `self_regulation`, `scaling` and `memory` belong to scalo's runtime, which reads them from scalo's cascade, highest first:
 
 1. The CLI flags.
-2. `DFE_ARCHIVER_<SECTION>__<KEY>`, so `DFE_ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`. The memory guard also takes the flat `DFE_ARCHIVER_MEMORY_*` names below.
+2. `DFE_ARCHIVER_<SECTION>__<KEY>`, so `DFE_ARCHIVER_SCALING__ENABLED` sets `scaling.enabled`. The flat `DFE_ARCHIVER_MEMORY_*` names below set the memory guard.
 3. `settings.<env>.yaml`, then `settings.yaml` with the `--config` file over it, then `defaults.yaml`, each looked for in the working directory, `config/` and `/config/`. `<env>` is `APP_ENV`, `ENVIRONMENT` or `ENV`, and `development` when none is set.
 4. The defaults.
 
-The archiver resolves its config file (`--config`, else `DFE_ARCHIVER_CONFIG`, else a default path) before scalo sets this cascade up, so the one file feeds both the archiver's sections and scalo's, however it was named.
+The archiver resolves its config file (`--config`, else `DFE_ARCHIVER_CONFIG`, else a default path) before scalo sets this cascade up, so the one file feeds both the archiver's sections and scalo's, however it was given.
 
 ## Environment variables
 
@@ -65,13 +65,13 @@ The archiver resolves its config file (`--config`, else `DFE_ARCHIVER_CONFIG`, e
 | `DFE_ARCHIVER_MULTIPART_CHUNK_SIZE` | `archive.multipart_chunk_size` | `8388608` |
 | `DFE_ARCHIVER_SPOOL_DIR` | `buffer.spool_dir` | `/var/spool/dfe/archiver` |
 | `DFE_ARCHIVER_S3_BUCKET` | `archive.s3.bucket` | the destination URL's |
-| `DFE_ARCHIVER_S3_REGION` | `archive.s3.region` | the AWS SDK's own |
+| `DFE_ARCHIVER_S3_REGION` | `archive.s3.region` | the AWS SDK's |
 | `DFE_ARCHIVER_S3_ACCESS_KEY_ID` | `archive.s3.access_key_id` | the AWS credential chain |
 | `DFE_ARCHIVER_S3_SECRET_ACCESS_KEY` | `archive.s3.secret_access_key` | the AWS credential chain |
 | `DFE_ARCHIVER_S3_ENDPOINT` | `archive.s3.endpoint` | AWS |
 | `DFE_ARCHIVER_S3_ALLOW_HTTP` | `archive.s3.allow_http` (`true`, `1` or `yes`) | `false` |
 
-The store SDKs read their own variables too, `AWS_*`, `GOOGLE_*` and `AZURE_*` ([internals.md](internals.md#storage-backends)).
+The store SDKs read the `AWS_*`, `GOOGLE_*` and `AZURE_*` variables ([internals.md](internals.md#storage-backends)).
 
 ## scalo runtime variables
 

@@ -19,7 +19,7 @@ Which of dfe-archiver's tests run where, what they need, and the containers they
 | core | locally, on every pull request, and on every push that touches more than `docs/**` and Markdown | `cargo nextest run` |
 | full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `cargo nextest run --run-ignored all` |
 
-Only nextest runs the suite (`test.rust.nextest: true`). The metric tests read a process-global recorder, so under `cargo test`, where every test in a binary shares one process, they fail.
+nextest is the one runner for the suite (`test.rust.nextest: true`). The metric tests read a process-global recorder, so under `cargo test`, where every test in a binary shares one process, they fail.
 
 Core is everything not `#[ignore]`d: the unit tests under `crates/`, and in `crates/archiver/tests/` the smoke tests (`smoke.rs`), the integration tests (`integration/`) and the e2e tests (`e2e/`) against containers each test starts. That covers at-least-once delivery against Kafka and an S3 store, the disk-full writes (capped with `prlimit`, from util-linux), Azure on Azurite, S3 on LocalStack, the GCS reads on fake-gcs-server, and the Kafka consumer over TLS. Docker is required: a missing daemon fails the run in CI and skips with the reason locally.
 
@@ -31,7 +31,7 @@ Full adds the ignored tests, and in CI it skips them all again (`test.full.rust.
 
 Run them by hand with those in place. A Kafka test with no broker it can reach skips and says so.
 
-There is no shared service container. Each e2e test starts the containers it needs, named `dfe-archiver-test-integration-<test>-<service>`, labelled `io.hyperi.test.suite=dfe-archiver-integration` with the owning process, and removed when the test drops them. A dead leftover from a killed run is removed by the next test that needs the name (`reap_stale`), and a running one is left alone.
+There is no shared service container. Each e2e test starts the containers it needs, called `dfe-archiver-test-integration-<test>-<service>`, labelled `io.hyperi.test.suite=dfe-archiver-integration` with the owning process, and removed when the test drops them. A dead leftover from a killed run is removed by the next test that needs the name (`reap_stale`), and a running one is left alone.
 
 | Service | Image |
 |---|---|
@@ -43,4 +43,4 @@ There is no shared service container. Each e2e test starts the containers it nee
 
 The tags, and the digests for Kafka and OpenSSL, live in `scripts/pull-test-images.sh`. nextest runs it as a setup script before the e2e binary, so no test spends its timeout on a pull, and in CI a fixture fails when its image was not pulled first.
 
-The pull script and the harness's own `docker` calls use the docker CLI, which follows `DOCKER_HOST` or the current docker context. testcontainers starts the containers on `DOCKER_HOST`, or on the local socket when it is unset, and never reads the docker context. So to run the suite against another daemon, set `DOCKER_HOST`.
+The pull script and the harness's `docker` calls use the docker CLI, which follows `DOCKER_HOST` or the current docker context. testcontainers starts the containers on `DOCKER_HOST`, or on the local socket when it is unset, and never reads the docker context. So to run the suite against another daemon, set `DOCKER_HOST`.

@@ -4,31 +4,15 @@
 # License:      BUSL-1.1
 # Copyright:    (c) 2026 HYPERI PTY LIMITED
 #
-# Based on: ci/templates/config/typos.toml
 # Reference: https://github.com/crate-ci/typos
 #
-# Spelling policy (from ai/standards):
-#   Code:          American English (serialize, color, initialize)
-#   Docs/comments: Australian English (serialise, colour, initialise)
-#
-# typos cannot distinguish code from docs, so we use en-au locale
-# and allowlist the American spellings that appear in code.
+# Prose is Australian English and code American, so the American spellings code uses are allowlisted.
 
 [default]
-# Use Australian English — flags American spellings in prose
 locale = "en-au"
 
 [default.extend-words]
-# ---------------------------------------------------------------------------
-# American spellings allowed in code (programming convention)
-# ---------------------------------------------------------------------------
-# typos uses case-insensitive matching for extend-words, so "serialize"
-# covers Serialize, SERIALIZE, serialize, etc.
-#
-# Format: american_spelling = "american_spelling"  (identity = don't flag)
-# ---------------------------------------------------------------------------
-
-# -ize/-ise variants (most common in code)
+# Matching is case-insensitive, so each lowercase entry covers every casing.
 serialize = "serialize"
 serializes = "serializes"
 serialized = "serialized"
@@ -209,7 +193,6 @@ monetized = "monetized"
 monetizing = "monetizing"
 monetization = "monetization"
 
-# -our/-or variants
 color = "color"
 colors = "colors"
 colored = "colored"
@@ -225,7 +208,6 @@ neighbor = "neighbor"
 neighbors = "neighbors"
 neighboring = "neighboring"
 
-# -ence/-ense variants
 defense = "defense"
 defensive = "defensive"
 offense = "offense"
@@ -235,20 +217,17 @@ licensed = "licensed"
 licenses = "licenses"
 licensing = "licensing"
 
-# -re/-er variants (less common in code but appear in libs)
 center = "center"
 centered = "centered"
 centering = "centering"
 fiber = "fiber"
 meter = "meter"
 
-# -log/-logue variants
 catalog = "catalog"
 catalogs = "catalogs"
 dialog = "dialog"
 dialogs = "dialogs"
 
-# Other American spellings common in code
 canceled = "canceled"
 canceling = "canceling"
 labeled = "labeled"
@@ -263,23 +242,17 @@ gray = "gray"
 artifact = "artifact"
 artifacts = "artifacts"
 
-# ---------------------------------------------------------------------------
-# Project-specific: Australian/British spellings in legal templates
-# ---------------------------------------------------------------------------
-# The BUSL-1.1 LICENSE file uses British "licence" (noun form).
-# Allow both licence and license since both appear in the project.
+# Both licence and license appear in the project.
 licence = "licence"
 
 # Crate name flate2 contains "flate" which is not a typo
 flate = "flate"
 
 [default.extend-identifiers]
-# Rust crate names and identifiers
 flate2 = "flate2"
 lz4_flex = "lz4_flex"
 
 [files]
-# Files/directories to ignore
 extend-exclude = [
     # Lock files contain hashes
     "*.lock",
@@ -288,7 +261,6 @@ extend-exclude = [
     "package-lock.json",
     "pnpm-lock.yaml",
 
-    # Binary/minified assets
     "*.min.js",
     "*.min.css",
     "*.svg",
@@ -297,7 +269,6 @@ extend-exclude = [
     "*.ttf",
     "*.eot",
 
-    # Build/cache directories
     ".git/",
     ".venv/",
     "node_modules/",
@@ -312,7 +283,6 @@ extend-exclude = [
     "CHANGELOG.md",
     "**/CHANGELOG.md",
 
-    # Git submodules (contain their own changelogs/commit hashes)
     "ci/",
     "ai/",
 ]

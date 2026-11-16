@@ -32,7 +32,7 @@ The metrics listener, `0.0.0.0:9090` by default, serves `/metrics`, `/livez`, `/
 | `archive_errors_total` | Failed write, close and upload attempts, each counted |
 | `kafka_commit_errors_total` | Offset releases the transport failed |
 | `routing_errors_total` | Records routing could not read, archived under their topic |
-| `routing_fallback_total{field}` | Expression-routing fields a record did not carry, by field path |
+| `routing_fallback_total{field}` | Expression-routing fields missing from a record, by field path |
 | `staged_files_recovered_total` | Complete staged files a previous process left, uploaded by this one |
 | `staged_files_quarantined_total{reason}` | Staged files moved to quarantine: `unreadable`, `incomplete`, `corrupt` or `no_store` |
 | `staged_files_removed_total{reason}` | Staged files removed at startup: `replayed` or `quarantine_full` |
