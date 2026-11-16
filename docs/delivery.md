@@ -14,19 +14,35 @@ On `kafka` with `kafka.acknowledgements.enabled` (the default) no record is lost
 
 ## A record is released when its file is durable
 
+This diagram shows when a record's offset is released.
+
 ```mermaid
-flowchart TB
-    A["Receive a batch<br/>the consumer records every offset it hands out"]
-    B["Buffer per destination"]
-    C["Write each flushed batch into the destination's open file<br/>retry a write that can clear, and hold its offsets on that file"]
-    D["The file closes on a roll, an age close, an eviction or shutdown"]
-    E["Local file synced"]
-    F["Upload task<br/>retries until the store takes the file"]
-    G["Release the file's offsets<br/>the consumer commits each partition up to its lowest offset not yet released"]
-    A --> B --> C --> D
-    D -->|local path| E --> G
-    D -->|object store| F --> G
+flowchart LR
+    accTitle: L4 Detail -- Release on a complete file
+    accDescr: A batch is received, buffered and written into its destination's open file. When the file closes, a local file is synced or a staged file is uploaded, and only then are the file's offsets released.
+
+    receive["Receive"]
+    buffer["Buffer"]
+    write["Write"]
+    sync["Sync local file"]
+    upload["Upload staged file"]
+    release["Release offsets"]
+
+    receive --> buffer
+    buffer --> write
+    write --> sync
+    write --> upload
+    sync -->|synced| release
+    upload -->|stored| release
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef core fill:#DCEBF7,stroke:#0072B2,stroke-width:2px,color:#0B2A3F
+    class release core
 ```
+
+*Figure 1. L4 Detail -- Release on a complete file. The blue box is the release.* Up: [L3 Components -- dfe-archiver](internals.md#the-pipeline).
+
+The consumer records every offset it hands out, and the writer holds each record's offset on the file the record went into. The file closes on a roll, an age close, an eviction or shutdown.
 
 Default routing on `_org_id` sends one partition's records to several files that complete at different times, so a partition commits only up to its lowest offset not yet released. `kafka.acknowledgements.enabled: false` commits each batch at receipt instead, and a kill then loses what the buffers and open files held.
 

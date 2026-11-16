@@ -55,7 +55,7 @@ The archiver never deletes an archived file, so retention belongs to the store. 
 There is no restore command. A file is the records, so you decompress it and put the records back where they came from.
 
 1. List the keys for the destination and window you need, for example `aws s3 ls --recursive s3://acme-archive/archives/events/acme/2026/10/29/`.
-2. Fetch the files and decompress them: `zstd -dc 03-0001-3f9a.jsonl.zst > records.jsonl`.
+2. Fetch the files and decompress them: `zstd -dc 03-0001-9c41d2e07b3a5f68.jsonl.zst > records.jsonl`.
 3. On `kafka` the first part of the key is the topic. Produce the lines back to it, for example `kcat -P -b kafka:9092 -t events -l records.jsonl`. They then take the normal path, and a payload that held a newline goes back as two messages. On `grpc` the key holds no topic, so send the records to the receiver as new data.
 
 Check two things first:

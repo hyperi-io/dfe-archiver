@@ -14,12 +14,28 @@ Where things live and which way the dependencies point. The design itself -- the
 
 ## Codemap
 
+This diagram shows which way the crate dependencies point.
+
 ```mermaid
-graph LR
-    archiver["crates/archiver<br/>binary + pipeline"] --> io["crates/io<br/>transports + object stores"]
-    archiver --> core["crates/core<br/>archive logic"]
-    io --> core
+flowchart LR
+    accTitle: L4 Detail -- Crate dependencies
+    accDescr: The archiver crate depends on both library crates, io and core. The io crate depends on core alone.
+
+    archiver["archiver"]
+
+    subgraph libs["Libraries"]
+        direction LR
+        io["io"] --> core["core"]
+    end
+
+    archiver --> libs
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class libs group
 ```
+
+*Figure 1. L4 Detail -- Crate dependencies. An arrow points at what a crate depends on, so archiver depends on io and core alike.* Up: [dfe-archiver documentation](README.md).
 
 | Crate | Package | What it holds |
 |---|---|---|

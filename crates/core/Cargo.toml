@@ -27,21 +27,17 @@ scalo = { workspace = true, features = ["transport-kafka", "scaling", "dlq", "dl
 
 schemars = { workspace = true }
 
-# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 
-# Error handling
 thiserror = { workspace = true }
 
-# Compression
 zstd = { workspace = true }
 lz4_flex = { workspace = true }
 snap = { workspace = true }
 flate2 = { workspace = true }
 
-# Utilities
 bytes = { workspace = true }
 chrono = { workspace = true }
 compact_str = { workspace = true }
@@ -50,11 +46,9 @@ parking_lot = { workspace = true }
 smallvec = { workspace = true }
 indexmap = { workspace = true }
 
-# Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
-# Tracing
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -35,7 +35,7 @@ Without a writable spool directory the archiver refuses to start, and the defaul
 
 ## Configuration
 
-Settings load through a cascade: `DFE_ARCHIVER_*` environment variables, then `.env`, then the config file, then defaults. The only command-line setting is `--config`, which names the file. The pipeline reads its config at startup, so a change to any section below but `kafka.batch_size` takes a restart, and a reload logs the sections that need one. The archiver's own keys take a single underscore (`DFE_ARCHIVER_KAFKA_BROKERS`), and the scalo runtime sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) take two (`DFE_ARCHIVER_VERSION_CHECK__ENABLED`).
+Settings load through a cascade: `DFE_ARCHIVER_*` environment variables, then `.env`, then the config file, then defaults. `--config` names the file, and the other flags set logging and the metrics address ([docs/configuration.md](docs/configuration.md#scalo-runtime-variables)). The pipeline reads its config at startup, so a change to any section below but `kafka.batch_size` takes a restart, and a reload logs the sections that need one. The archiver's own keys take a single underscore (`DFE_ARCHIVER_KAFKA_BROKERS`), and the scalo runtime sections (`version_check`, `metrics`, `logger`, `self_regulation`, `scaling`) take two (`DFE_ARCHIVER_VERSION_CHECK__ENABLED`).
 
 | Key | What it sets | Default |
 |-----|--------------|---------|

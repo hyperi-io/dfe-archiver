@@ -31,19 +31,47 @@ That is the committed profile. hyperi-ci switches LTO to `fat` on the beta and r
 
 `.github/workflows/ci.yml` calls hyperi-ci's reusable `rust-ci.yml` workflow, configured by `.hyperi-ci.yaml`.
 
+This diagram shows the jobs one CI run takes.
+
 ```mermaid
 flowchart LR
-    E["push, pull request, schedule or dispatch"] --> P["Plan<br/>predicts the version and which jobs run"]
-    E --> CM["Commit messages"]
-    P --> Q["Quality<br/>fmt, clippy, audit, deny"]
-    P --> T["Test<br/>with coverage"]
-    Q --> B["Build<br/>x86_64 and aarch64, each on its own arch<br/>PGO then BOLT on a full release"]
-    T --> B
-    B -->|"a release"| RT["Release tail<br/>tag, GitHub release, ghcr image,<br/>binaries to R2, Helm chart"]
-    Q --> G["Gate"]
-    T --> G
-    B --> G
+    accTitle: L4 Detail -- CI pipeline
+    accDescr: Every trigger starts the plan, and a push to main or a pull request starts the commit message check. The plan starts quality and test, both feed the build, and the build feeds the release tail on a release and the gate on every run.
+
+    trigger(["Push, PR,<br/>schedule or dispatch"])
+    plan["Plan"]
+    commits["Commit messages"]
+
+    subgraph checks["Checks"]
+        quality["Quality"]
+        test["Test"]
+    end
+
+    build["Build"]
+    tail["Release tail"]
+    gate["Gate"]
+
+    trigger -->|every run| plan
+    trigger -->|main or PR| commits
+    plan --> checks
+    checks --> build
+    build -->|release| tail
+    build -->|always| gate
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class checks group
 ```
+
+*Figure 1. L4 Detail -- CI pipeline. The gate checks plan, quality, test and build, and the commit check and release tail report on their own.* Up: [dfe-archiver documentation](README.md).
+
+| Job | What it does |
+|---|---|
+| Plan | Predicts the version and which jobs run |
+| Quality | fmt, clippy, audit and deny |
+| Test | The test tier, with coverage |
+| Build | x86_64 and aarch64, each on a runner of its own arch, with PGO then BOLT on a full release |
+| Release tail | The tag, the GitHub release, the ghcr image, the binaries to R2 and the Helm chart |
 
 A schedule run tests and publishes nothing. A release needs a `Release: true` trailer on the commit pushed to `main`, or a dispatch, as [CONTRIBUTING.md](../CONTRIBUTING.md#cicd-workflow) says. No crate is published, because all three set `publish = false`.
 

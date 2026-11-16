@@ -42,7 +42,6 @@ must_use_candidate = "allow"
 cast_precision_loss = "allow"
 
 [workspace.dependencies]
-# Internal crates
 dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
@@ -52,26 +51,21 @@ scalo = { version = "2.14.30" }
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
-# Async runtime
 tokio = { version = ">=1.54.1, <2", features = ["full", "parking_lot"] }
 tokio-util = { version = ">=0.7.20, <0.8", features = ["time"] }
 
-# Serialization
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
 serde_json = ">=1.0.154, <2"
 sonic-rs = ">=0.5.10, <0.6"
 
-# Error handling
 thiserror = ">=2.0.21, <3"
 anyhow = ">=1.0.104"
 
-# Compression
 zstd = ">=0.14.3, <0.15"
 lz4_flex = ">=0.14.0, <0.15"
 snap = ">=1.1.2, <2"
 flate2 = ">=1.1.10, <2"
 
-# Cloud storage backends
 object_store = { version = ">=0.14.2, <0.15", features = ["aws", "gcp", "azure"] }
 # The e2e MinIO fixture's client only. Default features off drops the legacy
 # `rustls` feature and its unmaintained rustls-webpki, so the rest are re-listed.
@@ -82,7 +76,6 @@ aws-sdk-s3 = { version = ">=1.157.0, <2", default-features = false, features = [
     "sigv4a",
 ] }
 
-# Utilities
 bytes = ">=1.12.1, <2"
 chrono = { version = ">=0.4.45, <0.5", features = ["serde"] }
 uuid = { version = ">=1.29.0, <2", features = ["v4", "serde"] }
@@ -98,25 +91,20 @@ lru = ">=0.19.0, <0.20"
 metrics = ">=0.24.4, <0.25"
 percent-encoding = ">=2.3.2, <3"
 
-# CLI
 clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
 
-# Tracing
 tracing = ">=0.1.44, <0.2"
 tracing-subscriber = { version = ">=0.3.23, <0.4", features = ["env-filter"] }
 
-# Async utilities
 async-trait = ">=0.1.92, <0.2"
 futures = ">=0.3.34, <0.4"
 
-# Config
 dotenvy = ">=0.15.7, <0.16"
 
 # The -ctl half gives scalo's memory guard its live heap bytes.
 tikv-jemallocator = ">=0.7.0, <0.8"
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", features = ["stats"] }
 
-# Dev dependencies
 tempfile = ">=3.27, <4"
 # Scoped env-var set/restore without the workspace-forbidden `unsafe`.
 temp-env = ">=0.3.6, <0.4"

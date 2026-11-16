@@ -10,29 +10,55 @@
 
 # How the archiver works
 
-A record arrives on Kafka or the scalo Push listener, is routed to a destination, buffered in memory, compressed into that destination's open file, and released once the file is durable. When a record is released and what can drop one is [delivery.md](delivery.md). Every key and variable is in [configuration.md](configuration.md), every metric in [metrics.md](metrics.md), and the crates behind it in [architecture.md](architecture.md).
+A record arrives on Kafka or the scalo Push listener, is routed to a destination, buffered in memory, compressed into that destination's open file, and released once the file is durable. Delivery is in [delivery.md](delivery.md), every key in [configuration.md](configuration.md), every metric in [metrics.md](metrics.md) and the crates in [architecture.md](architecture.md).
 
 ## The pipeline
 
+This diagram shows the five steps inside the archiver and what it talks to.
+
 ```mermaid
 flowchart TB
-    K["Kafka consumer group (scalo)<br/>batches of kafka.batch_size, 10K by default<br/>tracks every offset it hands out"]
-    P["scalo Push listener (grpc)<br/>batches of kafka.batch_size<br/>each push answered once queued"]
-    R["Router<br/>topic, then JSON fields<br/>depth check before every parse, past 64 levels to the DLQ<br/>every path segment encoded"]
-    H["Hot buffers, one per destination, in memory<br/>at most 64 at once, the least recently used flushed for another<br/>each flushes at flush_bytes, flush_records or flush_age_secs<br/>together at most a quarter of the memory limit, largest first"]
-    W["Archive writers, one per destination<br/>up to archive.max_writers, the least recently used closed past it<br/>each flush appends one compressed frame<br/>a failed append is cut back and retried, its batch and offsets held<br/>a file rolls at roll_size_bytes compressed, or at the roll interval"]
-    L["Local path<br/>the file and its directories synced to disk"]
-    S["Object store<br/>staged under buffer.spool_dir/uploads, uploaded whole in the background<br/>writer_parallelism uploads at once, retried until the store takes it"]
-    C["Release<br/>kafka: each partition commits up to its lowest offset not yet released<br/>grpc: nothing to release, the push was answered at enqueue"]
-    K --> R
-    P --> R
-    R --> H
-    H -->|flush| W
-    W -->|file closes| L
-    W -->|file closes| S
-    L -->|synced| C
-    S -->|store confirms| C
+    accTitle: L3 Components -- dfe-archiver
+    accDescr: Records arrive from Kafka topics or are pushed by the previous stage. Inside, they are received, routed, buffered, written to files and released. Files land in a local path or a bucket, and records refused for good go to the DLQ topic when the DLQ is on.
+
+    topics[("Kafka topics")]
+    stage["Previous stage"]
+
+    subgraph archiver["dfe-archiver"]
+        direction LR
+        receive["Receive"] --> route["Route"] --> buffer["Buffer"] --> write["Write"] --> release[["Complete<br/>and release"]]
+    end
+
+    store[("Local path<br/>or bucket")]
+    dlq[("DLQ topic")]
+
+    topics -->|records| archiver
+    stage -->|pushes| archiver
+    archiver -->|files| store
+    archiver -.->|refused| dlq
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef store fill:#DDF3EC,stroke:#00785A,stroke-width:1px,color:#0B3327
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef error fill:#FBE3D6,stroke:#C2410C,stroke-width:1px,color:#4A1A05
+    classDef ext fill:#EEF0F2,stroke:#6B7280,stroke-width:1px,stroke-dasharray:4 3,color:#1F2937
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class topics async
+    class stage ext
+    class store store
+    class dlq error
+    class archiver group
 ```
+
+*Figure 1. L3 Components -- dfe-archiver. The dashed box is external and the dotted arrow carries refused records when the DLQ is on.* Up: top of dfe-archiver. Down: [L4 Detail -- Release on a complete file](delivery.md#a-record-is-released-when-its-file-is-durable).
+
+| Step | Code | What it does |
+|---|---|---|
+| Receive | `crates/io/src/transport.rs` | Takes up to `kafka.batch_size` records a call, 10,000 by default |
+| Route | `crates/core/src/routing/` | Picks each record's destination ([Routing](#routing)) |
+| Buffer | `crates/core/src/buffer/` | Holds records in memory per destination ([Buffers and writers](#buffers-and-writers)) |
+| Write | `crates/core/src/archive/`, `crates/core/src/compression/` | Compresses each flush into the open file, and rolls it |
+| Complete and release | `crates/archiver/src/archiver.rs`, `crates/io/src/storage.rs` | Syncs a local file or uploads a staged one, then releases its records ([delivery.md](delivery.md)) |
 
 ## Two transports, one pipeline
 
@@ -47,11 +73,11 @@ On `kafka` an empty `kafka.topics` turns on discovery, re-read every `kafka.topi
 
 `grpc` lets a deployment with no broker still archive. The previous stage pushes each record to the listener on `grpc.listen`, by default `0.0.0.0:6000`, the contract's push port. The listener answers a push once its records are queued, because a record is released only when its file completes, long after any sender's deadline. So the archive copy on `grpc` is at-most-once, and `pipeline_delivery_guarantee` reports `best_effort` with reason `sink_cannot_confirm`, or `acks_disabled` under `grpc.acknowledgements.enabled: false`. There is no broker to dead-letter to, so the DLQ is off.
 
-A DFE deployment feeds the archiver from a broker or from the previous stage, so the binary compiles in scalo's `transport-kafka` and `transport-grpc` and no other transport, and `validate_config` refuses any other `transport` at startup.
+The binary compiles in scalo's `transport-kafka` and `transport-grpc` alone, and `validate_config` refuses any other `transport`.
 
 ### Idle until configured
 
-An archiver with no `archive.destination` starts anyway. It stays Ready, serves `/livez`, `/readyz` and `/metrics`, opens no broker connection, binds no listener, logs the reason once and holds `pipeline_idle` at 1. A change to the `--config` file, or a SIGHUP, reloads the config, and one that names a destination starts the pipeline with no restart. The gate is scalo's (`scalo::lifecycle`), and the predicate is `Config::idle_reason`.
+An archiver with no `archive.destination` starts anyway. It stays Ready, serves `/livez`, `/readyz` and `/metrics`, opens no broker connection, binds no listener, logs the reason once, reports the `work_config` health component `Degraded` and holds `pipeline_idle` at 1. A change to the `--config` file, or a SIGHUP, reloads the config, and one that names a destination starts the pipeline with no restart. The gate is scalo's (`scalo::lifecycle`), and the predicate is `Config::idle_reason`.
 
 Structural faults still refuse at startup: an unknown transport, `grpc` with no listen address, `kafka` with no brokers, and a codec or routing mode that does not exist.
 
@@ -127,7 +153,7 @@ Expression routing checks a record's nesting before it parses it, because `sonic
 
 ## Compression
 
-Each flush appends one complete frame, framed stream or gzip member, so a file of many flushes is one concatenated stream the codec's own tools read whole. Dead-lettering a refused file reads it back the same way, a flush at a time.
+Each flush appends one complete frame, framed stream or gzip member, so a file of many flushes is one concatenated stream the codec's own tools read whole.
 
 | `compression.codec` | Extension | Format |
 |---|---|---|
@@ -154,10 +180,12 @@ A store's block (`archive.s3`, `archive.minio`, `archive.gcs`, `archive.azure`) 
 | GCS | `archive.gcs.service_account_key` (the key's JSON) or `archive.gcs.credentials_path`, never both, because the client refuses the pair. Then `GOOGLE_APPLICATION_CREDENTIALS`, gcloud's application-default credentials file, and GCE instance metadata |
 | Azure | a bearer token (`AZURE_STORAGE_TOKEN`), then `archive.azure.account_key` or `AZURE_STORAGE_ACCOUNT_KEY`, workload identity, a client secret, `archive.azure.sas_token`, and managed identity. `archive.azure.account_name` names the account and, when set, replaces the account name in the environment |
 
-An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client refuses every request. `DFE_ARCHIVER_S3_ACCESS_KEY_ID` and `DFE_ARCHIVER_S3_SECRET_ACCESS_KEY` set the S3 keys from a Secret. The config file is read as written, so `${VAR}` in it is a literal string, never an expansion.
+CI tests GCS listing and deletion on an emulator but no upload, which needs a live bucket ([testing.md](testing.md)).
+
+An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client refuses every request. Keys from a Secret go in as environment variables ([configuration.md](configuration.md#environment-variables)).
 
 ## Scaling
 
-The deployment contract's ScaledObject scales on CPU alone and declares no raw Kafka lag trigger. dfe-infra sets the CPU target to 70% in every profile. The single, scale and mesh profiles add the `scaling_pressure` trigger, read through dfe-keda-shim with a target of 70, and slim runs on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.
+The deployment contract's ScaledObject scales on CPU alone and declares no raw Kafka lag trigger. dfe-infra adds the `scaling_pressure` trigger in the profiles that want it, and the engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) lists every app's triggers.
 
 `scaling_pressure` is scalo's weighted composite of the three terms `scaling_components()` registers in `crates/archiver/src/lib.rs`, served at `/scaling/pressure`. `kafka_lag` is the consumer's position lag, records past its read position, because the committed-offset lag grows by up to a roll interval of intake while open files hold their commit. On `grpc` nothing sets it, so it stays at zero. `buffer_depth` is the hot-buffer count and `memory` the guard's pressure ratio. An open sink circuit zeroes the composite. scalo's memory gate (`scaling.memory_gate_threshold`) never fires here, because nothing gives the engine a memory reading.
