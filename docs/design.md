@@ -34,7 +34,7 @@ This diagram shows the jobs one CI run takes.
 ```mermaid
 flowchart LR
     accTitle: L4 Detail -- CI pipeline
-    accDescr: Every trigger starts the plan, and a push to main or a pull request starts the commit message check. The plan starts quality and test, both feed the build, and the build feeds the release tail on a release and the gate on every run.
+    accDescr: Every trigger starts the plan, and a push to main, a pull request or the merge queue starts the commit message check. The plan starts quality and test, both feed the build, and the build feeds the release tail on a release and the gate on every run.
 
     trigger(["Push, PR,<br/>schedule or dispatch"])
     plan["Plan"]
@@ -50,7 +50,7 @@ flowchart LR
     gate["Gate"]
 
     trigger -->|every run| plan
-    trigger -->|main or PR| commits
+    trigger -->|landing| commits
     plan --> checks
     checks --> build
     build -->|release| tail
@@ -62,6 +62,8 @@ flowchart LR
 ```
 
 *Figure 1. L4 Detail -- CI pipeline. The gate checks plan, quality, test and build, and the commit check and release tail report separately.* Up: [dfe-archiver documentation](README.md).
+
+The commit check runs on landing: a push to main, a pull request or a merge queue group.
 
 | Job | What it does |
 |---|---|

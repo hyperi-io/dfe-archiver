@@ -42,7 +42,7 @@ flowchart LR
 
 *Figure 1. L4 Detail -- Release on a complete file. The blue box is the release.* Up: [L3 Components -- dfe-archiver](internals.md#the-pipeline).
 
-The consumer records every offset it hands out, and the writer holds each record's offset on the file the record went into. The file closes on a roll, an age close, an eviction or shutdown.
+The consumer records every offset it hands out, and the writer holds each record's offset on the file the record went into. The sync or upload starts when the file closes, on a roll, an age close, an eviction or shutdown.
 
 Default routing on `_org_id` sends one partition's records to several files that complete at different times, so a partition commits up to its lowest offset not yet released. `kafka.acknowledgements.enabled: false` commits each batch at receipt instead, and a kill then loses what the buffers and open files held.
 
