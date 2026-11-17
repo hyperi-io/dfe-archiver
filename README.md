@@ -87,7 +87,7 @@ archive:
 - [docs/delivery.md](docs/delivery.md): at-least-once delivery, the DLQ, shutdown, restart and disk protection.
 - [docs/configuration.md](docs/configuration.md): the config cascade and every environment variable.
 - [docs/metrics.md](docs/metrics.md): every metric the archiver records itself.
-- [docs/architecture.md](docs/architecture.md): the three crates (`core`, `io`, `archiver`), the one-way rules between them and the build graph.
+- [docs/architecture.md](docs/architecture.md): the parts, how a record flows through them, and why it is built this way.
 - [docs/design.md](docs/design.md): how it is built and released, and the decisions behind it.
 - [docs/testing.md](docs/testing.md): the test tiers and the containers they start.
 

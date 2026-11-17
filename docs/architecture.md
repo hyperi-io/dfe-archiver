@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-archiver
   File:         docs/architecture.md
-  Purpose:      Crate map, the one-way rules between them, and the build graph
+  Purpose:      The archiver's parts, how a record flows through them, and why
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -10,9 +10,7 @@
 
 # dfe-archiver architecture
 
-Where things live and which way the dependencies point. The design itself -- the pipeline, the rolling model, the storage backends -- is [internals.md](internals.md), and the delivery guarantee [delivery.md](delivery.md).
-
-The archiver crate depends on both libraries, and io depends on core alone.
+dfe-archiver is the sink at the end of the DFE pipeline: it writes every record it is given into compressed, rolling files on a local path or in a bucket. It keeps each record exactly as it arrived, so a deployment can restore or replay it.
 
 ```mermaid
 ---
@@ -60,17 +58,38 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
-  accTitle: L4 Detail -- Crate dependencies
-  accDescr: The archiver crate depends on both library crates, io and core. The io crate depends on core alone.
-  archiver("<b>archiver</b><br/><span>the binary and the pipeline</span>")
-  subgraph libs["Libraries"]
-    direction LR
-    io("<b>io</b><br/><span>transports and storage backends</span>")
-    core("<b>core</b><br/><span>archive logic, no other crate</span>")
-    io --> core
+flowchart TB
+  accTitle: L3 Components -- dfe-archiver
+  accDescr: Records arrive from Kafka topics or are pushed by the previous stage. Inside, they are received, routed and buffered, then written to files and delivered. Files land in a local path or a bucket, and records refused for good go to the DLQ topic when the DLQ is on.
+  topics[("<b>Kafka topics</b><br/><span>the records to archive</span>")]
+  stage("<b>Previous stage</b><br/><span>pushes on the grpc transport</span>")
+  subgraph archiver["dfe-archiver"]
+    direction TB
+    subgraph intake["Intake"]
+      direction LR
+      receive("<b>Receive</b><br/><span>a batch a call</span>")
+      route("<b>Route</b><br/><span>picks the destination</span>")
+      buffer("<b>Buffer</b><br/><span>memory, per destination</span>")
+      receive --> route --> buffer
+    end
+    subgraph output["Output"]
+      direction LR
+      write("<b>Write</b><br/><span>compress and roll the file</span>")
+      delivery[["<b>Delivery</b><br/><span>sync or upload, then release</span>"]]
+      write --> delivery
+    end
+    intake --> output
   end
-  archiver --> libs
+  store[("<b>Local path or bucket</b><br/><span>the archive files</span>")]
+  dlq[("<b>DLQ topic</b><br/><span>when the DLQ is on</span>")]
+  topics -->|records| archiver
+  stage -->|pushes| archiver
+  archiver -->|files| store
+  archiver -.->|refused| dlq
+  class topics,dlq bus
+  class stage ext
+  class receive,route,buffer,write,delivery part
+  class store store
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -82,29 +101,80 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class archiver,io,core part
+  style archiver fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style intake fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style output fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Crate dependencies. An arrow points at what a crate depends on, so archiver depends on io and core alike.* Up: [dfe-archiver documentation](README.md).
+*Figure 1. L3 Components -- dfe-archiver. The grey dashed box is external and the dotted arrow takes refused records to the DLQ when it is on.* Up: top of dfe-archiver. Down: [L4 Detail -- Delivery](delivery.md).
 
-| Crate | Package | What it holds |
+## How data flows
+
+1. **Receive** takes up to `kafka.batch_size` records a call, 10,000 by default, from a Kafka consumer group or the scalo Push listener. Nothing after it knows which transport delivered them.
+2. **Route** picks each record's destination: its topic, then the value of each routing field, `_org_id` by default.
+3. **Buffer** holds records in memory per destination and flushes by size, count or age.
+4. **Write** compresses each flush into that destination's open file. A file rolls at 1 GiB compressed or at the roll interval.
+5. **Delivery** syncs a closed local file, or uploads a staged one, and only then releases its records. On `kafka` that release is the offset commit.
+
+A record refused for good, by the store, the codec or the nesting check, goes to the DLQ topic when the DLQ is on.
+
+## Components
+
+| Part | Role | Page |
 |---|---|---|
-| `crates/core` | `dfe-archiver-core` | The archive logic: config types and the flat environment names (`config.rs`), the rolling archive writer (`archive/`), the hot buffers (`buffer/`), destination routing (`routing/`), the compression codecs (`compression/`), and the storage trait with the sink probe (`storage.rs`). The one I/O it does is creating the spool directory |
-| `crates/io` | `dfe-archiver-io` | Everything that talks to something else: the inbound transports, Kafka (`kafka.rs`) or the Push listener (`grpc.rs`), chosen by `transport.rs`, and the staging directory and the backends behind `create_backend` (`storage.rs`): file, S3, GCS, Azure Blob and MinIO |
-| `crates/archiver` | `dfe-archiver` | The binary and the pipeline that joins the other two. `archiver.rs` is the loop (receive, route, buffer, write, hand closed object-store files to background upload tasks, and release once a file is durable), `main.rs` the scalo `ServiceApp` wiring, CLI and config reloader, `config/loader.rs` the file loading and `validate_config`, `metrics.rs` the Prometheus surface, and `contract.rs` the deployment contract the checked-in `Dockerfile` and the Helm chart are generated from |
+| Receive | The Kafka consumer or the Push listener, picked by `transport` | [Two transports, one pipeline](internals.md#two-transports-one-pipeline) |
+| Route | Topic, then routing fields, each segment encoded so it never names another directory | [Routing](internals.md#routing) |
+| Buffer | At most 64 hot buffers, a quarter of the memory limit between them | [Buffers and writers](internals.md#buffers-and-writers) |
+| Write | One open file per destination, compressed frames, rolled by size or age | [Files roll by compressed size or age](internals.md#files-roll-by-compressed-size-or-age) |
+| Delivery | Sync or upload, then release. The DLQ, shutdown and disk limits | [delivery.md](delivery.md) |
 
-The rules between the crates, which nothing may break:
+## External dependencies
 
-- `core` depends on no other workspace crate.
-- Nothing in `core` records a metric: it counts what it did and the caller records it, which is why `ArchiveWriter::take_files_opened` exists.
-- Releasing an offset and uploading a file are never `core`'s. The writer settles the offsets held on a file as it closes, or hands them to the file's pending upload, and the caller drains both with `ArchiveWriter::take_settled`, uploads, and releases through the transport.
-- `io` depends on `core` and never on `archiver`.
-- No crate but `archiver` has a binary or reads the deployment contract, so the Dockerfile and the chart have one source.
-- No crate is publishable: all three set `publish = false`, and their version
-  is inherited from `[workspace.package]` so the release stamp reaches every
-  one of them.
+| Dependency | Needed for | Swappable |
+|---|---|---|
+| Kafka | The `kafka` transport and the DLQ | Any Kafka, or none on `grpc` |
+| A previous stage | The `grpc` transport, pushing to port 6000 | dfe-receiver or any scalo Push sender |
+| A local path or object store | The archive files | `file://`, S3, MinIO, GCS or Azure Blob |
+| A spool volume | Staged uploads and quarantine | Any writable volume. A size limit sets the caps |
 
-The cold build is spent on dependencies: `object_store` with its aws, gcp and azure features, `aws-lc-sys`, which compiles C, and `rdkafka-sys` through scalo, which on Linux finds librdkafka through pkg-config (its `dynamic-linking` feature). The release build points pkg-config at a static-only prefix, so the shipped binary links librdkafka statically and needs libc, libm, libgcc_s and the dynamic loader alone at run time.
+## Deployment variants
 
-Change propagation follows the arrows: a `core` edit rebuilds all three, an `io`
-edit rebuilds `io` and `archiver`, and an `archiver` edit rebuilds itself alone.
+The image is the same everywhere. What changes is the transport and the destination.
+
+- On Kubernetes the thin Helm chart deploys it, generated from the deployment contract, and dfe-infra pins the chart and image in `versions.yaml`. The spool is an `emptyDir` with a size limit, which sets the staging caps.
+- On Docker, or a bare host, the spool caps default to 8, 1 and 1 GiB.
+- `transport: kafka` is the default and gives at-least-once delivery. `transport: grpc` lets a deployment with no broker archive, at-most-once, with no DLQ.
+- With no `archive.destination` it starts, reports Ready and idles until a config reload names one.
+
+## Design considerations
+
+| Aspect | How it is handled |
+|---|---|
+| Security | Every path segment is encoded, so a field value never names another directory, and every backend rejects an absolute path or a `..` segment. Store credentials come from each SDK's own chain or from a Secret as environment variables |
+| Reliability | On `kafka` no record is lost while the topic holds it. A kill or store outage costs duplicates or lag. A failed upload keeps its file and offsets and retries with backoff |
+| Operations | `/livez`, `/readyz`, `/metrics` and `/scaling/pressure` on port 9090. A config change or SIGHUP reloads without a restart |
+| Performance | Upload memory stays near 64 MiB whatever the file size. Held offsets cost about 32 bytes each, which is why the roll interval drops to 300 s when they are held |
+
+## Why it's built this way
+
+| Decision | Reason |
+|---|---|
+| Release on a durable file, not on write | A file is an upload in progress until it rolls, and a kill abandons it. Committing at write would lose what the open file held |
+| Stage, then upload whole | A multipart upload read from the staged copy signs its requests afresh on every attempt, however long the store was down, and the loop never waits on the store |
+| Pressure pauses intake | Held records and staged bytes feed the self-regulation latch, so a store outage turns into lag rather than memory or disk growth |
+| A unique writer id in every key | A staged file is never checked against the store. Without it two replicas could pick one key and the later upload would replace the earlier object |
+| `_land` over `_load` on discovery | The archive keeps the record as it arrived. dfe-loader keeps `_load` |
+
+## Diagram map
+
+- Figure 1. L3 Components -- dfe-archiver (this page)
+  - [L4 Detail -- Delivery](delivery.md)
+- [L4 Detail -- Crate dependencies](../CONTRIBUTING.md#where-things-live)
+- [L4 Detail -- CI pipeline](design.md)
+
+## What's next
+
+- [How the archiver works](internals.md): every part in detail
+- [Archiving](archiving.md): what a file holds, where it goes and how to restore
+- [Configuration reference](configuration.md) and [Metrics reference](metrics.md)
+- [CONTRIBUTING.md Context](../CONTRIBUTING.md#context): the crate map and the rules between the crates

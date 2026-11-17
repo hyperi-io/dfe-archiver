@@ -17,7 +17,7 @@ How dfe-archiver is built, and how to run it.
 - [Delivery](delivery.md) -- at-least-once delivery, the DLQ, shutdown, restart and disk protection
 - [Configuration reference](configuration.md) -- the config cascade and every environment variable
 - [Metrics reference](metrics.md) -- every metric the archiver records itself
-- [dfe-archiver architecture](architecture.md) -- the three crates, the one-way rules between them and the build graph
+- [dfe-archiver architecture](architecture.md) -- the parts, how a record flows through them, and why
 - [DFE Archiver build and design notes](design.md) -- how it is built and released, and the decisions behind it
 - [Testing](testing.md) -- which tests run where, and the containers they start
 - [config-schema.yaml](config-schema.yaml) -- the configuration as a JSON Schema (YAML)
