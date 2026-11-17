@@ -10,9 +10,15 @@
 
 # Delivery
 
-On `kafka` with `kafka.acknowledgements.enabled` (the default) no record is lost as long as the topic holds it. A kill, a failed upload, a failing local disk or a store outage costs duplicates or consumer lag. Kafka's retention deletes records whether or not the archiver has read them, and a commit that falls below the log start resets to the earliest record left, so size retention for the longest outage you will ride out. One case drops a record: it is refused for good, by the store, the codec or the nesting check, and no DLQ can take it. That record is counted. On `grpc` the archive copy is at-most-once, because the listener answers each push once its records are queued ([internals.md](internals.md#two-transports-one-pipeline)). How the pipeline gets a record into a file is [internals.md](internals.md).
+Delivery makes a closed file durable and only then releases its records, and is one part of [dfe-archiver](architecture.md).
 
-## A record is released when its file is durable
+| Fact | Value |
+|---|---|
+| Repo | `hyperi-io/dfe-archiver`, `crates/archiver/src/archiver.rs` and `crates/io/src/storage.rs` |
+| Image and chart | `ghcr.io/hyperi-io/dfe-archiver`, and the thin Helm chart each release assembles from the deployment contract |
+| Config | `kafka.acknowledgements.enabled`, `archive.roll_interval_secs`, the `buffer.*` spool caps ([configuration.md](configuration.md)) |
+| Endpoints | `/livez`, `/readyz`, `/metrics` and `/scaling/pressure` on port 9090 |
+| Metrics | `messages_archived_total`, `uploads_pending`, `staged_bytes`, `messages_dropped_total{reason}` ([metrics.md](metrics.md)) |
 
 A record's offset is released only after its file is synced or uploaded.
 
@@ -62,21 +68,26 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
-  accTitle: L4 Detail -- Release on a complete file
-  accDescr: A batch is received, buffered and written into its destination's open file. When the file closes, a local file is synced or a staged file is uploaded, and only then are the file's offsets released.
-  receive("<b>Receive</b><br/><span>a batch from the transport</span>")
-  buffer("<b>Buffer</b><br/><span>held per destination</span>")
-  write("<b>Write</b><br/><span>into the open file</span>")
-  sync("<b>Sync local file</b><br/><span>on close</span>")
-  upload("<b>Upload staged file</b><br/><span>in a background task</span>")
-  release("<b>Release offsets</b><br/><span>only once the file is durable</span>")
-  receive --> buffer
-  buffer --> write
-  write --> sync
-  write --> upload
-  sync -->|synced| release
-  upload -->|stored| release
+flowchart TB
+  accTitle: L4 Detail -- Delivery
+  accDescr: A batch is received, buffered and written into its destination's open file. When the file closes, a local file is synced or a staged file is uploaded in a background task, and only then are the file's offsets released.
+  subgraph pipe["Into a file"]
+    direction LR
+    receive("<b>Receive</b><br/><span>a batch from the transport</span>")
+    buffer("<b>Buffer</b><br/><span>held per destination</span>")
+    write("<b>Write</b><br/><span>into the open file</span>")
+    receive --> buffer --> write
+  end
+  subgraph dl["Delivery"]
+    direction LR
+    sync("<b>Sync local file</b><br/><span>on close</span>")
+    upload("<b>Upload staged file</b><br/><span>in a background task</span>")
+    release("<b>Release offsets</b><br/><span>once the file is durable</span>")
+    sync -->|synced| release
+    upload -->|stored| release
+  end
+  pipe -->|file closes| dl
+  class receive,buffer,write,sync,upload,release part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -88,10 +99,15 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class receive,buffer,write,sync,upload,release part
+  style pipe fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style dl fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Release on a complete file. Offsets are released last, once the file is synced or stored.* Up: [L3 Components -- dfe-archiver](internals.md#the-pipeline).
+*Figure 1. L4 Detail -- Delivery. Offsets are released last, once the file is synced or stored.* Up: [L3 Components -- dfe-archiver](architecture.md). Down: none.
+
+On `kafka` with `kafka.acknowledgements.enabled` (the default) no record is lost as long as the topic holds it. A kill, a failed upload, a failing local disk or a store outage costs duplicates or consumer lag. Kafka's retention deletes records whether or not the archiver has read them, and a commit that falls below the log start resets to the earliest record left, so size retention for the longest outage you will ride out. One case drops a record: it is refused for good, by the store, the codec or the nesting check, and no DLQ can take it. That record is counted. On `grpc` the archive copy is at-most-once, because the listener answers each push once its records are queued ([internals.md](internals.md#two-transports-one-pipeline)). How the pipeline gets a record into a file is [internals.md](internals.md).
+
+## A record is released when its file is durable
 
 The consumer records every offset it hands out, and the writer holds each record's offset on the file the record went into. The sync or upload starts when the file closes, on a roll, an age close, an eviction or shutdown.
 

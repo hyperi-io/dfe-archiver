@@ -77,26 +77,34 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
   accTitle: L4 Detail -- CI pipeline
   accDescr: Every trigger starts the plan, and a push to main, a pull request or the merge queue starts the commit message check. The plan starts quality and test, both feed the build, and the build feeds the release tail on a release and the gate on every run.
   trigger(["<b>Push, PR,</b><br/><span>schedule or dispatch</span>"])
-  plan("<b>Plan</b><br/><span>predicts the version and jobs</span>")
   commits("<b>Commit messages</b><br/><span>checked on landing</span>")
-  subgraph checks["Checks"]
+  subgraph checks["Plan and check"]
     direction LR
+    plan("<b>Plan</b><br/><span>predicts the version and jobs</span>")
     quality("<b>Quality</b><br/><span>fmt, clippy, audit, deny</span>")
     test("<b>Test</b><br/><span>the test tier, with coverage</span>")
+    plan --> quality
+    plan --> test
   end
-  build("<b>Build</b><br/><span>x86_64 and aarch64</span>")
-  tail("<b>Release tail</b><br/><span>tag, release, image, binaries, chart</span>")
-  gate("<b>Gate</b><br/><span>plan, quality, test and build</span>")
-  trigger -->|every run| plan
+  subgraph out["Build and report"]
+    direction LR
+    build("<b>Build</b><br/><span>x86_64 and aarch64</span>")
+    tail("<b>Release tail</b><br/><span>tag, release, image, binaries, chart</span>")
+    gate("<b>Gate</b><br/><span>plan, quality, test and build</span>")
+    build -->|release| tail
+    build -->|always| gate
+  end
   trigger -->|landing| commits
-  plan --> checks
-  checks --> build
-  build -->|release| tail
-  build -->|always| gate
+  trigger -->|every run| checks
+  checks -->|quality and test| out
+  class trigger ext
+  class plan,commits,quality,test,build,tail,gate part
+  class trigger ext
+  class plan,commits,quality,test,build,tail,gate part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -108,8 +116,8 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class trigger ext
-  class plan,commits,quality,test,build,tail,gate part
+  style checks fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style out fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- CI pipeline. The gate checks plan, quality, test and build, and the commit check and release tail report separately.* Up: [dfe-archiver documentation](README.md).
