@@ -46,7 +46,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = "2.14.30" }
+scalo = { version = ">=2.14.32, <3" }
 
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
