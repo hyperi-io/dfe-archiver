@@ -3,6 +3,18 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.52](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.51...v1.7.52) (2026-11-19)
+
+### Bug Fixes
+
+* **archiver:** rebuild on scalo 2.14.32 ([ecee9ef](https://github.com/hyperi-io/dfe-archiver/commit/ecee9ef70e4eb7cb3bb003358465f1d92578e72b))
+* **build:** inherit the workspace description in the binary crate ([#180](https://github.com/hyperi-io/dfe-archiver/issues/180)) ([d669b96](https://github.com/hyperi-io/dfe-archiver/commit/d669b964c0eb1ecbdcab291cfe192474fef6f586))
+* **config:** load archiver config and keep cloud env settings ([#182](https://github.com/hyperi-io/dfe-archiver/issues/182)) ([3f8f9f7](https://github.com/hyperi-io/dfe-archiver/commit/3f8f9f727c52d5e5e7f364d29c617bad27914a32))
+* **deps:** update redpandadata/console Docker tag to v3.14.0 ([ac1a0d0](https://github.com/hyperi-io/dfe-archiver/commit/ac1a0d0a4040030ad787d2db59009c73ee9e6ba1))
+* **deps:** update rust-dependencies ([94b14cc](https://github.com/hyperi-io/dfe-archiver/commit/94b14cca7610bcb5b27ff208a28b2748f7c40cc8))
+* **manifest:** give the workspace a description ([#179](https://github.com/hyperi-io/dfe-archiver/issues/179)) ([3cab449](https://github.com/hyperi-io/dfe-archiver/commit/3cab4490f3401ce5e671b3ad183c898f276533a5))
+* **security:** bump libz-sys to 1.1.33 ([ded0adf](https://github.com/hyperi-io/dfe-archiver/commit/ded0adfcf9bfa11e5cfdaed07f2d91af2cbabe0e))
+
 ## [1.7.51](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.50...v1.7.51) (2026-11-15)
 
 ### Bug Fixes
