@@ -69,7 +69,7 @@ flate2 = ">=1.1.11, <2"
 object_store = { version = ">=0.14.2, <0.15", features = ["aws", "gcp", "azure"] }
 # The e2e MinIO fixture's client only. Default features off drops the legacy
 # `rustls` feature and its unmaintained rustls-webpki, so the rest are re-listed.
-aws-sdk-s3 = { version = ">=1.157.0, <2", default-features = false, features = [
+aws-sdk-s3 = { version = ">=1.159.0, <2", default-features = false, features = [
     "default-https-client",
     "http-1x",
     "rt-tokio",
