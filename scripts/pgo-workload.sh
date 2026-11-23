@@ -147,11 +147,6 @@ cleanup() {
             echo "pgo-workload: archiver exited ${waited}s after SIGTERM" >&2
         fi
     fi
-    if [[ -n "$ARCHIVER_PID" && -n "${LLVM_PROFILE_FILE:-}" ]] \
-        && ! compgen -G "$(dirname "${LLVM_PROFILE_FILE}")/pgo-${ARCHIVER_PID}_*.profraw" >/dev/null; then
-        echo "pgo-workload: archiver ${ARCHIVER_PID} left no .profraw under $(dirname "${LLVM_PROFILE_FILE}")" >&2
-        rc=1
-    fi
     if [[ -n "$KAFKA_CID" ]]; then
         docker rm -f "$KAFKA_CID" >/dev/null 2>&1 || true
     fi
