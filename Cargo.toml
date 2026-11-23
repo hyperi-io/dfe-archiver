@@ -46,7 +46,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = ">=2.14.32, <3" }
+scalo = { version = ">=2.14.33, <3" }
 
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
@@ -56,13 +56,13 @@ tokio-util = { version = ">=0.7.20, <0.8", features = ["time"] }
 
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
 serde_json = ">=1.0.154, <2"
-sonic-rs = ">=0.5.10, <0.6"
+sonic-rs = ">=0.5.11, <0.6"
 
 thiserror = ">=2.0.21, <3"
 anyhow = ">=1.0.104"
 
-zstd = ">=0.14.3, <0.15"
-lz4_flex = ">=0.14.0, <0.15"
+zstd = ">=0.14.4, <0.15"
+lz4_flex = ">=0.14.2, <0.15"
 snap = ">=1.1.2, <2"
 flate2 = ">=1.1.11, <2"
 
