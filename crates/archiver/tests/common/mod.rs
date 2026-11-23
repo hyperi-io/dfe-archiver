@@ -630,8 +630,8 @@ async fn azurite_signed(
         ),
     };
 
-    let ms_date = chrono::Utc::now()
-        .format("%a, %d %b %Y %H:%M:%S GMT")
+    let ms_date = jiff::Timestamp::now()
+        .strftime("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
 
     // Field order is fixed by the spec: verb, then Content-Encoding,
@@ -1906,7 +1906,9 @@ pub fn test_json_message(id: u64, org_id: &str, event_type: &str) -> Vec<u8> {
         "id": id,
         "_org_id": org_id,
         "event_type": event_type,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": jiff::Timestamp::now()
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string(),
         "data": {
             "field1": "value1",
             "field2": 123,
