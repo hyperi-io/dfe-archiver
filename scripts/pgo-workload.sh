@@ -112,6 +112,15 @@ ARCHIVER_PID=""
 KAFKA_CID=""
 WORK_DIR=""
 
+# An archiver killed before it exits writes no .profraw, so it gets the
+# shutdown grace its deployment contract asks for.
+# The binary is instrumented, so these calls send their profile to /dev/null.
+ARCHIVER_GRACE="$(env LLVM_PROFILE_FILE=/dev/null "${ARCHIVER_BIN}" emit-contract | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["termination_grace_seconds"])')"
+if [[ ! "${ARCHIVER_GRACE}" =~ ^[0-9]+$ ]]; then
+    echo "error: no termination_grace_seconds from ${ARCHIVER_BIN} emit-contract (got '${ARCHIVER_GRACE}')" >&2
+    exit 1
+fi
+
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
@@ -124,13 +133,24 @@ cleanup() {
     echo "pgo-workload: cleanup" >&2
     if [[ -n "$ARCHIVER_PID" ]] && kill -0 "$ARCHIVER_PID" 2>/dev/null; then
         kill -TERM "$ARCHIVER_PID" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if ! kill -0 "$ARCHIVER_PID" 2>/dev/null; then
-                break
-            fi
+        local waited=0
+        while kill -0 "$ARCHIVER_PID" 2>/dev/null && [[ "${waited}" -lt "${ARCHIVER_GRACE}" ]]; do
             sleep 1
+            waited=$((waited + 1))
         done
-        kill -KILL "$ARCHIVER_PID" 2>/dev/null || true
+        if kill -0 "$ARCHIVER_PID" 2>/dev/null; then
+            echo "pgo-workload: archiver still running ${ARCHIVER_GRACE}s after SIGTERM, killing it; it writes no profile" >&2
+            tail -100 "$WORK_DIR/archiver.log" >&2 || true
+            kill -KILL "$ARCHIVER_PID" 2>/dev/null || true
+            rc=1
+        else
+            echo "pgo-workload: archiver exited ${waited}s after SIGTERM" >&2
+        fi
+    fi
+    if [[ -n "$ARCHIVER_PID" && -n "${LLVM_PROFILE_FILE:-}" ]] \
+        && ! compgen -G "$(dirname "${LLVM_PROFILE_FILE}")/pgo-${ARCHIVER_PID}_*.profraw" >/dev/null; then
+        echo "pgo-workload: archiver ${ARCHIVER_PID} left no .profraw under $(dirname "${LLVM_PROFILE_FILE}")" >&2
+        rc=1
     fi
     if [[ -n "$KAFKA_CID" ]]; then
         docker rm -f "$KAFKA_CID" >/dev/null 2>&1 || true
