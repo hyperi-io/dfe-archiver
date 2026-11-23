@@ -39,9 +39,9 @@ snap = { workspace = true }
 flate2 = { workspace = true }
 
 bytes = { workspace = true }
-chrono = { workspace = true }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
+jiff = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
 indexmap = { workspace = true }

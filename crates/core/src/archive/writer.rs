@@ -11,7 +11,7 @@ use crate::config::ArchiveConfig;
 use crate::storage::{Closed, PendingUpload, StorageBackend};
 use crate::types::{KafkaOffset, OffsetSet};
 use crate::{Error, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -244,7 +244,7 @@ pub struct ArchiveState {
     pub compressed_bytes: AtomicU64,
     pub uncompressed_bytes: AtomicU64,
     pub records_written: AtomicU64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Archive writer with compression and rolling
@@ -533,11 +533,11 @@ impl ArchiveWriter {
             return Some("size");
         }
 
-        let age = Utc::now().signed_duration_since(state.created_at);
+        let age = Timestamp::now().duration_since(state.created_at);
         #[allow(clippy::cast_possible_wrap)]
-        if age.num_seconds() >= self.policy.max_age_secs as i64 {
+        if age.as_secs() >= self.policy.max_age_secs as i64 {
             debug!(
-                age_secs = age.num_seconds(),
+                age_secs = age.as_secs(),
                 max = self.policy.max_age_secs,
                 "Rolling: age exceeded"
             );
@@ -574,7 +574,7 @@ impl ArchiveWriter {
 
     /// Open a new archive file - iterates through existing sequence numbers
     async fn open_new_file(&mut self) -> Result<()> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let stem = self.path_stem(&now);
 
         if self.last_stem.as_deref() != Some(stem.as_str()) {
@@ -610,20 +610,21 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    fn path_stem(&self, timestamp: &DateTime<Utc>) -> String {
+    /// Placeholders expand in UTC, which is what `Timestamp::strftime` formats in.
+    fn path_stem(&self, timestamp: &Timestamp) -> String {
         let mut path = self.config.path_template.clone();
 
-        path = path.replace("{year}", &timestamp.format("%Y").to_string());
-        path = path.replace("{month}", &timestamp.format("%m").to_string());
-        path = path.replace("{day}", &timestamp.format("%d").to_string());
-        path = path.replace("{hour}", &timestamp.format("%H").to_string());
-        path = path.replace("{minute}", &timestamp.format("%M").to_string());
-        path = path.replace("{timestamp}", &timestamp.timestamp().to_string());
+        path = path.replace("{year}", &timestamp.strftime("%Y").to_string());
+        path = path.replace("{month}", &timestamp.strftime("%m").to_string());
+        path = path.replace("{day}", &timestamp.strftime("%d").to_string());
+        path = path.replace("{hour}", &timestamp.strftime("%H").to_string());
+        path = path.replace("{minute}", &timestamp.strftime("%M").to_string());
+        path = path.replace("{timestamp}", &timestamp.as_second().to_string());
 
         path
     }
 
-    fn generate_path(&self, timestamp: &DateTime<Utc>) -> String {
+    fn generate_path(&self, timestamp: &Timestamp) -> String {
         let path = self
             .path_stem(timestamp)
             .replace("{seq}", &format!("{:04}", self.file_seq));
@@ -699,7 +700,7 @@ impl ArchiveWriter {
 
     /// Expose `generate_path` for testing
     #[cfg(test)]
-    pub fn test_generate_path(&self, timestamp: &DateTime<Utc>) -> String {
+    pub fn test_generate_path(&self, timestamp: &Timestamp) -> String {
         self.generate_path(timestamp)
     }
 
@@ -729,7 +730,6 @@ mod tests {
     use crate::compression::create_compressor;
     use crate::storage::StorageBackend;
     use async_trait::async_trait;
-    use chrono::TimeZone;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -897,7 +897,7 @@ mod tests {
         let backend = Box::new(MemoryBackend::new());
         let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
 
-        let ts = Utc.with_ymd_and_hms(2026, 3, 15, 14, 30, 0).unwrap();
+        let ts: Timestamp = "2026-03-15T14:30:00Z".parse().unwrap();
         let path = writer.test_generate_path(&ts);
 
         assert!(path.contains("2026"), "year missing: {path}");
@@ -905,6 +905,24 @@ mod tests {
         assert!(path.contains("15"), "day missing: {path}");
         assert!(path.contains("14"), "hour missing: {path}");
         assert!(path.contains(".jsonl"), "extension missing: {path}");
+
+        // Every placeholder, zero-padded, in UTC, pinned as object keys depend on it.
+        let full = ArchiveWriter::new(
+            ArchiveConfig {
+                path_template: "{year}-{month}-{day}T{hour}:{minute}/{timestamp}/{seq}".to_string(),
+                ..Default::default()
+            },
+            RollingPolicy::default(),
+            create_compressor("none", 0).expect("compressor"),
+            Box::new(MemoryBackend::new()),
+        );
+        let early: Timestamp = "2026-01-02T03:04:05Z".parse().unwrap();
+        for (at, stem) in [
+            (ts, "2026-03-15T14:30/1773585000/{seq}"),
+            (early, "2026-01-02T03:04/1767323045/{seq}"),
+        ] {
+            assert_eq!(full.path_stem(&at), stem);
+        }
     }
 
     #[test]
@@ -918,7 +936,7 @@ mod tests {
         let backend = Box::new(MemoryBackend::new());
         let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
 
-        let ts = Utc::now();
+        let ts = Timestamp::now();
         let path = writer.test_generate_path(&ts);
 
         assert!(path.ends_with(".jsonl.zst"), "should have .zst ext: {path}");
@@ -940,7 +958,7 @@ mod tests {
             Box::new(MemoryBackend::new()),
         );
 
-        let path = writer.test_generate_path(&Utc::now());
+        let path = writer.test_generate_path(&Timestamp::now());
 
         assert!(path.ends_with(".jsonl.sz"), "{path}");
     }
@@ -1261,7 +1279,7 @@ mod tests {
         let backend = Arc::new(MemoryBackend::new());
         let first = test_writer_on(&backend, RollingPolicy::default(), "none");
         let second = test_writer_on(&backend, RollingPolicy::default(), "none");
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         let (a, b) = (
             first.test_generate_path(&now),
@@ -1729,7 +1747,7 @@ mod tests {
         let backend = Box::new(MemoryBackend::new());
         let writer = ArchiveWriter::new(config, RollingPolicy::default(), compressor, backend);
 
-        let path = writer.test_generate_path(&Utc::now());
+        let path = writer.test_generate_path(&Timestamp::now());
         assert!(
             !path.contains('{') && !path.contains('}'),
             "an advertised placeholder survived into the key: {path}"
