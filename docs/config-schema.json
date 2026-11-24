@@ -52,7 +52,6 @@
         "recv_buffer_size": 10000,
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
-        "compression": false,
         "acknowledgements": {
           "enabled": true
         }
@@ -122,7 +121,9 @@
           "path": "/var/spool/dfe/dlq",
           "rotation": "hourly",
           "max_age_days": 30,
-          "compress_rotated": true,
+          "compress_rotated": {
+            "codec": "gzip"
+          },
           "max_bytes": null,
           "max_files": null,
           "durable": false,
@@ -323,11 +324,6 @@
           "format": "uint",
           "minimum": 0,
           "default": 16777216
-        },
-        "compression": {
-          "description": "Enable gzip compression for gRPC messages.",
-          "type": "boolean",
-          "default": false
         },
         "acknowledgements": {
           "description": "The listener answers each push once its records are queued, with this\non or off: a record is released only when its archive file completes, at\nthe roll interval, long after any sender's deadline. So the archive copy\non this transport is at-most-once, and `enabled: false` only changes the\nreason `pipeline_delivery_guarantee` reports, from `sink_cannot_confirm`\nto `acks_disabled`.",
@@ -760,7 +756,9 @@
             "path": "/var/spool/scalo/dlq",
             "rotation": "hourly",
             "max_age_days": 30,
-            "compress_rotated": true,
+            "compress_rotated": {
+              "codec": "gzip"
+            },
             "max_bytes": null,
             "max_files": null,
             "durable": false,
@@ -833,9 +831,35 @@
           "default": 30
         },
         "compress_rotated": {
-          "description": "Gzip rotated files, keeping the six newest uncompressed.",
-          "type": "boolean",
-          "default": true
+          "description": "Codec for rotated files past the six newest: `none`, `gzip` or `zstd`.\nDefault gzip.",
+          "type": "object",
+          "properties": {
+            "codec": {
+              "description": "Codec for compress_rotated.",
+              "type": "string",
+              "enum": [
+                "none",
+                "gzip",
+                "zstd"
+              ]
+            },
+            "level": {
+              "description": "Level, by codec: gzip 1-9, zstd 1-22. Unset, the codec's default.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 22
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "codec"
+          ],
+          "default": {
+            "codec": "gzip"
+          }
         },
         "max_bytes": {
           "description": "Rotate before a write that would take the file past this many bytes.\nA write into an empty file always lands, however large. Unset: no size\nrotation. Works beside the time rotation: either rotates.",

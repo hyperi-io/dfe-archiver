@@ -70,7 +70,6 @@ properties:
       recv_buffer_size: 10000
       recv_timeout_ms: 100
       max_message_size: 16777216
-      compression: false
       acknowledgements:
         enabled: true
   archive:
@@ -131,7 +130,8 @@ properties:
         path: /var/spool/dfe/dlq
         rotation: hourly
         max_age_days: 30
-        compress_rotated: true
+        compress_rotated:
+          codec: gzip
         max_bytes: null
         max_files: null
         durable: false
@@ -338,10 +338,6 @@ $defs:
         format: uint
         minimum: 0
         default: 16777216
-      compression:
-        description: Enable gzip compression for gRPC messages.
-        type: boolean
-        default: false
       acknowledgements:
         description: |-
           The listener answers each push once its records are queued, with this
@@ -739,7 +735,8 @@ $defs:
           path: /var/spool/scalo/dlq
           rotation: hourly
           max_age_days: 30
-          compress_rotated: true
+          compress_rotated:
+            codec: gzip
           max_bytes: null
           max_files: null
           durable: false
@@ -801,9 +798,30 @@ $defs:
         minimum: 0
         default: 30
       compress_rotated:
-        description: Gzip rotated files, keeping the six newest uncompressed.
-        type: boolean
-        default: true
+        description: |-
+          Codec for rotated files past the six newest: `none`, `gzip` or `zstd`.
+          Default gzip.
+        type: object
+        properties:
+          codec:
+            description: Codec for compress_rotated.
+            type: string
+            enum:
+            - none
+            - gzip
+            - zstd
+          level:
+            description: "Level, by codec: gzip 1-9, zstd 1-22. Unset, the codec's default."
+            type:
+            - integer
+            - "null"
+            minimum: 1
+            maximum: 22
+        additionalProperties: false
+        required:
+        - codec
+        default:
+          codec: gzip
       max_bytes:
         description: |-
           Rotate before a write that would take the file past this many bytes.
