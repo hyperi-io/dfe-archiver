@@ -122,7 +122,12 @@
           "path": "/var/spool/dfe/dlq",
           "rotation": "hourly",
           "max_age_days": 30,
-          "compress_rotated": true
+          "compress_rotated": true,
+          "max_bytes": null,
+          "max_files": null,
+          "durable": false,
+          "file_mode": null,
+          "dir_mode": null
         },
         "kafka": {
           "enabled": true,
@@ -755,7 +760,12 @@
             "path": "/var/spool/scalo/dlq",
             "rotation": "hourly",
             "max_age_days": 30,
-            "compress_rotated": true
+            "compress_rotated": true,
+            "max_bytes": null,
+            "max_files": null,
+            "durable": false,
+            "file_mode": null,
+            "dir_mode": null
           }
         },
         "kafka": {
@@ -823,26 +833,85 @@
           "default": 30
         },
         "compress_rotated": {
-          "description": "Compress rotated files with flate2/gzip.",
+          "description": "Gzip rotated files, keeping the six newest uncompressed.",
           "type": "boolean",
           "default": true
+        },
+        "max_bytes": {
+          "description": "Rotate before a write that would take the file past this many bytes.\nA write into an empty file always lands, however large. Unset: no size\nrotation. Works beside the time rotation: either rotates.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "max_files": {
+          "description": "Rotated files kept, newest first. Older ones are deleted at each\nrotation. Unset: no count limit, only the age limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "durable": {
+          "description": "Sync the file's data to disk after each write, and its directory after\nthe file is created or rotated, so a write that returned `Ok` survives\npower loss. Costs a disk flush per batch. Off by default.",
+          "type": "boolean",
+          "default": false
+        },
+        "file_mode": {
+          "description": "Mode for files the writer creates, before the umask. Unset: `0666`\nbefore the umask, except in the file transport, where it is `0600`.\nUnix only: a Windows file takes its folder's ACL. Existing files keep\ntheirs.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dir_mode": {
+          "description": "Mode for directories the writer creates, before the umask. Unset:\n`0777` before the umask, except in the file transport, where it is\n`0700`. Unix only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       }
     },
     "RotationPeriod": {
-      "description": "File rotation period.",
+      "description": "File rotation period, by local time.",
       "oneOf": [
         {
-          "description": "Rotate files every hour.",
+          "description": "Rotate before the first write in a new hour.",
           "type": "string",
           "const": "hourly"
         },
         {
-          "description": "Rotate files every day.",
+          "description": "Rotate before the first write on a new day.",
           "type": "string",
           "const": "daily"
+        },
+        {
+          "description": "No time rotation. `max_bytes` can still rotate the file.",
+          "type": "string",
+          "const": "never"
         }
       ]
+    },
+    "FileMode": {
+      "description": "Unix permission mode in octal, such as \"0600\". Ignored on Windows.",
+      "type": "string",
+      "pattern": "^(0o)?[0-7]{1,4}$"
     },
     "KafkaDlqConfig": {
       "description": "Kafka-based DLQ configuration.",
