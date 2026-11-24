@@ -3134,7 +3134,9 @@ mod tests {
             file: FileDlqConfig {
                 enabled: true,
                 path: dir.path().to_path_buf(),
-                compress_rotated: scalo::compression::Compression::new(scalo::compression::Codec::None),
+                compress_rotated: scalo::compression::Compression::new(
+                    scalo::compression::Codec::None,
+                ),
                 ..FileDlqConfig::default()
             },
             flush_interval_ms: 20,
