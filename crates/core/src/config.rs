@@ -251,9 +251,6 @@ pub struct GrpcConfig {
     /// Maximum message size in bytes.
     pub max_message_size: usize,
 
-    /// Enable gzip compression for gRPC messages.
-    pub compression: bool,
-
     /// The listener answers each push once its records are queued, with this
     /// on or off: a record is released only when its archive file completes, at
     /// the roll interval, long after any sender's deadline. So the archive copy
@@ -270,7 +267,6 @@ impl Default for GrpcConfig {
             recv_buffer_size: 10_000,
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
-            compression: false,
             acknowledgements: AcknowledgementsConfig::default(),
         }
     }
