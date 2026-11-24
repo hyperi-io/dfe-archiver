@@ -39,6 +39,7 @@ use dfe_archiver_core::types::{KafkaMessage, KafkaOffset, OffsetSet};
 use dfe_archiver_core::{Error, Result};
 use dfe_archiver_io::{BackendFactory, ReceivedBatch, SourceTransport, Staging};
 use rayon::prelude::*;
+use scalo::backoff::Backoff;
 use scalo::dlq::{Dlq, DlqEntry, DlqSource};
 use scalo::logger::helpers::{log_debounced, log_sampled, log_state_change};
 use scalo::memory::MemoryGuard;
@@ -48,7 +49,6 @@ use scalo::scaling::ScalingPressure;
 use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{DeadLetterReason, DeliveryStatus, KafkaToken, SinkConfirmation};
 use scalo::{AckHeldSource, SelfRegulationGovernor};
-use std::hash::BuildHasher;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -102,22 +102,10 @@ fn held_record_cap(memory_limit_bytes: u64) -> u64 {
     (memory_limit_bytes / HELD_RECORDS_MEMORY_SHARE / HELD_OFFSET_BYTES).max(1)
 }
 
-// SHORTCUT: app-local backoff until scalo exports its own (scalo::backoff is pub(crate))
-/// The wait before retry `attempt` (0-based): exponential from `first` to
-/// `max`, drawn from its upper half so work that failed together does not
-/// retry together.
-fn retry_delay(attempt: u32, first: Duration, max: Duration) -> Duration {
-    let ceiling = first
-        .saturating_mul(2u32.saturating_pow(attempt.min(16)))
-        .min(max);
-    let jitter = std::hash::RandomState::new().hash_one((attempt, Instant::now()));
-    let fraction = 0.5 + (jitter % 1000) as f64 / 2000.0;
-    ceiling.mul_f64(fraction)
-}
-
-/// The wait before retry `attempt` of an upload.
+/// The wait before retry `attempt` of an upload (0-based): its doubled step
+/// spread by 20% either side, so uploads that failed together spread out.
 fn upload_retry_delay(attempt: u32) -> Duration {
-    retry_delay(attempt, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX)
+    Backoff::new(UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX).delay(attempt.saturating_add(1))
 }
 
 /// Open staging under `buffer.spool_dir` with the spool limits that config and
@@ -1787,7 +1775,7 @@ impl Archiver {
         ) {
             self.sink.set(true);
         }
-        let delay = retry_delay(retry.failures - 1, WRITE_RETRY_FIRST, WRITE_RETRY_MAX);
+        let delay = Backoff::new(WRITE_RETRY_FIRST, WRITE_RETRY_MAX).delay(retry.failures);
         if log_state_change(&self.log_guards.write_failing, true) {
             warn!(
                 destination,
@@ -2510,12 +2498,12 @@ impl Archiver {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX, Uploader,
-        WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, buffer_message,
+        Backoff, RefusedFile, Screened, SinkCircuit, UPLOAD_RETRY_FIRST, UPLOAD_RETRY_MAX,
+        Uploader, WRITE_RETRY_FIRST, WRITE_RETRY_MAX, buffer_config, buffer_message,
         dead_letter_refused_file, held_record_cap, leased_bytes, publish_kafka_lag, received_bytes,
         record_files_opened, record_rolls, record_routing_fallbacks, restart_required_changes,
-        retry_delay, sampled_reason, screen_dead_letters, sink_confirmation, spawn_dlq,
-        upload_retry_delay, upload_slots, upload_until_settled,
+        sampled_reason, screen_dead_letters, sink_confirmation, spawn_dlq, upload_retry_delay,
+        upload_slots, upload_until_settled,
     };
     use crate::config::validate_config;
     use crate::metrics::ArchiverMetrics;
@@ -2550,8 +2538,8 @@ mod tests {
         assert_eq!(held_record_cap(0), 1, "a zero limit still caps");
     }
 
-    /// Retries back off to a ceiling, drawn from the upper half of each step
-    /// so uploads that failed together spread out.
+    /// Retries back off to a ceiling, each within 20% either side of its
+    /// doubled step, so uploads that failed together spread out.
     #[test]
     fn upload_retries_back_off_to_a_ceiling_with_jitter() {
         for attempt in 0..40 {
@@ -2560,24 +2548,25 @@ mod tests {
                 .min(UPLOAD_RETRY_MAX);
             let delay = upload_retry_delay(attempt);
             assert!(
-                delay >= step / 2 && delay <= step,
-                "attempt {attempt}: {delay:?} outside half of {step:?}"
+                delay >= step * 4 / 5 && delay <= (step * 6 / 5).min(UPLOAD_RETRY_MAX),
+                "attempt {attempt}: {delay:?} outside 20% of {step:?}"
             );
         }
         assert!(upload_retry_delay(39) <= UPLOAD_RETRY_MAX);
-        assert!(upload_retry_delay(39) >= UPLOAD_RETRY_MAX / 2);
+        assert!(upload_retry_delay(39) >= UPLOAD_RETRY_MAX * 4 / 5);
     }
 
     /// A held local write retries soon after a failure and never waits longer
     /// than its ceiling, so it lands within seconds of the disk recovering.
     #[test]
     fn local_write_retries_back_off_to_a_short_ceiling() {
-        let first = retry_delay(0, WRITE_RETRY_FIRST, WRITE_RETRY_MAX);
-        assert!(first >= WRITE_RETRY_FIRST / 2 && first <= WRITE_RETRY_FIRST);
-        for attempt in 0..40 {
-            assert!(retry_delay(attempt, WRITE_RETRY_FIRST, WRITE_RETRY_MAX) <= WRITE_RETRY_MAX);
+        let schedule = Backoff::new(WRITE_RETRY_FIRST, WRITE_RETRY_MAX);
+        let first = schedule.delay(1);
+        assert!(first >= WRITE_RETRY_FIRST * 4 / 5 && first <= WRITE_RETRY_FIRST * 6 / 5);
+        for failures in 1..=40 {
+            assert!(schedule.delay(failures) <= WRITE_RETRY_MAX);
         }
-        assert!(retry_delay(39, WRITE_RETRY_FIRST, WRITE_RETRY_MAX) >= WRITE_RETRY_MAX / 2);
+        assert!(schedule.delay(40) >= WRITE_RETRY_MAX * 4 / 5);
     }
 
     /// A per-record security event is logged the first time and every
