@@ -46,7 +46,7 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = ">=2.14.33, <3" }
+scalo = { version = ">=2.14.34, <3" }
 
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
@@ -114,7 +114,7 @@ tokio-test = ">=0.4.6, <0.5"
 test-log = { version = ">=0.2.21, <0.3", features = ["trace"] }
 walkdir = ">=2.5, <3"
 reqwest = ">=0.13.5, <0.14"
-rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
+rdkafka = { version = ">=0.40.0, <0.41", features = ["dynamic-linking"] }
 # Same major line as the other DFE apps, so the container-hygiene helpers match.
 testcontainers = ">=0.28.0, <0.29"
 # Azure Shared Key signing, to create the blob container object_store cannot.
