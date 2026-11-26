@@ -46,4 +46,5 @@ wildcards = "allow"
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# 2.14.40: scalo from git until the release reaches crates.io.
+allow-git = ["https://github.com/hyperi-io/scalo-rs"]

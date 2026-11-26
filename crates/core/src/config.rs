@@ -312,9 +312,9 @@ pub struct KafkaConfig {
     /// SASL password (never serialised in plaintext)
     pub sasl_password: Option<SensitiveString>,
 
-    /// Path to a CA certificate bundle for verifying the broker's TLS cert
-    /// (private-CA trust). Maps to librdkafka `ssl.ca.location`.
-    pub ssl_ca_location: Option<String>,
+    /// scalo's client TLS section, read with an `SSL` protocol. A private CA
+    /// is `trust: bundle` with `ca_paths`.
+    pub tls: scalo::tls_config::ClientTlsConfig,
 
     /// Deliberately opt into an unencrypted transport (PLAINTEXT /
     /// `SASL_PLAINTEXT`) in production. Defaults to false: scalo's
@@ -362,7 +362,7 @@ impl Default for KafkaConfig {
             security_protocol: "PLAINTEXT".to_string(),
             sasl_username: None,
             sasl_password: None,
-            ssl_ca_location: None,
+            tls: scalo::tls_config::ClientTlsConfig::default(),
             allow_insecure_transport: false,
             batch_size: 10_000,
             max_poll_interval_ms: 300_000,
@@ -713,8 +713,10 @@ impl Config {
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
             self.kafka.sasl_password = Some(SensitiveString::from(v));
         }
-        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SSL_CA_LOCATION") {
-            self.kafka.ssl_ca_location = Some(v);
+        // CA files from the environment are trusted alone, as `trust: bundle`.
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TLS_CA_PATHS") {
+            self.kafka.tls.trust = scalo::tls_config::TrustChoice::Bundle;
+            self.kafka.tls.ca_paths = v.into_iter().map(std::path::PathBuf::from).collect();
         }
         if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_ALLOW_INSECURE_TRANSPORT") {
             self.kafka.allow_insecure_transport =

@@ -1392,7 +1392,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hmac",
- "jiff 1.0.0",
+ "jiff 1.0.3",
  "lru 0.19.0",
  "metrics",
  "parking_lot 0.13.0",
@@ -1428,7 +1428,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "indexmap 2.14.2",
- "jiff 1.0.0",
+ "jiff 1.0.3",
  "lz4_flex",
  "parking_lot 0.13.0",
  "scalo",
@@ -2532,12 +2532,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "1.0.0"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
 dependencies = [
- "jiff-core 1.0.0",
- "jiff-static 1.0.0",
+ "jiff-core 1.0.2",
+ "jiff-static 1.0.3",
  "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
@@ -2558,9 +2558,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.0"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
 dependencies = [
  "log",
 ]
@@ -2579,11 +2579,11 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "1.0.0"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
 dependencies = [
- "jiff-core 1.0.0",
+ "jiff-core 1.0.2",
  "proc-macro2",
  "quote",
  "syn 3.0.9",
@@ -4508,9 +4508,8 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.39"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4a9620a07645c5fe06c21ea41d14e3157e685fec1582ea0479f1e0e0e746fa"
+version = "0.0.0"
+source = "git+https://github.com/hyperi-io/scalo-rs?rev=e8a3c79aeacf#e8a3c79aeacfc5a5739368d29ff30de2661c5fff"
 dependencies = [
  "arc-swap",
  "axum",
@@ -4529,7 +4528,7 @@ dependencies = [
  "governor",
  "http",
  "hyper-util",
- "jiff 1.0.0",
+ "jiff 1.0.3",
  "libc",
  "lz4_flex",
  "memchr",
@@ -4581,7 +4580,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-throttle",
  "uuid",
- "webpki-roots",
  "wide",
  "windows",
  "windows-registry 0.100.0",
@@ -5536,11 +5534,9 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -6045,15 +6041,6 @@ name = "webpki-root-certs"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]

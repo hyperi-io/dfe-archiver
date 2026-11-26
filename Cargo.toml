@@ -46,7 +46,8 @@ dfe-archiver-core = { path = "crates/core" }
 dfe-archiver-io = { path = "crates/io" }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = ">=2.14.38, <3" }
+# 2.14.40: the git tree carries version 0.0.0 until the release stamps it.
+scalo = { version = "0.0.0", git = "https://github.com/hyperi-io/scalo-rs", rev = "e8a3c79aeacf" }
 
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
@@ -59,7 +60,6 @@ serde_json = ">=1.0.154, <2"
 sonic-rs = ">=0.5.11, <0.6"
 
 thiserror = ">=2.0.21, <3"
-anyhow = ">=1.0.104"
 
 zstd = ">=0.14.4, <0.15"
 lz4_flex = ">=0.14.2, <0.15"
@@ -78,12 +78,10 @@ aws-sdk-s3 = { version = ">=1.159.0, <2", default-features = false, features = [
 
 bytes = ">=1.12.1, <2"
 jiff = ">=1.0.0, <2"
-uuid = { version = ">=1.29.2, <2", features = ["v4", "serde"] }
 parking_lot = ">=0.13.0, <0.14"
 rayon = ">=1.12, <2"
 dashmap = ">=6.2.1, <7"
 compact_str = ">=0.10, <0.11"
-rustc-hash = ">=2.1.3, <3"
 smallvec = { version = ">=1.16.5, <2", features = ["union", "serde"] }
 fs2 = ">=0.4.3, <0.5"
 indexmap = ">=2.14.2, <3"

@@ -7,7 +7,7 @@
 // Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! A deployment that trusts a private Kafka CA through `SSL_CERT_FILE`, with
-//! no `kafka.ssl_ca_location`, reads from a TLS broker that CA signed.
+//! no `kafka.tls.ca_paths`, reads from a TLS broker that CA signed.
 
 use dfe_archiver::config::KafkaConfig;
 use dfe_archiver::io::TransportAdapter;
@@ -60,7 +60,6 @@ async fn consume(
         group_id: group.to_string(),
         topics: vec![TOPIC.to_string()],
         security_protocol: "SSL".to_string(),
-        ssl_ca_location: None,
         ..KafkaConfig::default()
     };
     // The client takes its CA from the variable when it is built, so it is set around construction only.
