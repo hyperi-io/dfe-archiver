@@ -18,7 +18,7 @@ pub type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// `: <source>` when there is one. Every log line and dead letter formats the
 /// error with `%e`, so a cause left out of `Display` reaches no operator.
 fn cause(source: Option<&BoxSource>) -> String {
-    source.map(|e| format!(": {e}")).unwrap_or_default()
+    source.map_or_default(|e| format!(": {e}"))
 }
 
 /// Main error type for the archiver
