@@ -234,7 +234,7 @@ const FLAT_ENV_CASES: [(&str, &str); 30] = [
     ("KAFKA_SECURITY_PROTOCOL", "SASL_SSL"),
     ("KAFKA_SASL_USER", "user-x"),
     ("KAFKA_SASL_PASSWORD", "password-x"),
-    ("KAFKA_SSL_CA_LOCATION", "/etc/ca.pem"),
+    ("KAFKA_TLS_CA_PATHS", "/etc/ca.pem"),
     ("KAFKA_ALLOW_INSECURE_TRANSPORT", "true"),
     ("DLQ_ENABLED", "false"),
     ("DLQ_TOPIC", "dlq-x"),

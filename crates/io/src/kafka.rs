@@ -288,7 +288,7 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
         sasl_username: config.sasl_username.clone(),
         sasl_password: config.sasl_password.clone(),
         security_protocol: config.security_protocol.clone(),
-        ssl_ca_location: config.ssl_ca_location.clone(),
+        tls: config.tls.clone(),
         allow_insecure_transport: config.allow_insecure_transport,
         session_timeout_ms: config.session_timeout_ms,
         max_poll_interval_ms: config.max_poll_interval_ms,
@@ -407,6 +407,21 @@ mod tests {
                 ("statistics.interval.ms", "5000"),
             ])
         );
+    }
+
+    /// `kafka.tls` is scalo's client section, handed to the transport whole.
+    #[test]
+    fn the_tls_section_reaches_the_transport() {
+        let config = KafkaConfig {
+            security_protocol: "SSL".to_string(),
+            tls: scalo::tls_config::ClientTlsConfig {
+                trust: scalo::tls_config::TrustChoice::Bundle,
+                ca_paths: vec!["/etc/kafka/ca.pem".into()],
+                ..Default::default()
+            },
+            ..KafkaConfig::default()
+        };
+        assert_eq!(convert_config(&config).tls, config.tls);
     }
 
     /// An unset topic list and include list discover every topic the excludes keep.

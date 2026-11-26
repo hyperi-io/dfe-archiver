@@ -33,7 +33,16 @@
         "security_protocol": "PLAINTEXT",
         "sasl_username": null,
         "sasl_password": null,
-        "ssl_ca_location": null,
+        "tls": {
+          "profile": "strong",
+          "trust": "native",
+          "ca_paths": [],
+          "client_cert_path": null,
+          "client_key_path": null,
+          "pin_sha256": [],
+          "server_name": null,
+          "key_share": "profile"
+        },
         "allow_insecure_transport": false,
         "batch_size": 10000,
         "max_poll_interval_ms": 300000,
@@ -126,6 +135,7 @@
           },
           "max_bytes": null,
           "max_files": null,
+          "naming": "stamped",
           "durable": false,
           "file_mode": null,
           "dir_mode": null
@@ -230,13 +240,19 @@
           "writeOnly": true,
           "default": null
         },
-        "ssl_ca_location": {
-          "description": "Path to a CA certificate bundle for verifying the broker's TLS cert\n(private-CA trust). Maps to librdkafka `ssl.ca.location`.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
+        "tls": {
+          "description": "scalo's client TLS section, read with an `SSL` protocol. A private CA\nis `trust: bundle` with `ca_paths`.",
+          "$ref": "#/$defs/ClientTlsConfig",
+          "default": {
+            "profile": "strong",
+            "trust": "native",
+            "ca_paths": [],
+            "client_cert_path": null,
+            "client_key_path": null,
+            "pin_sha256": [],
+            "server_name": null,
+            "key_share": "profile"
+          }
         },
         "allow_insecure_transport": {
           "description": "Deliberately opt into an unencrypted transport (PLAINTEXT /\n`SASL_PLAINTEXT`) in production. Defaults to false: scalo's\nKafka transport REJECTS plaintext in production unless this is set\n(e.g. mesh-encrypted in-cluster traffic). Outside production it has no\neffect.",
@@ -280,6 +296,135 @@
           "default": {}
         }
       }
+    },
+    "ClientTlsConfig": {
+      "description": "The `tls:` section every TLS client reads: a profile, a trust choice, CA\nfiles, an optional client certificate, key pins, the name the server's\ncertificate is checked against, and the key share sent first.\n\nA transport that cannot honour a key says so at config load: Kafka takes no\npin, server name or key share, and `platform` trust only on Windows.",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "description": "`strong` (default), `commercial` or `cnsa2`. Per-profile settings, such\nas `allow_tls12`, live in the `tls.profiles` cascade section.",
+          "$ref": "#/$defs/CryptoProfile",
+          "default": "strong"
+        },
+        "trust": {
+          "description": "`native` (default), `platform` or `bundle`, as in [`TrustChoice`].",
+          "$ref": "#/$defs/TrustChoice",
+          "default": "native"
+        },
+        "ca_paths": {
+          "description": "CA PEM files, trusted beside the OS store under `native` and\n`platform`, and alone under `bundle`. One path or a list.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "default": []
+        },
+        "client_cert_path": {
+          "description": "Client certificate PEM for mutual TLS, with `client_key_path`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "client_key_path": {
+          "description": "Client private key PEM for mutual TLS, with `client_cert_path`. May\nname the same file when it holds both.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pin_sha256": {
+          "description": "SHA-256 pins on the server's public key, as in [`SpkiPin`]. Once the\nchain verifies, the key must match one. Empty checks no key.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpkiPin"
+          },
+          "default": []
+        },
+        "server_name": {
+          "description": "The name checked against the server's certificate and sent as SNI.\nDefault the endpoint's host.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "key_share": {
+          "description": "`profile` (default) sends the profile's first group, a post-quantum\none. `classical` sends a classical share first.",
+          "$ref": "#/$defs/KeyShare",
+          "default": "profile"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CryptoProfile": {
+      "description": "A named TLS profile. `strong` is the default.",
+      "oneOf": [
+        {
+          "description": "TLS 1.3 only unless the profile sets `allow_tls12`, AES-256-GCM,\nChaCha20 and AES-128-GCM, hybrid post-quantum key exchange first.",
+          "type": "string",
+          "const": "strong"
+        },
+        {
+          "description": "TLS 1.3 and 1.2, every ECDHE AEAD suite, hybrid post-quantum key\nexchange first: the cheapest profile that is still current.",
+          "type": "string",
+          "const": "commercial"
+        },
+        {
+          "description": "TLS 1.3 only, AES-256-GCM, ML-KEM-1024 then P-384, ECDSA P-384 and\nML-DSA-87 signatures. The CNSA 2.0 shape.",
+          "type": "string",
+          "const": "cnsa2"
+        }
+      ]
+    },
+    "TrustChoice": {
+      "description": "Which certificates a client accepts a server's certificate from.\n\nEvery choice trusts the CA files given beside it, and `bundle` trusts\nnothing else.",
+      "oneOf": [
+        {
+          "description": "The OS root store, read through `rustls-native-certs` and checked by\nrustls.",
+          "type": "string",
+          "const": "native"
+        },
+        {
+          "description": "The OS verifier, through `rustls-platform-verifier`, so Windows and\nmacOS apply their own policy and revocation checks.",
+          "type": "string",
+          "const": "platform"
+        },
+        {
+          "description": "Only the CA files given: an exclusive pin, with no OS root trusted.",
+          "type": "string",
+          "const": "bundle"
+        }
+      ]
+    },
+    "SpkiPin": {
+      "description": "SHA-256 of a server certificate's SubjectPublicKeyInfo, in base64 or 64 hex digits.",
+      "type": "string",
+      "pattern": "^([0-9A-Fa-f]{64}|[A-Za-z0-9+/]{43}=)$"
+    },
+    "KeyShare": {
+      "description": "Which key share a client sends first.",
+      "oneOf": [
+        {
+          "description": "The profile's order: a post-quantum group first where it has one.",
+          "type": "string",
+          "const": "profile"
+        },
+        {
+          "description": "A classical group first, with the post-quantum groups listed but not\nshared, for a receiver behind a middlebox that drops the larger\nClientHello. A server that prefers a post-quantum group asks for it in\na second round trip.",
+          "type": "string",
+          "const": "classical"
+        }
+      ]
     },
     "AcknowledgementsConfig": {
       "description": "The `acknowledgements` section of an ack-capable transport.\n\nWith `enabled: true` (the default) a source releases its acknowledgement --\na Kafka offset commit, a gRPC or HTTP response -- only once every piece of\nwork built from the record has been delivered, dead-lettered with the DLQ's\nconfirmation, or dropped by policy. A failed delivery withholds it, so the\nrecord is delivered again: duplicates are possible, loss is not.\n\nWith `enabled: false` the source acknowledges at receipt, before the record\nis processed: a crash or a failed delivery loses what was acknowledged.\n\n```yaml\nkafka:\n  acknowledgements:\n    enabled: true\n```",
@@ -761,6 +906,7 @@
             },
             "max_bytes": null,
             "max_files": null,
+            "naming": "stamped",
             "durable": false,
             "file_mode": null,
             "dir_mode": null
@@ -872,7 +1018,7 @@
           "default": null
         },
         "max_files": {
-          "description": "Rotated files kept, newest first. Older ones are deleted at each\nrotation. Unset: no count limit, only the age limit.",
+          "description": "Rotated files kept, newest first. Older ones are deleted at each\nrotation. Unset: no count limit, only the age limit. Under `numbered`,\nthe highest number kept, and `0` deletes the file at each rotation.",
           "type": [
             "integer",
             "null"
@@ -880,6 +1026,11 @@
           "format": "uint32",
           "minimum": 0,
           "default": null
+        },
+        "naming": {
+          "description": "How rotated files are named: `stamped` (default) or `numbered`.",
+          "$ref": "#/$defs/RotatedNaming",
+          "default": "stamped"
         },
         "durable": {
           "description": "Sync the file's data to disk after each write, and its directory after\nthe file is created or rotated, so a write that returned `Ok` survives\npower loss. Costs a disk flush per batch. Off by default.",
@@ -929,6 +1080,21 @@
           "description": "No time rotation. `max_bytes` can still rotate the file.",
           "type": "string",
           "const": "never"
+        }
+      ]
+    },
+    "RotatedNaming": {
+      "description": "How rotated files are named.",
+      "oneOf": [
+        {
+          "description": "`<file>.<local YYYYMMDDTHHMMSS>`, adding `.1`, `.2` within one second.",
+          "type": "string",
+          "const": "stamped"
+        },
+        {
+          "description": "`<file>.1` newest to `<file>.<max_files>` oldest. Each rotation moves\nevery number up one. No compression and no age limit: their keys are\nrefused beside it.",
+          "type": "string",
+          "const": "numbered"
         }
       ]
     },

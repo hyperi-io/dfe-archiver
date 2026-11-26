@@ -52,7 +52,7 @@ The archiver resolves its config file (`--config`, else `DFE_ARCHIVER_CONFIG`, e
 | `DFE_ARCHIVER_KAFKA_SASL_MECHANISM` | `kafka.sasl_mechanism` | none, `PLAIN` when a user and password are set |
 | `DFE_ARCHIVER_KAFKA_SASL_USER` | `kafka.sasl_username` | none |
 | `DFE_ARCHIVER_KAFKA_SASL_PASSWORD` | `kafka.sasl_password` | none |
-| `DFE_ARCHIVER_KAFKA_SSL_CA_LOCATION` | `kafka.ssl_ca_location` | none |
+| `DFE_ARCHIVER_KAFKA_TLS_CA_PATHS` | `kafka.tls.ca_paths`, comma-separated, with `kafka.tls.trust: bundle` | none |
 | `DFE_ARCHIVER_KAFKA_ALLOW_INSECURE_TRANSPORT` | `kafka.allow_insecure_transport` (`true`, `1` or `yes`) | `false` |
 | `DFE_ARCHIVER_DLQ_ENABLED` | `dlq.enabled`. Always off on `grpc` | `true` |
 | `DFE_ARCHIVER_DLQ_MODE` | `dlq.mode`: `fan_out`, `file_only`, `kafka_only` or `cascade`. Any other value warns and takes `cascade` | `cascade` |
