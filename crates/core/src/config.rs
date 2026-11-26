@@ -316,6 +316,13 @@ pub struct KafkaConfig {
     /// is `trust: bundle` with `ca_paths`.
     pub tls: scalo::tls_config::ClientTlsConfig,
 
+    /// Removed: `tls.ca_paths` with `tls.trust: bundle`. Any value fails the
+    /// load, so a config written for the old key can't run with its CA dropped.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_ssl_ca_location")]
+    #[schemars(skip)]
+    pub ssl_ca_location: scalo::tls_config::Removed,
+
     /// Deliberately opt into an unencrypted transport (PLAINTEXT /
     /// `SASL_PLAINTEXT`) in production. Defaults to false: scalo's
     /// Kafka transport REJECTS plaintext in production unless this is set
@@ -347,6 +354,14 @@ pub struct KafkaConfig {
     pub librdkafka_overrides: HashMap<String, String>,
 }
 
+fn removed_ssl_ca_location<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> std::result::Result<scalo::tls_config::Removed, D::Error> {
+    Err(serde::de::Error::custom(
+        "`ssl_ca_location` is removed: set tls.ca_paths with tls.trust: bundle",
+    ))
+}
+
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
@@ -363,6 +378,7 @@ impl Default for KafkaConfig {
             sasl_username: None,
             sasl_password: None,
             tls: scalo::tls_config::ClientTlsConfig::default(),
+            ssl_ca_location: scalo::tls_config::Removed,
             allow_insecure_transport: false,
             batch_size: 10_000,
             max_poll_interval_ms: 300_000,

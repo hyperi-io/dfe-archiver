@@ -86,6 +86,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     };
 
     // Apply flat env overrides (preserves existing env var contract)
+    refuse_removed_env(ENV_PREFIX)?;
     config.apply_flat_env(ENV_PREFIX);
     config.normalize();
 
@@ -118,6 +119,22 @@ fn config_source(config_path: Option<&str>) -> Option<(String, &'static str)> {
         .into_iter()
         .find(|path| Path::new(path).exists())
         .map(|path| (path.to_string(), "default location"))
+}
+
+/// Flat env names the `tls` section replaced, each with its replacement.
+const REMOVED_ENV: [(&str, &str); 1] = [("KAFKA_SSL_CA_LOCATION", "KAFKA_TLS_CA_PATHS")];
+
+/// Refuse a removed flat env name, which `apply_flat_env` would otherwise skip,
+/// so a deployment written for the old name can't run with its CA dropped.
+fn refuse_removed_env(prefix: &str) -> Result<()> {
+    for (old, new) in REMOVED_ENV {
+        if std::env::var_os(format!("{prefix}_{old}")).is_some() {
+            return Err(Error::Config(format!(
+                "{prefix}_{old} is removed: set {prefix}_{new}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Load configuration from YAML file
@@ -347,6 +364,40 @@ mod tests {
         config.kafka.brokers = vec!["localhost:9092".to_string()];
 
         validate_config(&config).expect("default config should be valid");
+    }
+
+    /// Every key and flat env name the `tls` section replaced fails the load,
+    /// naming the one to set, so an old config never runs with its CA dropped.
+    #[test]
+    fn a_removed_tls_key_fails_the_load_naming_its_replacement() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        for (yaml, replacement) in [
+            (
+                "kafka:\n  ssl_ca_location: /ca.pem\n",
+                "tls.ca_paths with tls.trust: bundle",
+            ),
+            (
+                "kafka:\n  ssl_ca_location: null\n",
+                "tls.ca_paths with tls.trust: bundle",
+            ),
+            ("kafka:\n  tls:\n    ca_path: /ca.pem\n", "ca_paths"),
+        ] {
+            std::fs::write(&path, yaml).expect("write config");
+            let error = load_from_file(&path.display().to_string())
+                .expect_err(yaml)
+                .to_string();
+            assert!(error.contains(replacement), "{yaml}: {error}");
+        }
+
+        let name = format!("{ENV_PREFIX}_KAFKA_SSL_CA_LOCATION");
+        let error = temp_env::with_var(&name, Some("/ca.pem"), || refuse_removed_env(ENV_PREFIX))
+            .expect_err(&name)
+            .to_string();
+        assert!(
+            error.contains(&format!("{ENV_PREFIX}_KAFKA_TLS_CA_PATHS")),
+            "{error}"
+        );
     }
 
     /// The file the reloader watches is the one `load_config` read, whichever
