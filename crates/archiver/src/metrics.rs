@@ -126,9 +126,7 @@ pub struct ArchiverMetrics {
     pub consumer: Option<ConsumerMetrics>,
     pub sink: Option<SinkMetrics>,
 
-    // EPS (events per second) rate tracking.
-    // parking_lot::Mutex used for poison-free locking (Instant::elapsed cannot panic,
-    // but belt-and-braces: a future caller that panics under the lock won't poison it).
+    // Events-per-second tracking, under a parking_lot::Mutex, which never poisons.
     eps_counter: AtomicU64,
     eps_last_update: parking_lot::Mutex<Instant>,
 }
@@ -161,7 +159,6 @@ impl ArchiverMetrics {
         let sink = SinkMetrics::new(manager);
 
         // Layer 3: Archiver-specific metrics
-        // Existing metrics (kept for backwards compatibility)
         let _ = manager.counter(
             "messages_received_total",
             "Total messages received from Kafka",
@@ -183,7 +180,6 @@ impl ArchiverMetrics {
         let _ = manager.histogram("batch_size_bytes", "Archive batch size in bytes");
         let _ = manager.histogram("flush_duration_seconds", "Time to flush buffer to storage");
 
-        // New archiver-specific metrics
         let _ = manager.counter(
             "bytes_compressed_total",
             "Total bytes written (post-compression)",
@@ -587,13 +583,6 @@ impl ArchiverMetrics {
             app.set_memory(current_bytes, limit_bytes);
         }
     }
-
-    /// Record a successful config reload
-    pub fn record_config_reload(&self, success: bool) {
-        if let Some(ref app) = self.app {
-            app.record_config_reload(success);
-        }
-    }
 }
 
 /// Register archiver-specific metrics on the runtime's existing manager.
@@ -871,8 +860,6 @@ mod tests {
         m.set_scaling_circuit_open(false);
         m.set_scaling_memory_pressure(0.3);
         m.set_memory_usage(100_000, 1_000_000);
-        m.record_config_reload(true);
-        m.record_config_reload(false);
     }
 
     /// Verify zero-value edge cases don't panic

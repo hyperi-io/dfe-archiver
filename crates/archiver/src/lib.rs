@@ -8,25 +8,10 @@
 
 //! # DFE Archiver
 //!
-//! High-volume Kafka-to-storage archiver designed for PB/s scale data pipelines.
-//!
-//! ## Features
-//!
-//! - **Multiple destinations**: File, `MinIO`, S3, GCS, Azure Blob
-//! - **Compression**: Zstd, LZ4, Snappy, Gzip (configurable)
-//! - **Smart routing**: By topic or JSON field expressions
-//! - **Rolling archives**: By size or time interval
-//! - **At-least-once delivery**: Kafka offset commit once the archive file is complete
-//! - **Memory-capped**: Configurable memory limits with backpressure
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Kafka Consumer → Buffer Manager → Archive Writer → Storage Backend
-//!       ↓                ↓               ↓
-//!   Batch recv      Per-dest       Compressed
-//!   (10K msgs)      buffering      rolling files
-//! ```
+//! Writes a DFE deployment's streams, read from Kafka or a gRPC push, to
+//! compressed rolling files in a local path, `MinIO`, S3, GCS or Azure Blob.
+//! On Kafka an offset is committed once the archive file holding its record is
+//! durable. The pipeline is in [`Archiver`].
 
 mod archiver;
 pub mod config;
@@ -47,9 +32,6 @@ pub use dfe_archiver_core::config::{
     ArchiveConfig, BufferConfig, CompressionConfig, KafkaConfig, RoutingConfig,
 };
 
-/// Library version
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// The archiver's version-check defaults: the releases endpoint the check
 /// targets, with scalo's own defaults for everything else.
 ///
@@ -68,14 +50,12 @@ pub fn version_check_defaults() -> scalo::version_check::VersionCheckConfig {
 
 /// The archiver's weighted KEDA scaling components.
 ///
-/// Single source of truth shared by the `ServiceApp::scaling_components`
-/// override (which registers them on the runtime's unified `ScalingPressure`)
-/// and the `Archiver`'s standalone fallback engine (built only when the
-/// `scaling` feature is compiled out). Both MUST register the same component
-/// set so the two agree. Weights/saturations mirror the legacy archiver model:
-/// `kafka_lag` (records past the consumer's read position, which the commit an
-/// open archive file holds does not inflate), `buffer_depth` (hot-buffer
-/// count), and `memory` (cgroup guard pressure ratio).
+/// Registered on the runtime's `ScalingPressure` by
+/// `ServiceApp::scaling_components`, and on the standalone engine `Archiver`
+/// builds for a caller with no runtime: `kafka_lag` (records past the
+/// consumer's read position, which the commit an open archive file holds does
+/// not inflate), `buffer_depth` (hot-buffer count), and `memory` (cgroup guard
+/// pressure ratio).
 #[must_use]
 pub fn scaling_components() -> Vec<scalo::scaling::ScalingComponent> {
     use scalo::scaling::ScalingComponent;

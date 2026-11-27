@@ -54,14 +54,13 @@ fn init_cascade(config_file: Option<&str>) {
     }
 }
 
-/// Load configuration with cascade: CLI -> ENV -> .env -> file -> defaults
+/// Load configuration with cascade: ENV -> .env -> file -> defaults
 ///
 /// Priority (highest to lowest):
-/// 1. CLI arguments (handled by caller, merged after)
-/// 2. Environment variables (flat env overrides)
-/// 3. `.env` in the working directory, loaded in `main` (never a parent's)
-/// 4. Config file (YAML)
-/// 5. Hard-coded defaults
+/// 1. Environment variables (flat env overrides)
+/// 2. `.env` in the working directory, loaded in `main` (never a parent's)
+/// 3. Config file (YAML), which `config_path` (`--config`) names
+/// 4. Hard-coded defaults
 ///
 /// The app's own sections are read straight from the config file. Sections
 /// scalo owns (`version_check`, `metrics`, `logger`, `self_regulation`,
@@ -92,7 +91,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config> {
 
     validate_config(&config)?;
 
-    // Register all sections in the config registry for /config endpoint
+    // The registry redacts the sensitive fields wherever a section is dumped.
     config.register_in_registry();
 
     Ok(config)

@@ -38,12 +38,10 @@ lz4_flex = { workspace = true }
 snap = { workspace = true }
 flate2 = { workspace = true }
 
-bytes = { workspace = true }
 compact_str = { workspace = true }
 dashmap = { workspace = true }
 jiff = { workspace = true }
 parking_lot = { workspace = true }
-smallvec = { workspace = true }
 indexmap = { workspace = true }
 
 tokio = { workspace = true }
@@ -57,4 +55,3 @@ tokio-test = { workspace = true }
 
 [features]
 default = []
-transport-memory = ["scalo/transport-memory"]

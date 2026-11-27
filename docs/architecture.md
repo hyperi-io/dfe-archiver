@@ -110,11 +110,11 @@ flowchart TB
 
 ## How data flows
 
-1. **Receive** takes up to `kafka.batch_size` records a call, 10,000 by default, from a Kafka consumer group or the scalo Push listener. Nothing after it knows which transport delivered them.
-2. **Route** picks each record's destination: its topic, then the value of each routing field, `_org_id` by default.
-3. **Buffer** holds records in memory per destination and flushes by size, count or age.
-4. **Write** compresses each flush into that destination's open file. A file rolls at 1 GiB compressed or at the roll interval.
-5. **Delivery** syncs a closed local file, or uploads a staged one, and only then releases its records. On `kafka` that release is the offset commit.
+1. Receive takes up to `kafka.batch_size` records a call, 10,000 by default, from a Kafka consumer group or the scalo Push listener. Nothing after it knows which transport delivered them.
+2. Route picks each record's destination: its topic, then the value of each routing field, `_org_id` by default.
+3. Buffer holds records in memory per destination and flushes by size, count or age.
+4. Write compresses each flush into that destination's open file. A file rolls at 1 GiB compressed or at the roll interval.
+5. Delivery syncs a closed local file, or uploads a staged one, and only then releases its records. On `kafka` that release is the offset commit.
 
 A record refused for good, by the store, the codec or the nesting check, goes to the DLQ topic when the DLQ is on.
 
@@ -152,7 +152,7 @@ The image is the same everywhere. What changes is the transport and the destinat
 |---|---|
 | Security | Every path segment is encoded, so a field value never names another directory, and every backend rejects an absolute path or a `..` segment. Store credentials come from each SDK's own chain or from a Secret as environment variables |
 | Reliability | On `kafka` no record is lost while the topic holds it. A kill or store outage costs duplicates or lag. A failed upload keeps its file and offsets and retries with backoff |
-| Operations | `/livez`, `/readyz`, `/metrics` and `/scaling/pressure` on port 9090. A config change or SIGHUP reloads without a restart |
+| Operations | `/livez`, `/readyz`, `/metrics` and `/scaling/pressure` on port 9090. A config change or SIGHUP reloads `kafka.batch_size` and starts an idle archiver, and any other change logs that it needs a restart |
 | Performance | Upload memory stays near 64 MiB whatever the file size. Held offsets cost about 32 bytes each, which is why the roll interval drops to 300 s when they are held |
 
 ## Why it's built this way

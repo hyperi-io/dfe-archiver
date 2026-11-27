@@ -142,8 +142,15 @@ impl Router {
                 max: MAX_PARSE_DEPTH,
             });
         }
-        let json: sonic_rs::Value = sonic_rs::from_slice(&message.payload)
-            .map_err(|e| Error::Routing(format!("invalid JSON: {e}")))?;
+        // sonic-rs's own message quotes the payload around the failure, and this one is logged.
+        let json: sonic_rs::Value = sonic_rs::from_slice(&message.payload).map_err(|e| {
+            Error::Routing(format!(
+                "invalid JSON: {:?} error at line {}, column {}",
+                e.classify(),
+                e.line(),
+                e.column()
+            ))
+        })?;
 
         let fields = self.expression_fields();
         let mut segments = Vec::with_capacity(fields.len() + 1);
@@ -323,9 +330,21 @@ mod tests {
             default_segment: "fallback".to_string(),
         };
         let router = Router::new(config);
-        let msg = make_message("events", "this is not json");
-        let result = router.route(&msg);
-        assert!(result.is_err(), "non-JSON payload should return Err");
+        // The routing error is logged, so it names where the parse failed and none of the payload.
+        for payload in [
+            "this is not json",
+            r#"{"_org_id": "acme", "token": "hunter2" oops}"#,
+        ] {
+            let msg = make_message("events", payload);
+            let error = router
+                .route(&msg)
+                .expect_err("non-JSON payload should return Err")
+                .to_string();
+            assert!(error.contains("line 1, column"), "{error}");
+            for fragment in ["not json", "hunter2", "acme", "oops"] {
+                assert!(!error.contains(fragment), "{error}");
+            }
+        }
     }
 
     #[test]

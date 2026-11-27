@@ -1349,7 +1349,6 @@ dependencies = [
  "aws-sdk-s3",
  "base64 0.23.1",
  "clap",
- "compact_str",
  "criterion",
  "dfe-archiver-core",
  "dfe-archiver-io",
@@ -1365,7 +1364,6 @@ dependencies = [
  "rdkafka",
  "reqwest",
  "scalo",
- "serde",
  "serde_json",
  "sha2",
  "temp-env",
@@ -1387,7 +1385,6 @@ name = "dfe-archiver-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "bytes",
  "compact_str",
  "dashmap",
  "flate2",
@@ -1399,7 +1396,6 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "smallvec",
  "snap",
  "sonic-rs",
  "tempfile",
@@ -4921,9 +4917,6 @@ name = "smallvec"
 version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "snap"

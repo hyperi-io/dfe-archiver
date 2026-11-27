@@ -73,17 +73,9 @@ pub enum Error {
     #[error("compression error: {0}")]
     Compression(String),
 
-    /// Serialization error
-    #[error("serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-
     /// IO error
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Buffer overflow (memory pressure)
-    #[error("buffer overflow: {message}")]
-    BufferOverflow { message: String },
 
     /// Routing error (cannot determine destination)
     #[error("routing error: {0}")]
@@ -93,10 +85,6 @@ pub enum Error {
     /// refused every time. The message is the reason its dead letter carries.
     #[error("payload nesting exceeds the maximum parse depth of {max}")]
     TooDeep { max: usize },
-
-    /// Runtime error
-    #[error("runtime error: {0}")]
-    Runtime(String),
 
     /// Records neither archived nor dead-lettered hold the commit below them,
     /// and only a restart or rebalance reads them again.
@@ -188,63 +176,8 @@ impl Error {
     }
 }
 
-/// Error category for retry/DLQ decisions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCategory {
-    /// Transient error - retry with backoff (network, timeout)
-    Transient,
-    /// Data error - send to DLQ (parse failure, invalid format)
-    Data,
-    /// Fatal error - fail immediately (auth, config)
-    Fatal,
-}
-
-impl Error {
-    /// Categorise error for retry/DLQ decisions
-    #[must_use]
-    pub fn category(&self) -> ErrorCategory {
-        match self {
-            // Transient - retry
-            Self::Transport { .. }
-            | Self::Storage { .. }
-            | Self::Runtime(_)
-            | Self::Withheld { .. }
-            | Self::AlreadyExists { .. }
-            | Self::BufferOverflow { .. } => ErrorCategory::Transient,
-
-            // Data - DLQ
-            Self::Serialization(_)
-            | Self::Routing(_)
-            | Self::TooDeep { .. }
-            | Self::Compression(_)
-            | Self::Refused { .. }
-            | Self::Unreadable { .. } => ErrorCategory::Data,
-
-            // Fatal - fail
-            Self::Config(_) | Self::Shutdown => ErrorCategory::Fatal,
-
-            // Context-dependent
-            Self::Io(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::PermissionDenied
-                {
-                    ErrorCategory::Fatal
-                } else {
-                    ErrorCategory::Transient
-                }
-            }
-        }
-    }
-
-    /// Check if error is retryable
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        self.category() == ErrorCategory::Transient
-    }
-}
-
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -262,11 +195,6 @@ mod tests {
         let e = Error::Shutdown;
         assert_eq!(format!("{e}"), "shutdown requested");
 
-        let e = Error::BufferOverflow {
-            message: "exceeded 64MB".to_string(),
-        };
-        assert_eq!(format!("{e}"), "buffer overflow: exceeded 64MB");
-
         let e = Error::Withheld { records: 20 };
         assert_eq!(
             format!("{e}"),
@@ -280,46 +208,10 @@ mod tests {
         );
     }
 
+    /// Only a refusal or an encoding failure is the same on every retry, so
+    /// only those stop a write retrying.
     #[test]
-    fn test_error_categories() {
-        assert_eq!(
-            Error::transport("timeout").category(),
-            ErrorCategory::Transient
-        );
-        assert_eq!(
-            Error::storage("network").category(),
-            ErrorCategory::Transient
-        );
-        assert_eq!(
-            Error::Runtime("panic".into()).category(),
-            ErrorCategory::Transient
-        );
-        assert_eq!(
-            Error::Withheld { records: 1 }.category(),
-            ErrorCategory::Transient
-        );
-        assert_eq!(
-            Error::BufferOverflow {
-                message: "oom".into()
-            }
-            .category(),
-            ErrorCategory::Transient
-        );
-
-        assert_eq!(
-            Error::Routing("no field".into()).category(),
-            ErrorCategory::Data
-        );
-        assert_eq!(Error::TooDeep { max: 64 }.category(), ErrorCategory::Data);
-        assert!(!Error::TooDeep { max: 64 }.is_retryable());
-        assert_eq!(
-            Error::Compression("corrupt".into()).category(),
-            ErrorCategory::Data
-        );
-        assert_eq!(
-            Error::refused("key too long").category(),
-            ErrorCategory::Data
-        );
+    fn only_a_refusal_or_an_encoding_failure_is_permanent() {
         assert!(Error::refused("key too long").is_refused());
         assert!(!Error::storage("503").is_refused());
 
@@ -332,40 +224,11 @@ mod tests {
             Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
             Error::Io(std::io::Error::from(std::io::ErrorKind::NotADirectory)),
             Error::storage("staging failed"),
+            Error::transport("timeout"),
+            Error::Withheld { records: 1 },
         ] {
             assert!(!can_clear.is_permanent(), "{can_clear}");
         }
-
-        assert_eq!(
-            Error::Config("missing".into()).category(),
-            ErrorCategory::Fatal
-        );
-        assert_eq!(Error::Shutdown.category(), ErrorCategory::Fatal);
-    }
-
-    #[test]
-    fn test_io_error_categories() {
-        let e = Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
-        assert_eq!(e.category(), ErrorCategory::Fatal);
-
-        let e = Error::Io(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "denied",
-        ));
-        assert_eq!(e.category(), ErrorCategory::Fatal);
-
-        let e = Error::Io(std::io::Error::new(
-            std::io::ErrorKind::ConnectionReset,
-            "reset",
-        ));
-        assert_eq!(e.category(), ErrorCategory::Transient);
-    }
-
-    #[test]
-    fn test_is_retryable() {
-        assert!(Error::transport("timeout").is_retryable());
-        assert!(!Error::Config("bad".into()).is_retryable());
-        assert!(!Error::Routing("no dest".into()).is_retryable());
     }
 
     #[test]
@@ -373,13 +236,6 @@ mod tests {
         let io_err = std::io::Error::other("disk full");
         let err: Error = io_err.into();
         assert!(matches!(err, Error::Io(_)));
-    }
-
-    #[test]
-    fn test_from_serde_json_error() {
-        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
-        let err: Error = json_err.into();
-        assert!(matches!(err, Error::Serialization(_)));
     }
 
     /// Every log line formats the error with `%e`, so the cause has to be in

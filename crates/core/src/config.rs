@@ -457,7 +457,7 @@ impl ArchiveConfig {
         } else if self.destination.starts_with("az://") || self.destination.starts_with("azure://")
         {
             "azure"
-        } else if self.minio.is_some() {
+        } else if self.destination.starts_with("minio://") {
             "minio"
         } else {
             "file"
@@ -768,9 +768,8 @@ impl Config {
         }
     }
 
-    /// Where archives are written, how they are rolled and compressed, where
-    /// they are staged, plus the metrics address and the S3 credentials
-    /// the same operator supplies.
+    /// Where archives are written, how they are flushed and compressed, where
+    /// they are staged, and the S3 credentials the same operator supplies.
     fn apply_archive_env(&mut self, prefix: &str) {
         if let Some(v) = flat_env::flat_env_string(prefix, "DESTINATION") {
             self.archive.destination = v;
@@ -851,5 +850,40 @@ impl Config {
         registry::register("buffer", &self.buffer);
         registry::register("routing", &self.routing);
         registry::register("compression", &self.compression);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The backend label follows the destination's scheme, the way the
+    /// backend itself is chosen, whatever store sections the file also holds.
+    #[test]
+    fn the_backend_label_follows_the_destination_scheme() {
+        let minio = MinioConfig {
+            endpoint: "minio:9000".to_string(),
+            access_key: "key".to_string(),
+            secret_key: SensitiveString::from("secret"),
+            bucket: "archive".to_string(),
+            use_ssl: false,
+        };
+        for (destination, label) in [
+            ("s3://bucket/prefix", "s3"),
+            ("gs://bucket/prefix", "gcs"),
+            ("gcs://bucket/prefix", "gcs"),
+            ("az://container/prefix", "azure"),
+            ("azure://container/prefix", "azure"),
+            ("minio://bucket/prefix", "minio"),
+            ("file:///var/data/archive", "file"),
+            ("/var/data/archive", "file"),
+        ] {
+            let config = ArchiveConfig {
+                destination: destination.to_string(),
+                minio: Some(minio.clone()),
+                ..ArchiveConfig::default()
+            };
+            assert_eq!(config.backend_name(), label, "{destination}");
+        }
     }
 }
