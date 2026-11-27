@@ -22,10 +22,7 @@ use scalo::deployment::{
 /// which assembles the thin chart from it.
 #[must_use]
 pub fn deployment_contract() -> DeploymentContract {
-    // Resolve the base image via the scalo cascade helper so the org-wide
-    // `deployment.base_image` override (config or env) wins before falling
-    // back to scalo's DEFAULT_BASE_IMAGE (debian:trixie-slim). NEVER hardcode
-    // a distro -- the old "ubuntu:24.04" pin predated the trixie cutover.
+    // From scalo's cascade, so `deployment.base_image` (config or env) wins over scalo's default.
     let base_image = base_image_from_cascade();
     DeploymentContract {
         app_name: "dfe-archiver".into(),

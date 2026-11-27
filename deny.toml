@@ -7,7 +7,7 @@
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable, and no patched release exists. dfe-archiver and dfe-archiver-core use it directly, and scalo, cel, file-rotate, object_store and serde_with depend on it too. Drop when the lock no longer resolves chrono." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable, and no patched release exists. It arrives through object_store and through cel under scalo. Drop when the lock no longer resolves chrono." },
     { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, not vulnerable, and no patched release exists. It arrives only through object_store. Drop when the lock no longer resolves humantime." },
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained, not vulnerable. It arrives only through the testcontainers dev-dependency the integration tests use, and no release binary links it. testcontainers 0.28.0 still depends on it. Drop when testcontainers moves off it." },
 ]

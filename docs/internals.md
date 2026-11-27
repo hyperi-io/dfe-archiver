@@ -146,7 +146,7 @@ A store's block (`archive.s3`, `archive.minio`, `archive.gcs`, `archive.azure`) 
 
 CI tests GCS listing and deletion on an emulator but no upload, which needs a live bucket ([testing.md](testing.md)).
 
-An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client rejects every request. Keys from a Secret go in as environment variables ([configuration.md](configuration.md#environment-variables)).
+An S3 endpoint over plain `http://` needs `archive.s3.allow_http: true`, and without it the client rejects every request. A client that permits plain HTTP warns at startup, and one told to skip certificate checks (`AWS_ALLOW_INVALID_CERTIFICATES` and its Google and Azure twins) does not start in production. Keys from a Secret go in as environment variables ([configuration.md](configuration.md#environment-variables)).
 
 ## Scaling
 

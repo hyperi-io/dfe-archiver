@@ -148,8 +148,8 @@ impl PartitionOffsets {
 /// Offsets grouped by partition, eight bytes each.
 ///
 /// An open archive file holds the offset of every record in it until the file
-/// completes, which at the default roll interval is an hour of intake, so the
-/// topic and partition are stored once per partition rather than per record.
+/// completes, up to a roll interval of intake, so the topic and partition are
+/// stored once per partition rather than per record.
 #[derive(Debug, Default)]
 pub struct OffsetSet {
     partitions: Vec<PartitionOffsets>,

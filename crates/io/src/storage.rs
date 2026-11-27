@@ -11,11 +11,11 @@ use dfe_archiver_core::config::{ArchiveConfig, AzureConfig, GcsConfig, MinioConf
 use dfe_archiver_core::storage::{Closed, PendingUpload, RecoveredFile, StorageBackend, confine};
 use dfe_archiver_core::{Error, Result};
 use futures::{StreamExt, TryStreamExt};
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
 use object_store::path::Path as ObjectPath;
-use object_store::{MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ClientConfigKey, MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload};
 use scalo::config::sensitive::SensitiveString;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -406,20 +406,35 @@ fn store_error(backend: &str, what: &str, path: &str, e: object_store::Error) ->
     }
 }
 
+/// The store error codes that refuse the object itself.
+const PERMANENT_CODES: [&str; 3] = ["KeyTooLongError", "EntityTooLarge", "InvalidObjectName"];
+
+/// How `object_store` opens the text of a response the store sent.
+const STORE_RESPONSE_PREFIX: &str = "Server returned ";
+
 /// Whether the store rejects this object whatever is retried.
 ///
 /// Deliberately narrow: an unrecognised refusal is retried, which holds the
 /// commit rather than dropping records. `object_store` does not export its
-/// request error, so the store's own error codes are recognised by their text.
+/// request error, so the code is read from the `<Code>` element of the
+/// store's own response, never from the rest of the chain, whose request URI
+/// holds key segments taken from records.
 fn refused_for_good(e: &object_store::Error) -> bool {
-    const PERMANENT_CODES: [&str; 3] = ["KeyTooLongError", "EntityTooLarge", "InvalidObjectName"];
-    if matches!(e, object_store::Error::InvalidPath { .. }) {
-        return true;
+    match e {
+        object_store::Error::InvalidPath { .. } => return true,
+        object_store::Error::NotFound { .. }
+        | object_store::Error::PermissionDenied { .. }
+        | object_store::Error::Unauthenticated { .. } => return false,
+        _ => {}
     }
     let mut cause: Option<&dyn std::error::Error> = Some(e);
     while let Some(err) = cause {
         let text = err.to_string();
-        if PERMANENT_CODES.iter().any(|code| text.contains(code)) {
+        if text.starts_with(STORE_RESPONSE_PREFIX)
+            && PERMANENT_CODES
+                .iter()
+                .any(|code| text.contains(&format!("<Code>{code}</Code>")))
+        {
             return true;
         }
         cause = err.source();
@@ -676,8 +691,15 @@ impl ObjectStoreBackend {
         chunk_size: usize,
         staging: &Staging,
     ) -> Result<Self> {
-        // `allow_http` defaults to false (HTTPS required). Only enable for local/dev endpoints.
-        let store = s3_builder(config)
+        let builder = s3_builder(config);
+        let client = |key| builder.get_config_value(&AmazonS3ConfigKey::Client(key));
+        guard_transport_security(
+            "s3",
+            setting_on(client(ClientConfigKey::AllowInvalidCertificates)),
+            setting_on(client(ClientConfigKey::AllowHttp))
+                .then_some("s3.allow_http or AWS_ALLOW_HTTP"),
+        )?;
+        let store = builder
             .build()
             .map_err(|e| Error::storage_with("failed to create S3 client", e))?;
 
@@ -710,6 +732,11 @@ impl ObjectStoreBackend {
             format!("{scheme}://{}", config.endpoint)
         };
 
+        guard_transport_security(
+            "minio",
+            false,
+            (!config.use_ssl).then_some("minio.use_ssl: false"),
+        )?;
         let builder = AmazonS3Builder::new()
             .with_bucket_name(&config.bucket)
             .with_endpoint(&endpoint)
@@ -755,7 +782,14 @@ impl ObjectStoreBackend {
         chunk_size: usize,
         staging: &Staging,
     ) -> Result<Self> {
-        let store = gcs_builder(config)
+        let builder = gcs_builder(config);
+        let client = |key| builder.get_config_value(&GoogleConfigKey::Client(key));
+        guard_transport_security(
+            "gcs",
+            setting_on(client(ClientConfigKey::AllowInvalidCertificates)),
+            setting_on(client(ClientConfigKey::AllowHttp)).then_some("GOOGLE_ALLOW_HTTP"),
+        )?;
+        let store = builder
             .build()
             .map_err(|e| Error::storage_with("failed to create GCS client", e))?;
 
@@ -782,6 +816,22 @@ impl ObjectStoreBackend {
         staging: &Staging,
     ) -> Result<Self> {
         let builder = azure_builder(config)?;
+        let client = |key| builder.get_config_value(&AzureConfigKey::Client(key));
+        let plaintext =
+            if named_opt(config.endpoint.as_ref()).is_some_and(|e| e.starts_with("http://")) {
+                Some("azure.endpoint")
+            } else if config.use_emulator {
+                Some("azure.use_emulator")
+            } else if config.endpoint.is_none() && setting_on(client(ClientConfigKey::AllowHttp)) {
+                Some("AZURE_ALLOW_HTTP")
+            } else {
+                None
+            };
+        guard_transport_security(
+            "azure",
+            setting_on(client(ClientConfigKey::AllowInvalidCertificates)),
+            plaintext,
+        )?;
 
         let store = builder
             .build()
@@ -821,6 +871,49 @@ impl ObjectStoreBackend {
             ObjectPath::from(format!("{}/{}", self.prefix, path))
         }
     }
+}
+
+/// Whether an `object_store` boolean setting is on, read the way the client reads it.
+fn setting_on(value: Option<String>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes" | "y"
+        )
+    })
+}
+
+/// Refuse a store client that skips certificate checks in production, as
+/// scalo refuses its own unchecked TLS there, and warn at startup outside it.
+/// A client that permits plain HTTP, named by `plaintext`, is warned about.
+///
+/// The SDKs read `*_ALLOW_INVALID_CERTIFICATES` and `*_ALLOW_HTTP` from the
+/// environment, so neither shows in the config file.
+fn guard_transport_security(
+    backend: &str,
+    skips_certificates: bool,
+    plaintext: Option<&str>,
+) -> Result<()> {
+    if skips_certificates {
+        if scalo::env::is_production() {
+            return Err(Error::Config(format!(
+                "{backend}: allow_invalid_certificates turns the store's certificate check off, \
+                 which is not permitted in production"
+            )));
+        }
+        warn!(
+            backend,
+            "allow_invalid_certificates is set, so the store's certificate is not checked"
+        );
+    }
+    if let Some(setting) = plaintext {
+        warn!(
+            backend,
+            setting,
+            "The store client permits plain HTTP, so archive data and credentials can cross the network unencrypted"
+        );
+    }
+    Ok(())
 }
 
 /// `value` when it names something, `None` when it is empty or blank.
@@ -2602,13 +2695,60 @@ mod tests {
             }
         }
         impl std::error::Error for Response {}
+        /// The request's own text, naming its URI, over the store's response.
+        #[derive(Debug)]
+        struct Request {
+            uri: &'static str,
+            response: Response,
+        }
+        impl std::fmt::Display for Request {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "Error performing PUT {} in 1s - {}",
+                    self.uri, self.response
+                )
+            }
+        }
+        impl std::error::Error for Request {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.response)
+            }
+        }
         let generic = |body: &'static str| object_store::Error::Generic {
             store: "S3",
             source: Box::new(Response(body)),
         };
+        let requested = |uri: &'static str, body: &'static str| object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(Request {
+                uri,
+                response: Response(body),
+            }),
+        };
 
         assert!(refused_for_good(&generic(
             "Server returned non-2xx status code: 400 Bad Request: <Code>KeyTooLongError</Code>"
+        )));
+        assert!(refused_for_good(&requested(
+            "https://s3/archive/events/x.jsonl",
+            "Server returned non-2xx status code: 400 Bad Request: <Code>EntityTooLarge</Code>"
+        )));
+        // Key segments come from records, so a code in the URI or the key is not the store's answer.
+        for (uri, body) in [
+            (
+                "https://s3/archive/KeyTooLongError/x.jsonl",
+                "Server returned non-2xx status code: 503 Service Unavailable: ",
+            ),
+            (
+                "https://s3/archive/EntityTooLarge/x.jsonl",
+                "Server returned non-2xx status code: 503 Service Unavailable: <Key>archive/EntityTooLarge/x.jsonl</Key>",
+            ),
+        ] {
+            assert!(!refused_for_good(&requested(uri, body)), "{uri}");
+        }
+        assert!(!refused_for_good(&generic(
+            "Error performing PUT https://s3/archive/InvalidObjectName/x.jsonl in 30s - timed out"
         )));
         assert!(refused_for_good(&object_store::Error::InvalidPath {
             source: object_store::path::Error::EmptySegment {
@@ -2621,6 +2761,12 @@ mod tests {
         assert!(!refused_for_good(&object_store::Error::NotFound {
             path: "bucket".to_string(),
             source: Box::new(Response("NoSuchBucket")),
+        }));
+        assert!(!refused_for_good(&object_store::Error::NotFound {
+            path: "archive/KeyTooLongError/x.jsonl".to_string(),
+            source: Box::new(Response(
+                "Server returned non-2xx status code: 404 Not Found: <Code>KeyTooLongError</Code>"
+            )),
         }));
         assert!(!refused_for_good(&object_store::Error::PermissionDenied {
             path: "key".to_string(),
@@ -2753,6 +2899,43 @@ mod tests {
                 "gcs",
                 "gcs:// must not be silently downgraded to a local directory"
             ),
+        }
+    }
+
+    /// An SDK told by the environment to skip certificate checks is refused in
+    /// production and only warned about elsewhere.
+    #[test]
+    fn an_unchecked_store_certificate_is_refused_in_production() {
+        let (_dir, staging) = staging();
+        let s3 = S3Config {
+            bucket: "archive".to_string(),
+            region: Some("us-east-1".to_string()),
+            ..S3Config::default()
+        };
+        for (app_env, refused) in [(Some("production"), true), (None, false)] {
+            let built = temp_env::with_vars(
+                [
+                    ("APP_ENV", app_env),
+                    ("ENVIRONMENT", None),
+                    ("ENV", None),
+                    ("AWS_ALLOW_INVALID_CERTIFICATES", Some("true")),
+                ],
+                || {
+                    ObjectStoreBackend::new_s3(
+                        &s3,
+                        String::new(),
+                        DEFAULT_MULTIPART_CHUNK_SIZE,
+                        &staging,
+                    )
+                },
+            );
+            match built {
+                Ok(_) => assert!(!refused, "APP_ENV={app_env:?}: the client was built"),
+                Err(e) => {
+                    assert!(refused, "APP_ENV={app_env:?}: {e}");
+                    assert!(e.to_string().contains("allow_invalid_certificates"), "{e}");
+                }
+            }
         }
     }
 

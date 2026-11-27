@@ -979,6 +979,30 @@ async fn a_write_still_failing_at_shutdown_on_the_direct_transport_is_counted_dr
     );
 }
 
+/// A loop that ends on its own leaves no shutdown signal, so the drain has to
+/// give up on a write that keeps failing by itself, or the process never exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_with_no_shutdown_signal_still_gives_up_on_a_failing_write() {
+    init_logs();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let config = direct_to_file(dir.path());
+    let (manager, metrics) = metrics();
+
+    let archiver = archiver(&config, &metrics).await;
+    block_archive(dir.path());
+    push_all(&config, 0..5).await;
+
+    tokio::time::timeout(Duration::from_secs(45), archiver.drain())
+        .await
+        .expect("the drain gave up on the failing write");
+    assert_eq!(
+        dropped(&manager, "unreplayable"),
+        5,
+        "every record still failing at the drain is counted:\n{}",
+        manager.render()
+    );
+}
+
 /// Push `ids` with no routing key, as dfe-receiver does, each carrying the
 /// `_source` and `_org_id` the receiver writes into the record.
 async fn push_keyless(config: &Config, ids: std::ops::Range<u64>) {

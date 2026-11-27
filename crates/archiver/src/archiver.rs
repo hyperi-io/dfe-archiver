@@ -524,9 +524,9 @@ struct WriteRetry {
 
 /// Main archiver pipeline
 pub struct Archiver {
-    /// Startup config snapshot (for restart-required fields: transport, archive, routing, etc.)
+    /// Startup config snapshot, which every section but `kafka.batch_size` is read from.
     startup_config: Config,
-    /// Shared config for hot-reloadable fields (buffer, memory, scaling tunables)
+    /// The reloaded config, read for `kafka.batch_size` on each receive.
     shared_config: SharedConfig<Config>,
     /// The inbound transport, bus or direct. Its methods take `&self` and the
     /// scalo transports are `Send+Sync` with internal locking on the recv hot
@@ -569,8 +569,8 @@ pub struct Archiver {
     /// `ServiceApp::scaling_components` and the archiver's loops drive their
     /// values directly (`kafka_lag` from the consumer's position lag,
     /// `buffer_depth` from hot-buffer count, `memory` from the cgroup guard)
-    /// plus the circuit gate. Shared from the
-    /// runtime when `scaling` is enabled, a standalone fallback otherwise.
+    /// plus the circuit gate. The runtime's engine, or a standalone one for a
+    /// caller with no runtime.
     scaling: Arc<ScalingPressure>,
     /// Sink circuit latch driving `ScalingPressure::set_circuit_open`: opened
     /// by a failed upload, or for a local destination by a write cycle that
@@ -977,9 +977,8 @@ fn buffer_config(
 impl Archiver {
     /// Create new archiver from shared configuration.
     ///
-    /// Takes a snapshot of the config for startup-bound fields (transport,
-    /// archive, routing, compression). Hot-reloadable fields (buffer thresholds,
-    /// memory limits, scaling tunables) are read from `shared_config` each iteration.
+    /// Takes a snapshot of the config, which every section is read from but
+    /// `kafka.batch_size`, read from `shared_config` on each receive.
     ///
     /// `metrics` must be the pre-initialised `ArchiverMetrics` from `init_metrics()`,
     /// which shares the same `MetricsManager` as the HTTP server.
@@ -993,9 +992,9 @@ impl Archiver {
     ///
     /// `scaling` is the runtime's unified `ScalingPressure` engine, shared so
     /// the archiver's loops drive the value the runtime writes into the
-    /// `scaling_pressure` gauge KEDA scales on. `None` when the runtime's
-    /// `scaling` feature is off, and then a standalone engine (registering the
-    /// same components) is built as a fallback.
+    /// `scaling_pressure` gauge KEDA scales on. `None` from a caller with no
+    /// runtime, such as a test, builds a standalone engine with the same
+    /// components.
     ///
     /// # Errors
     ///
@@ -1023,12 +1022,7 @@ impl Archiver {
         let buffer = hot_buffers(&config, memory_guard.limit_bytes())?;
         let slots = upload_slots(&config);
 
-        // The runtime's unified ScalingPressure, so the archiver's loops drive
-        // the engine that emits the KEDA gauge. Its thresholds come from the
-        // `scaling` cascade section (`DFE_ARCHIVER_SCALING__*`), not from this
-        // file's config. `None` only when the `scaling` feature is compiled
-        // out, where a standalone engine keeps the components registered.
-        // `run_app` has already refused a `scaling` section that does not parse.
+        // Thresholds come from the `scaling` cascade section (`DFE_ARCHIVER_SCALING__*`).
         let scaling = scaling.unwrap_or_else(|| {
             Arc::new(ScalingPressure::new(
                 scalo::scaling::ScalingPressureConfig::from_cascade().unwrap_or_default(),
@@ -1172,21 +1166,14 @@ impl Archiver {
     pub async fn run(&self) -> Result<()> {
         info!("Starting archiver main loop");
 
-        // Independent flush timer -- ensures aged batches flush even when no data is flowing.
-        // Without this, flush_aged() only runs inside process_messages() which requires
-        // new Kafka data to arrive (fixes #14).
+        // Aged batches flush on this timer, because process_messages runs only when data arrives.
         let flush_age_secs = self.shared_config.with(|c| c.buffer.flush_age_secs);
         let mut flush_interval = tokio::time::interval(Duration::from_secs(flush_age_secs.max(1)));
         // Consume the immediate first tick so we don't flush at startup
         flush_interval.tick().await;
 
-        // Memory backpressure is handled by the self-regulation governor: the
-        // inbound pause-partitions gate (attached to the Kafka receiver) pauses
-        // the consumer's ASSIGNED partitions under pressure -- the member stays
-        // in the group (no rebalance), consumer lag rises, KEDA scales up. The
-        // gate is evaluated automatically inside `recv`, so the old hand-rolled
-        // Pattern-B pause loop here is gone. We never gate the outbound archive
-        // drain -- gating the sink would deadlock the pipeline.
+        // The governor's gate inside `recv` pauses intake under memory pressure.
+        // The archive drain is never gated, because gating the sink would deadlock the pipeline.
         loop {
             let withheld = self.withheld.load(Ordering::Relaxed);
             if withheld > 0 {
@@ -1205,8 +1192,6 @@ impl Archiver {
                     return Ok(());
                 }
 
-                // Independent flush timer: flush aged batches even when no data is flowing.
-                // Without this, aged data sits in memory until new Kafka data arrives (fixes #14).
                 _ = flush_interval.tick() => {
                     // Refresh the per-pod Kafka inbound scaling signal even when no
                     // data is flowing -- an idle-but-lagging pod (e.g. paused under
@@ -2109,8 +2094,13 @@ impl Archiver {
     /// answered is received and written. On Kafka the consumer stops fetching
     /// and its commit still lands. Uploads get `DRAIN_UPLOAD_LIMIT`: a file
     /// still uploading then keeps its records unreleased, to be read again.
+    ///
+    /// The drain cancels the loop's token itself, so after a loop that ended
+    /// on its own a write that keeps failing still gives up after
+    /// `DRAIN_WRITE_RETRY_LIMIT` and the process can exit.
     #[instrument(skip(self))]
     pub async fn drain(&self) {
+        self.cancel.cancel();
         if let Err(e) = self.transport.close().await {
             warn!(error = %e, "Closing the inbound transport failed; draining what it holds");
         }
@@ -2467,11 +2457,6 @@ impl Archiver {
     /// Get metrics handle
     pub fn metrics(&self) -> Arc<ArchiverMetrics> {
         Arc::clone(&self.metrics)
-    }
-
-    /// Check if archiver is healthy (transport up and not under memory pressure)
-    pub fn is_healthy(&self) -> bool {
-        self.transport.is_healthy() && !self.memory_guard.under_pressure()
     }
 
     /// Sync transport health check (for `HealthRegistry` callback).

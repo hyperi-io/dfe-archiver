@@ -17,6 +17,3 @@ pub use storage::{
     BackendFactory, FileBackend, ObjectStoreBackend, Quarantined, Recovery, Staging, create_backend,
 };
 pub use transport::{ReceivedBatch, SourceTransport};
-
-#[cfg(any(test, feature = "transport-memory"))]
-pub use kafka::MemoryTransportAdapter;

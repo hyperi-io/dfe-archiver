@@ -6,9 +6,7 @@
 // License:      BUSL-1.1
 // Copyright:    (c) 2026 HYPERI PTY LIMITED
 
-// Allocator selection: jemalloc (only allocator at all hyperi-ci channels per
-// 2026-04-17 DFE policy). hyperi-ci enables `--features jemalloc` per channel;
-// local `cargo build` uses the system allocator.
+// hyperi-ci builds every release with `--features jemalloc`, and a plain `cargo build` uses the system allocator.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -169,12 +167,12 @@ impl ServiceApp for App {
         );
         let _reloader_handle = reloader.start();
 
-        // Spawn config change security event watcher. A section bound at
-        // construction is reported as needing a restart, never as a reload.
+        // Each change is compared with the startup config, which is what the
+        // running archiver holds for every section but `kafka.batch_size`.
         let security_config = shared_config.clone();
         tokio::spawn(async move {
             let mut rx = security_config.subscribe();
-            let mut applied = security_config.get();
+            let applied = security_config.get();
             while rx.changed().await.is_ok() {
                 let version = *rx.borrow();
                 let current = security_config.get();
@@ -200,21 +198,12 @@ impl ServiceApp for App {
                         ),
                     );
                 }
-                applied = current;
             }
         });
 
-        // Create and start archiver. Share the runtime's memory guard (the one
-        // feeding the self-regulation governor) and pass the governor so the
-        // Kafka receiver gets the inbound pause-partitions brake. When
-        // self_regulation is disabled, `runtime.governor` is None and the
-        // receiver is built without a gate (byte-identical to pre-governor).
-        // Share the runtime's unified ScalingPressure engine, built from the
-        // components `scaling_components()` registers below; the runtime writes
-        // it into the `scaling_pressure` gauge KEDA reads. The archiver's loops
-        // drive its values (kafka_lag, buffer_depth, memory, circuit) directly.
-        // When the `scaling` feature is off the runtime hands back None; fall
-        // back to a standalone engine.
+        // The runtime's memory guard, governor and scaling engine are the ones
+        // its probes and the KEDA gauge read. `runtime.governor` is None with
+        // self-regulation off, and the receiver then has no intake gate.
         let archiver = Arc::new(
             Archiver::new(
                 shared_config,
@@ -293,12 +282,6 @@ impl ServiceApp for App {
     }
 
     fn scaling_components(&self, _config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
-        // Register the archiver's weighted KEDA components on the runtime's
-        // unified ScalingPressure. The
-        // pipeline drives these values (kafka_lag from the consumer's position
-        // lag, buffer_depth from hot-buffer count, memory from the cgroup guard)
-        // plus the object-store circuit gate, so KEDA scales on the single
-        // composite.
         dfe_archiver::scaling_components()
     }
 

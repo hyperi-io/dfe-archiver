@@ -18,8 +18,8 @@ use std::time::Instant;
 use tracing::{debug, info, trace};
 
 /// Default spool directory, absolute because a relative one resolves under the
-/// root-owned WORKDIR. The image does not create it, so a deployment mounts a
-/// writable volume here or runs as a user that can create it.
+/// container WORKDIR. The image creates it owned by the app user, and the chart
+/// mounts the spool volume here.
 pub const DEFAULT_SPOOL_DIR: &str = "/var/spool/dfe/archiver";
 
 /// Configuration for tiered buffer manager

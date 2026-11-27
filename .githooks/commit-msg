@@ -7,6 +7,6 @@ if command -v hyperi-ci >/dev/null 2>&1; then
 elif command -v uvx >/dev/null 2>&1; then
     uvx hyperi-ci check-commit "$1" 2>/dev/null || true
 else
-    echo "Warning: hyperi-ci not found — skipping commit validation" >&2
+    echo "Warning: hyperi-ci not found -- skipping commit validation" >&2
     exit 0
 fi

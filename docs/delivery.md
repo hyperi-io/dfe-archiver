@@ -125,7 +125,7 @@ As uploads fail, held records and staged bytes grow, so both are pressure source
 
 ## Refused for good goes to the DLQ
 
-A refusal of the object itself is the one permanent failure. That is an invalid path, a key past 1024 bytes, checked before any record is staged, a name the local filesystem cannot hold, or an `EntityTooLarge`, `KeyTooLongError` or `InvalidObjectName` answer. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag where dropping costs records.
+A refusal of the object itself is the one permanent failure. That is an invalid path, a key past 1024 bytes, checked before any record is staged, a name the local filesystem cannot hold, or an `EntityTooLarge`, `KeyTooLongError` or `InvalidObjectName` code in the `<Code>` element of the store's response, never in the request URI, whose key segments come from records. Anything else, credentials and a missing bucket included, is retried, because retrying costs lag where dropping costs records.
 
 A file the store rejects is read back a block at a time, each block one flush, decompressed separately, and its records go to the DLQ one entry per line with the routed destination. A payload that holds a newline spans lines, so when a file holds more lines than records each block goes whole, as one entry saying so, and no record is split across entries. The file's offsets are released `Rejected` once the DLQ confirms them.
 

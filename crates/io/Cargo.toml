@@ -58,4 +58,3 @@ snap = { workspace = true }
 
 [features]
 default = []
-transport-memory = ["dfe-archiver-core/transport-memory"]

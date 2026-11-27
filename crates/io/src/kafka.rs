@@ -35,9 +35,8 @@ impl TransportAdapter {
     /// to the Kafka receiver: under memory pressure the consumer's ASSIGNED
     /// partitions are paused (the member stays in the group -- no rebalance) and
     /// resumed once pressure clears. This is the pause-partitions gate for a
-    /// Kafka-source stage; nothing on the outbound archive drain is gated. When
-    /// `governor` is `None` (self-regulation disabled), construction is
-    /// byte-identical to before.
+    /// Kafka-source stage, and nothing on the outbound archive drain is gated.
+    /// With `governor` `None` (self-regulation disabled) no gate is attached.
     ///
     /// With `acknowledgements.enabled` the transport is armed before its first
     /// receive: it then tracks every offset it hands out and commits each
@@ -277,10 +276,8 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
             preferred_suffix: "_land".to_string(),
             suppressed_suffix: "_load".to_string(),
         }],
-        // Archiver is consume-only (Kafka -> storage). scalo's KafkaConfig is
-        // profile-based (no `role` field): a non-empty `group` + subscribed
-        // `topics` make this a consumer; no produce calls means no idle producer
-        // (#44).
+        // A non-empty `group` and subscribed `topics` make this a consumer, and
+        // nothing produces on it, so no idle producer is built.
         brokers: config.brokers.clone(),
         group: config.group_id.clone(),
         topics: config.topics.clone(),
@@ -296,75 +293,6 @@ pub fn convert_config(config: &KafkaConfig) -> scalo::transport::KafkaConfig {
         enable_auto_commit: false,
         librdkafka_overrides,
         ..Default::default()
-    }
-}
-
-#[cfg(any(test, feature = "transport-memory"))]
-use std::sync::Arc;
-
-/// Memory transport adapter for testing (no external services required)
-#[cfg(any(test, feature = "transport-memory"))]
-pub struct MemoryTransportAdapter {
-    messages: std::sync::Mutex<Vec<KafkaMessage>>,
-    next_offset: std::sync::atomic::AtomicI64,
-}
-
-#[cfg(any(test, feature = "transport-memory"))]
-#[allow(clippy::expect_used)]
-impl MemoryTransportAdapter {
-    /// Create new memory transport
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            messages: std::sync::Mutex::new(Vec::new()),
-            next_offset: std::sync::atomic::AtomicI64::new(0),
-        }
-    }
-
-    /// Inject messages for testing
-    ///
-    /// # Panics
-    ///
-    /// Panics when the message mutex is poisoned.
-    pub fn inject(&self, payloads: Vec<Vec<u8>>, topic: &str) {
-        let mut guard = self.messages.lock().expect("lock poisoned");
-        for payload in payloads {
-            let offset = self
-                .next_offset
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            guard.push(KafkaMessage::new(
-                None,
-                payload,
-                CompactString::from(topic),
-                0,
-                offset,
-                None,
-                KafkaToken::new(Arc::from(topic), 0, offset),
-            ));
-        }
-    }
-
-    /// Receive messages (drains injected messages)
-    ///
-    /// # Panics
-    ///
-    /// Panics when the message mutex is poisoned.
-    pub fn recv(&self, max_messages: usize) -> Vec<KafkaMessage> {
-        let mut guard = self.messages.lock().expect("lock poisoned");
-        let count = max_messages.min(guard.len());
-        guard.drain(..count).collect()
-    }
-
-    /// Commit is a no-op for memory transport
-    pub fn commit(&self, _offsets: Vec<KafkaOffset>) {
-        // No-op
-    }
-}
-
-#[cfg(any(test, feature = "transport-memory"))]
-impl Default for MemoryTransportAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -5,8 +5,8 @@
 //!
 //! Produces realistic Kafka messages so a running, PGO-instrumented
 //! `dfe-archiver` accumulates representative profile data across its hot
-//! path: Kafka consume → SIMD JSON route lookup → buffer accumulation →
-//! compression (zstd) → storage write (file/S3).
+//! path: Kafka consume -> SIMD JSON route lookup -> buffer accumulation ->
+//! compression (zstd) -> storage write (file/S3).
 //!
 //! Invoked by `scripts/pgo-workload.sh` which owns the Kafka testcontainer
 //! lifecycle, the destination filesystem, and the archiver process.
@@ -14,12 +14,12 @@
 //! Built only with `--features pgo-driver`. Main archiver binary unaffected.
 //!
 //! Configuration via environment variables:
-//! - `PGO_DRIVER_DURATION_SECS` (default 300) — total runtime
+//! - `PGO_DRIVER_DURATION_SECS` (default 300) -- total runtime
 //! - `PGO_DRIVER_BROKERS` (default `127.0.0.1:19092`)
-//! - `PGO_DRIVER_TOPIC` (default `events`) — target topic
-//! - `PGO_DRIVER_RPS` (default 5000) — messages per second
-//! - `PGO_DRIVER_BATCH_LINGER_MS` (default 10) — librdkafka batching
-//! - `PGO_DRIVER_ORG_CARDINALITY` (default 32) — distinct routing keys
+//! - `PGO_DRIVER_TOPIC` (default `events`) -- target topic
+//! - `PGO_DRIVER_RPS` (default 5000) -- messages per second
+//! - `PGO_DRIVER_BATCH_LINGER_MS` (default 10) -- librdkafka batching
+//! - `PGO_DRIVER_ORG_CARDINALITY` (default 32) -- distinct routing keys
 //!
 //! Exit codes:
 //! - 0: workload completed for full duration
@@ -263,7 +263,7 @@ async fn produce_loop(
 }
 
 // ===========================================================================
-// Payload corpora — exercise route lookup, header extraction, compression
+// Payload corpora -- exercise route lookup, header extraction, compression
 // ===========================================================================
 
 fn build_payloads(shape: PayloadShape, org_cardinality: u32) -> Vec<Vec<u8>> {
@@ -296,7 +296,7 @@ fn small_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
 
 fn medium_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
     // ~1-2 KB events with nested objects to exercise sonic-rs nested paths
-    // and zstd block-level dictionaries (similar fields → high compression).
+    // and zstd block-level dictionaries (similar fields -> high compression).
     let mut out = Vec::new();
     for org in 0..org_cardinality {
         let s = format!(
@@ -313,7 +313,7 @@ fn medium_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
 }
 
 fn large_payloads(org_cardinality: u32) -> Vec<Vec<u8>> {
-    // ~8 KB events with array of 50 sub-records — exercises buffer
+    // ~8 KB events with array of 50 sub-records -- exercises buffer
     // accumulator over varied-size writes and gives zstd a meaningful
     // compressible block.
     let mut out = Vec::new();
