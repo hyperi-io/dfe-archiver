@@ -3,6 +3,23 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.7.54](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.53...v1.7.54) (2026-11-28)
+
+### What's Changed
+* fix(deps): replace chrono with jiff and std by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/195
+* fix(pgo): use the configured shutdown grace by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/199
+* fix(pgo): drop the script's profraw check by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/200
+* fix(deps): update redpandadata/redpanda Docker tag to v26.2.7 by @renovate[bot] in https://github.com/hyperi-io/dfe-archiver/pull/196
+* fix(deps): update rust-dependencies by @renovate[bot] in https://github.com/hyperi-io/dfe-archiver/pull/197
+* fix(deps): update Rust crate aws-sdk-s3 to >=1.159.0, <2 by @renovate[bot] in https://github.com/hyperi-io/dfe-archiver/pull/198
+* fix: rebuild on scalo 2.14.34 by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/201
+* fix: rebuild on scalo 2.14.36 by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/202
+* fix: rebuild on scalo 2.14.37 by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/203
+* fix: rebuild on scalo 2.14.38 by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/204
+* fix: rebuild on scalo 2.14.39 by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/205
+* fix(tls): move the Kafka CA to scalo's tls section by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/206
+* fix: bound the drain and narrow store refusals by @catinspace-au in https://github.com/hyperi-io/dfe-archiver/pull/207
+
 ## [1.7.53](https://github.com/hyperi-io/dfe-archiver/compare/v1.7.52...v1.7.53) (2026-11-23)
 
 ### What's Changed
